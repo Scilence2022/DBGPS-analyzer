@@ -1,137 +1,155 @@
-# DBGPS2
+# DBGPS-analyzer: DNA Information Storage Data Quality Analyzer
 
-DBGPS2 is a collection of tools for DNA data storage analysis and processing, with a focus on sequence assembly, cross-link detection, and coverage analysis.
+A specialized suite of high-performance tools for **data quality analysis in DNA information storage systems**. This repository provides tools to calculate sequencing metrics, detect inter-strand cross-links, and filter out entangled sequences.
 
-## Overview
+This codebase was split out from the original DBGPS DNA information storage encoding/decoding framework, extracting and optimizing the components specifically designed for quality control, coverage analysis, and data filtering.
 
-This project provides software tools for analyzing and reconstructing DNA sequences from data storage systems. The main components are:
+---
 
-- **DBGPS2**: A read-length constrained sequence assembler with dynamic coverage ratio support (formerly DBGPS-dy2-rl)
-- **DBGPS-analyzer**: Tool for calculating key sequencing metrics (Sm, Kn, Kd values)
-- **DBGPS-links**: Analyzer for detecting cross-links between DNA strands
-- **DBGPS-seq-filter**: Filter to screen out entangled strands (also known as DBGPS-ft)
+## Table of Contents
+1. [Overview of Tools](#overview-of-tools)
+2. [Workflow & Theory](#workflow--theory)
+3. [Installation & Building](#installation--building)
+4. [Tool Guides & Usage](#tool-guides--usage)
+   - [DBGPS-analyzer](#dbgps-analyzer)
+   - [DBGPS-links](#dbgps-links)
+   - [DBGPS-seq-filter](#dbgps-seq-filter)
+5. [License](#license)
 
-## Installation
+---
+
+## Overview of Tools
+
+This project consists of three core C-based command-line utilities:
+
+1. **`DBGPS-analyzer`** (implemented in [DBGPS-analyzer.c](file:///Users/song/Github-Repos/DBGPS-analyzer/DBGPS-analyzer.c)): Evaluates sequencing datasets against expected target strands, calculating critical quality metrics such as strand recovery rate ($S_m$), k-mer noise ratio ($K_n$), and k-mer dropout rate ($K_d$).
+2. **`DBGPS-links`** (implemented in [DBGPS-links.c](file:///Users/song/Github-Repos/DBGPS-analyzer/DBGPS-links.c)): Detects and counts cross-links between DNA strands to identify repeated patterns and sequence entanglement.
+3. **`DBGPS-seq-filter`** (implemented in [DBGPS-seq-filter.c](file:///Users/song/Github-Repos/DBGPS-analyzer/DBGPS-seq-filter.c)): Screens out and filters entangled or highly cross-linked strands to prepare sequencing data for cleaner assembly.
+
+---
+
+## Workflow & Theory
+
+In DNA data storage, errors and bias in synthesis, PCR amplification, and sequencing lead to uneven coverage, dropout, and chimera formation (strand entanglement). These tools help evaluate and filter sequencing data:
+
+### Key Metrics
+- **Strand Recovery Rate ($S_m$)**: The percentage of target DNA strands that are fully covered by sequencing reads (given a coverage ratio threshold).
+- **k-mer Dropout Rate ($K_d$)**: The proportion of expected k-mers from the target sequences that are missing in the sequencing reads.
+- **k-mer Noise Ratio ($K_n$)**: The ratio of noise k-mers (observed in the sequencing data but not belonging to the target sequences) to the valid target k-mers.
+
+---
+
+## Installation & Building
 
 ### Prerequisites
+- GCC compiler supporting C99/C++11
+- `zlib` development libraries (for reading compressed `.gz` files)
+- POSIX threads (`pthread`)
 
-- GCC compiler
-- zlib development libraries
-
-### Building the software
-
-Clone this repository and build using make:
-
-```
-git clone https://github.com/your-username/DBGPS2.git
-cd DBGPS2
+### Building the Software
+Clone this repository and compile using the [Makefile](file:///Users/song/Github-Repos/DBGPS-analyzer/Makefile):
+```bash
+git clone https://github.com/your-username/DBGPS-analyzer.git
+cd DBGPS-analyzer
 make
 ```
 
-To build individual components:
-
-```
-make DBGPS2
+To compile individual tools:
+```bash
 make DBGPS-analyzer
 make DBGPS-links
 make DBGPS-seq-filter
 ```
 
-## Tool Descriptions
+---
 
-### DBGPS2
-
-A read-length constrained sequence assembler with dynamic coverage ratio handling.
-
-#### Features
-- Skip option for skipping initial ratio checks at specified positions
-- Output prefix option for log and strands files
-- Ratio range iteration support
-- Improved path finding algorithm
-
-#### Usage
-```
-DBGPS2 [options] <input file>
-                  [Supporting formats: *fq, *fa, *fq.gz, *fa.gz]
-
-Options:
-  -k INT     k-mer size
-  -i INT     length of index
-  -l INT     data encoding length
-  -t INT     number of threads
-  -c INT     k-mer coverage cut-off for exclusion of noise k-mers
-  -C INT     Switch on k-mer coverage testing mode
-  -a INT     Initial index
-  -b INT     End index
-  -r FLOAT   Maximum coverage ratio
-  -R FLOAT   Upper bound for ratio range iteration (0 = disabled)
-  -s INT     Number of initial positions to skip ratio checks for
-  -o STR     Output prefix for log file and strands file
-```
+## Tool Guides & Usage
 
 ### DBGPS-analyzer
 
-Analyzer tool for calculating sequencing metrics like Sm, Kn, and Kd values.
+Computes coverage metrics ($S_m$, $K_n$, $K_d$) by comparing a pool of target/designed strands with NGS sequencing files.
 
 #### Features
-- Output prefix specification for log files
-- Coverage ratio range iteration
-- Parametrized read length and max coverage settings
+- Support for multi-threaded k-mer counting.
+- Coverage ratio range iteration and step size control.
+- Output prefix options for logs, coverage details, coverage ratios, ratio ranges, and $S_m, K_d, K_n$ values.
 
 #### Usage
-```
+```bash
 DBGPS-analyzer [options] <Strand seq file> <NGS files>
-                         [Supporting formats: *fq, *fa, *fq.gz, *fa.gz]
-
-Options:
-  -k INT     k-mer size
-  -t INT     number of threads
-  -L INT     Maximal read length for k-mer counting
-  -r FLOAT   Maximum coverage ratio (0 = no limitation)
-  -R FLOAT   Upper bound for ratio range iteration
-  -c INT     Minimum coverage cutoff
-  -C INT     Maximum coverage cutoff
-  -s INT     Number of initial ratio values to skip
-  -o STR     Output prefix for additional files
 ```
+*Supported formats: `.fa`, `.fq`, `.fa.gz`, `.fq.gz`*
+
+#### Options
+| Option | Argument | Description | Default |
+|:---|:---|:---|:---|
+| `-k` | `INT` | k-mer size | `31` |
+| `-t` | `INT` | Number of threads for multi-threading | `3` |
+| `-L` | `INT` | Maximum read length for k-mer counting | `200` |
+| `-r` | `FLOAT` | Maximum coverage ratio (0 = no limitation) | `0.0` |
+| `-R` | `FLOAT` | Upper bound for coverage ratio range iteration | `0.0` |
+| `-I` | `FLOAT` | Step size for coverage ratio iteration | `0.20` |
+| `-c` | `INT` | Minimum coverage cutoff | `0` |
+| `-C` | `INT` | Maximum coverage cutoff | `0` |
+| `-s` | `INT` | Number of initial ratio values to ignore | `0` |
+| `-o` | `STR` | Output prefix for additional files | `None` |
+
+#### Output Files (when using `-o STR`)
+- `STR.cov_details`: Detailed k-mer coverage values per strand.
+- `STR.cov_ratios`: Calculated inter-k-mer coverage ratios per strand.
+- `STR.ratio_ranges`: Aggregated minimum and maximum ratios tracked.
+- `STR.SmKdKn`: Complete tab-delimited table of calculated $S_m$, $K_d$, and $K_n$ metrics.
+
+---
 
 ### DBGPS-links
 
-Analyzer for detecting cross-links between DNA strands in a dataset.
+Analyzes DNA strands in a FASTA dataset to find and count cross-links. A cross-link is defined as a k-mer shared by different strands, indicating sequence overlap or entanglement.
 
 #### Usage
-```
+```bash
 DBGPS-links [options] <in.fa>
-
-Options:
-  -k INT     k-mer size [31]
-  -m INT     max link number [1]
 ```
+
+#### Options
+| Option | Argument | Description | Default |
+|:---|:---|:---|:---|
+| `-k` | `INT` | k-mer size | `31` |
+| `-m` | `INT` | Maximum link occurrence threshold to evaluate | `1` |
+
+> [!NOTE]
+> It is recommended to remove primers from the sequences before counting cross-links to prevent false positives from shared primer regions.
+
+---
 
 ### DBGPS-seq-filter
 
-Filter tool to screen out entangled strands from DNA data. This tool identifies and removes strands with more than a specified number of cross-links, helping to improve sequence quality.
+A primer-aware filter tool designed to screen out entangled strands from DNA datasets. It identifies and filters out strands that exceed a specified cross-link (shared k-mer) threshold, improving the quality of the sequence pool.
 
 #### Features
-- Primer-aware analysis that excludes primer regions from k-mer analysis
-- Configurable k-mer size for entanglement detection
-- Option to output either passed or filtered sequences
+- **Primer-Aware**: Automatically ignores primer regions of a specified length at both ends of the strands during k-mer analysis.
+- **Configurable Thresholds**: Define maximum tolerable cross-links.
+- **Flexible Output**: Option to output either the passed sequences (for downstream assembly) or the filtered sequences (for diagnostics).
 
 #### Usage
-```
+```bash
 DBGPS-seq-filter [options] <in.fa>
-
-Options:
-  -k INT     k-mer size for entangle analysis [31]
-  -m INT     Maximal strand cross-links [0]
-  -p INT     Length of primers [18]
-  -s         Output passed sequences instead of filtered ones
 ```
+
+#### Options
+| Option | Argument | Description | Default |
+|:---|:---|:---|:---|
+| `-k` | `INT` | k-mer size for entanglement analysis | `31` |
+| `-m` | `INT` | Maximum allowed cross-links per strand | `0` |
+| `-p` | `INT` | Length of primers to ignore at both ends | `18` |
+| `-s` | `None` | Output passed sequences (FASTA) instead of names of filtered ones | *(Enabled by default)* |
+
+---
 
 ## License
 
-This project is licensed under the terms in the LICENSE file.
+This project is licensed under the terms described in the [LICENSE](file:///Users/song/Github-Repos/DBGPS-analyzer/LICENSE) file.
 
 ## Author
 
-Lifu Song (lifu.song@outlook.com)
+**Lifu Song** (lifu.song@outlook.com)

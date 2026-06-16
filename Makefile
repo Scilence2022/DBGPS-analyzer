@@ -1,7 +1,7 @@
 CFLAGS=-g -Wall -O3
 CXXFLAGS=$(CFLAGS) -std=c++11
 LIBS=-lz
-PROG=DBGPS-analyzer DBGPS-links DBGPS2 DBGPS-seq-filter
+PROG=DBGPS-analyzer DBGPS-links DBGPS-seq-filter
 
 ifneq ($(asan),)
 	CFLAGS+=-fsanitize=address
@@ -25,16 +25,6 @@ DBGPS-analyzer:DBGPS-analyzer.c khashl.h ketopt.h kseq.h kthread.h
 DBGPS-links:DBGPS-links.c khashl.h ketopt.h kseq.h kthread.h
 	$(CC) $(CFLAGS) -o $@ DBGPS-links.c kthread.c $(LIBS) -lpthread
 
-# DBGPS2: Read-Length constrained version with dynamic coverage ratio support
-# Previously DBGPS-dy2-rl
-# Features:
-# - Skip option for initial ratio checks
-# - Output prefix option for log and strands files
-# - Ratio range iteration support
-# - Improved path finding algorithm
-DBGPS2:DBGPS2.c khashl.h ketopt.h kseq.h kthread.h
-	$(CC) $(CFLAGS) -o $@ DBGPS2.c kthread.c $(LIBS) -lpthread
-
 # DBGPS-seq-filter: Filter to screen out entangled strands
 # Also known as DBGPS-ft
 DBGPS-seq-filter:DBGPS-seq-filter.c khashl.h ketopt.h kseq.h kthread.h
@@ -43,7 +33,7 @@ DBGPS-seq-filter:DBGPS-seq-filter.c khashl.h ketopt.h kseq.h kthread.h
 clean:
 	rm -fr *.dSYM $(PROG)
 
-# Build a specific version: make VERSION=DBGPS2
+# Build a specific version: make VERSION=DBGPS-analyzer
 VERSION?=all
 version:
 	$(MAKE) $(VERSION)
