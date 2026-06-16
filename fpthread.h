@@ -1,0 +1,16 @@
+#ifndef FPTHREAD_H
+#define FPTHREAD_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void fp_for(int n_threads, void (*func)(void*,long,int), void *data, long m, long n);
+
+//void kt_pipeline(int n_threads, void *(*func)(void*, int, void*), void *shared_data, int n_steps);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
