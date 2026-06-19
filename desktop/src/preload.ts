@@ -7,15 +7,33 @@ type AnalyzerConfig = {
   readLength: number;
 };
 
-type AiProvider = "local" | "openai" | "anthropic" | "openai-compatible";
+type ProviderId =
+  | "openai"
+  | "google"
+  | "anthropic"
+  | "glm"
+  | "kimi"
+  | "deepseek"
+  | "minimax-local"
+  | "minimax-global"
+  | "siliconflow"
+  | "openrouter"
+  | "local"
+  | "custom";
 
 type AiSettings = {
-  provider: AiProvider;
+  provider: ProviderId;
   model: string;
   apiKey?: string;
   baseUrl?: string;
   temperature?: number;
   maxTokens?: number;
+};
+
+type ProviderRefreshRequest = {
+  provider: ProviderId;
+  apiKey?: string;
+  baseUrl?: string;
 };
 
 type AiRequest = {
@@ -31,6 +49,8 @@ const api = {
   queryAnalyzer: (command: string) => ipcRenderer.invoke("analyzer:query", command) as Promise<unknown>,
   stopAnalyzer: () => ipcRenderer.invoke("analyzer:stop") as Promise<{ ok: boolean }>,
   aiDiagnose: (request: AiRequest) => ipcRenderer.invoke("ai:diagnose", request) as Promise<{ content: string; provider: string; model: string }>,
+  refreshProviderModels: (request: ProviderRefreshRequest) =>
+    ipcRenderer.invoke("ai:refreshModels", request) as Promise<{ models: string[]; provider: string; source: string }>,
   onAnalyzerEvent: (callback: (payload: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("analyzer:event", listener);
