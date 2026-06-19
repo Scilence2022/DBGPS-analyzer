@@ -202,7 +202,7 @@ class AnalyzerSession {
 function localDiagnosis(context: unknown, latestQuestion: string) {
   const data = context as Record<string, unknown> | null;
   if (!data || typeof data !== "object") {
-    return "请先运行一次 k-mer 或序列查询。当前没有足够的诊断上下文。";
+    return "Run a k-mer or sequence query first. There is not enough diagnostic context yet.";
   }
 
   if (data.type === "sequence") {
@@ -211,14 +211,14 @@ function localDiagnosis(context: unknown, latestQuestion: string) {
     const minCoverage = Number(data.minCoverage || 0);
     const maxRatio = Number(data.maxAdjacentRatio || 0);
     const complete = data.complete === true;
-    const coverageState = complete ? "路径完整" : `存在 ${missing} 个缺失 k-mer`;
+    const coverageState = complete ? "the path is complete" : `${missing} k-mers are missing`;
     return [
-      `基于当前序列路径：${coverageState}，已观测 k-mer 数为 ${observed}。`,
-      `最低覆盖度 ${minCoverage}，最大相邻覆盖度比值 ${maxRatio.toFixed(3)}。`,
+      `For the current sequence path, ${coverageState}; observed k-mers: ${observed}.`,
+      `Minimum coverage is ${minCoverage}; maximum adjacent coverage ratio is ${maxRatio.toFixed(3)}.`,
       missing > 0
-        ? "优先检查 coverage 为 0 的断点位置；这些位置通常对应 dropout、合成/测序错误或目标片段不存在。"
-        : "如果仍解码失败，下一步应看相邻覆盖度比值异常高的位置，它们可能提示局部扩增偏倚或路径分叉。",
-      latestQuestion ? `针对你的问题：${latestQuestion}` : ""
+        ? "Start with positions whose coverage is 0; they usually indicate dropout, synthesis/sequencing errors, or a missing target fragment."
+        : "If decoding still fails, inspect positions with unusually high adjacent coverage ratios; they can indicate local amplification bias or graph branching.",
+      latestQuestion ? `Regarding your question: ${latestQuestion}` : ""
     ].filter(Boolean).join("\n");
   }
 
@@ -227,21 +227,21 @@ function localDiagnosis(context: unknown, latestQuestion: string) {
     const inDegree = Number(data.inDegree || 0);
     const outDegree = Number(data.outDegree || 0);
     return [
-      `当前 k-mer 覆盖度为 ${coverage}，入度 ${inDegree}，出度 ${outDegree}。`,
+      `Current k-mer coverage is ${coverage}; in-degree is ${inDegree}; out-degree is ${outDegree}.`,
       coverage === 0
-        ? "该 k-mer 在测序表中未出现；如果它来自设计序列，说明此位置可能是 dropout 或存在测序错误。"
-        : "覆盖度非零，说明该节点存在于测序 De Bruijn Graph 中。",
+        ? "This k-mer was not observed in the sequencing table. If it comes from the designed sequence, this position may be a dropout or sequencing error."
+        : "Non-zero coverage means this node exists in the sequencing De Bruijn Graph.",
       inDegree + outDegree > 2
-        ? "邻接分支较多，建议检查上下游是否存在重复序列、交叉链接或噪声 k-mer。"
-        : "邻接关系较集中，路径歧义较低。"
+        ? "The neighborhood has multiple branches; inspect upstream/downstream repeats, cross-links, or noisy k-mers."
+        : "The neighborhood is concentrated, so path ambiguity is relatively low."
     ].join("\n");
   }
 
   if (data.type === "summary") {
-    return `当前 k=${data.k}，distinct k-mers=${data.distinctKmers}，累计覆盖=${data.totalKmerCoverage}。可继续查询目标 k-mer 或输入设计短片段做路径诊断。`;
+    return `Current k=${data.k}, distinct k-mers=${data.distinctKmers}, total coverage=${data.totalKmerCoverage}. Continue by querying a target k-mer or entering a designed strand for path diagnostics.`;
   }
 
-  return "当前结果类型暂不支持自动诊断，请提供 k-mer 或序列路径查询结果。";
+  return "This result type is not supported for automatic diagnosis yet. Provide a k-mer or sequence path query result.";
 }
 
 function extractResponsesText(payload: any) {
@@ -274,7 +274,7 @@ async function aiDiagnose(request: { messages?: Array<{ role: string; content: s
       input: [
         {
           role: "system",
-          content: "You are a DNA information storage sequencing quality diagnostician. Explain DBGPS k-mer graph evidence concisely in Chinese. Focus on coverage, dropout, path completeness, adjacent coverage ratio, and graph branching."
+          content: "You are a DNA information storage sequencing quality diagnostician. Explain DBGPS k-mer graph evidence concisely in English. Focus on coverage, dropout, path completeness, adjacent coverage ratio, and graph branching."
         },
         {
           role: "user",
@@ -287,7 +287,7 @@ async function aiDiagnose(request: { messages?: Array<{ role: string; content: s
 
   if (!response.ok) {
     const text = await response.text();
-    return { provider: "local", content: `${localDiagnosis(request.context, latestQuestion)}\n\nAI 服务返回错误：${text.slice(0, 400)}` };
+    return { provider: "local", content: `${localDiagnosis(request.context, latestQuestion)}\n\nAI service returned an error: ${text.slice(0, 400)}` };
   }
 
   const payload = await response.json();
