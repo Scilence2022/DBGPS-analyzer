@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <time.h>
+#include <string.h>
+#include <ctype.h>
+#include <sys/types.h>
 
 #include "ketopt.h" // command-line argument parser
 #include "kthread.h" // multi-threading models: pipeline and multi-threaded for loop
@@ -272,6 +275,16 @@ static kc_c4x_t *c4x_init(int p)
     for (i = 0; i < 1<<p; ++i)
         h->h[i] = kc_c4_init();
     return h;
+}
+
+static void c4x_destroy(kc_c4x_t *h)
+{
+    if (h == 0) return;
+    for (int i = 0; i < 1<<h->p; ++i) {
+        kc_c4_destroy(h->h[i]);
+    }
+    free(h->h);
+    free(h);
 }
 
 typedef struct {
@@ -951,11 +964,418 @@ int kc_c4x_t_kmers(kc_c4x_t *h, int p, int cov){
     return total_size;
 }
 
+static unsigned long long kc_c4x_total_abundance(kc_c4x_t *h)
+{
+    unsigned long long total = 0;
+    if (h == 0) return total;
+
+    for (int j = 0; j < 1<<h->p; ++j) {
+        kc_c4_t *g = h->h[j];
+        khint_t kk;
+        for (kk = 0; kk < kh_end(g); ++kk) {
+            if (kh_exist(g, kk)) {
+                total += (unsigned long long)(kh_key(g, kk) & KC_MAX);
+            }
+        }
+    }
+
+    return total;
+}
+
+static void json_string(FILE *fp, const char *s)
+{
+    fputc('"', fp);
+    for (const unsigned char *p = (const unsigned char*)s; *p; ++p) {
+        if (*p == '"' || *p == '\\') {
+            fputc('\\', fp);
+            fputc(*p, fp);
+        } else if (*p == '\n') {
+            fputs("\\n", fp);
+        } else if (*p == '\r') {
+            fputs("\\r", fp);
+        } else if (*p == '\t') {
+            fputs("\\t", fp);
+        } else if (*p < 32) {
+            fprintf(fp, "\\u%04x", *p);
+        } else {
+            fputc(*p, fp);
+        }
+    }
+    fputc('"', fp);
+}
+
+static void json_string_n(FILE *fp, const char *s, int n)
+{
+    fputc('"', fp);
+    for (int i = 0; i < n; ++i) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch == '"' || ch == '\\') {
+            fputc('\\', fp);
+            fputc(ch, fp);
+        } else if (ch == '\n') {
+            fputs("\\n", fp);
+        } else if (ch == '\r') {
+            fputs("\\r", fp);
+        } else if (ch == '\t') {
+            fputs("\\t", fp);
+        } else if (ch < 32) {
+            fprintf(fp, "\\u%04x", ch);
+        } else {
+            fputc(ch, fp);
+        }
+    }
+    fputc('"', fp);
+}
+
+static void emit_error_json(const char *message)
+{
+    fprintf(stdout, "{\"type\":\"error\",\"message\":");
+    json_string(stdout, message);
+    fprintf(stdout, "}\n");
+    fflush(stdout);
+}
+
+static char *trim_left(char *s)
+{
+    while (*s && isspace((unsigned char)*s)) ++s;
+    return s;
+}
+
+static void trim_right(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) {
+        s[--n] = '\0';
+    }
+}
+
+static int command_equals(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static char *normalize_dna_arg(const char *arg, int *out_len, char *err, size_t err_len)
+{
+    int n = 0;
+    char *seq;
+
+    if (arg == 0) {
+        snprintf(err, err_len, "missing DNA sequence argument");
+        return 0;
+    }
+
+    MALLOC(seq, strlen(arg) + 1);
+    for (const unsigned char *p = (const unsigned char*)arg; *p; ++p) {
+        if (isspace(*p)) continue;
+        unsigned char b = (unsigned char)toupper(*p);
+        if (b != 'A' && b != 'C' && b != 'G' && b != 'T') {
+            snprintf(err, err_len, "invalid DNA base '%c'; only A/C/G/T are supported", *p);
+            free(seq);
+            return 0;
+        }
+        seq[n++] = (char)b;
+    }
+
+    if (n == 0) {
+        snprintf(err, err_len, "empty DNA sequence argument");
+        free(seq);
+        return 0;
+    }
+
+    seq[n] = '\0';
+    *out_len = n;
+    return seq;
+}
+
+static int seq_path_kmers(uint64_t *kms, int k, int len, const char *seq)
+{
+    int i, l, km_num = 0;
+    uint64_t x[2], mask = (1ULL<<k*2) - 1, shift = (k - 1) * 2;
+    for (i = l = 0, x[0] = x[1] = 0; i < len; ++i) {
+        int c = seq_nt4_table[(uint8_t)seq[i]];
+        if (c < 4) {
+            x[0] = (x[0] << 2 | c) & mask;
+            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;
+            if (++l >= k) {
+                kms[km_num++] = x[0] < x[1]? x[0] : x[1];
+            }
+        } else {
+            l = 0;
+            x[0] = x[1] = 0;
+        }
+    }
+    return km_num;
+}
+
+static void emit_summary_json(kc_c4x_t *h, int k, int n_thread, int read_len)
+{
+    fprintf(stdout, "{\"type\":\"summary\",\"k\":%d,\"threads\":%d,\"readLength\":%d,", k, n_thread, read_len);
+    fprintf(stdout, "\"distinctKmers\":%d,", kc_c4x_t_size(h, h->p));
+    fprintf(stdout, "\"totalKmerCoverage\":%llu}\n", kc_c4x_total_abundance(h));
+    fflush(stdout);
+}
+
+static void emit_ready_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files)
+{
+    fprintf(stdout, "{\"type\":\"ready\",\"mode\":\"interactive\",\"k\":%d,\"threads\":%d,\"readLength\":%d,", k, n_thread, read_len);
+    fprintf(stdout, "\"distinctKmers\":%d,\"totalKmerCoverage\":%llu,\"files\":[", kc_c4x_t_size(h, h->p), kc_c4x_total_abundance(h));
+    for (int i = 0; i < file_count; ++i) {
+        if (i) fputc(',', stdout);
+        json_string(stdout, files[i]);
+    }
+    fprintf(stdout, "]}\n");
+    fflush(stdout);
+}
+
+static void emit_help_json(void)
+{
+    fprintf(stdout, "{\"type\":\"help\",\"commands\":[");
+    json_string(stdout, "summary");
+    fprintf(stdout, ",");
+    json_string(stdout, "kmer <ACGT...>");
+    fprintf(stdout, ",");
+    json_string(stdout, "sequence <ACGT...>");
+    fprintf(stdout, ",");
+    json_string(stdout, "exit");
+    fprintf(stdout, "]}\n");
+    fflush(stdout);
+}
+
+static void emit_neighbor_array(const char *label, const char *query, int k, uint64_t mask, kc_c4x_t *h, int upstream, int *degree)
+{
+    static const char bases[4] = {'A', 'C', 'G', 'T'};
+    char *neighbor;
+
+    MALLOC(neighbor, k + 1);
+    fprintf(stdout, "\"%s\":[", label);
+    *degree = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (upstream) {
+            neighbor[0] = bases[i];
+            memcpy(neighbor + 1, query, k - 1);
+        } else {
+            memcpy(neighbor, query + 1, k - 1);
+            neighbor[k - 1] = bases[i];
+        }
+        neighbor[k] = '\0';
+
+        uint64_t key = actgkmer_hashkey((unsigned char*)neighbor, (unsigned char)k);
+        int cov = kmer_cov(key, mask, h);
+        if (cov > 0) ++(*degree);
+
+        if (i) fputc(',', stdout);
+        fprintf(stdout, "{\"base\":\"%c\",\"kmer\":", bases[i]);
+        json_string(stdout, neighbor);
+        fprintf(stdout, ",\"coverage\":%d,\"present\":%s}", cov, cov > 0 ? "true" : "false");
+    }
+    fprintf(stdout, "]");
+    free(neighbor);
+}
+
+static void emit_kmer_query_json(kc_c4x_t *h, int k, const char *query)
+{
+    uint64_t mask = (1ULL<<k*2) - 1;
+    uint64_t key = actgkmer_hashkey((unsigned char*)query, (unsigned char)k);
+    char *canonical;
+    int in_degree = 0, out_degree = 0;
+
+    MALLOC(canonical, k + 1);
+    uint64_acgt(key, (unsigned char*)canonical, (unsigned char)k);
+    canonical[k] = '\0';
+
+    fprintf(stdout, "{\"type\":\"kmer\",\"query\":");
+    json_string(stdout, query);
+    fprintf(stdout, ",\"canonical\":");
+    json_string(stdout, canonical);
+    fprintf(stdout, ",\"coverage\":%d,", kmer_cov(key, mask, h));
+    emit_neighbor_array("upstream", query, k, mask, h, 1, &in_degree);
+    fprintf(stdout, ",");
+    emit_neighbor_array("downstream", query, k, mask, h, 0, &out_degree);
+    fprintf(stdout, ",\"inDegree\":%d,\"outDegree\":%d}\n", in_degree, out_degree);
+    fflush(stdout);
+
+    free(canonical);
+}
+
+static double coverage_ratio(int a, int b)
+{
+    if (a >= b && b > 0) return (double)a / b;
+    if (b > a && a > 0) return (double)b / a;
+    if (a == 0 && b == 0) return 1.0;
+    return 0.0;
+}
+
+static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int len)
+{
+    uint64_t mask = (1ULL<<k*2) - 1;
+    int km_num = len - k + 1;
+    uint64_t *kms;
+    int *coverages;
+    int observed = 0, missing = 0, min_cov = 0, max_cov = 0;
+    long long cov_sum = 0;
+    double max_ratio = 0.0;
+    char *canonical;
+
+    if (km_num <= 0) {
+        emit_error_json("sequence length must be at least k");
+        return;
+    }
+
+    MALLOC(kms, km_num);
+    MALLOC(coverages, km_num);
+    MALLOC(canonical, k + 1);
+
+    km_num = seq_path_kmers(kms, k, len, seq);
+    for (int i = 0; i < km_num; ++i) {
+        coverages[i] = kmer_cov(kms[i], mask, h);
+        if (i == 0 || coverages[i] < min_cov) min_cov = coverages[i];
+        if (i == 0 || coverages[i] > max_cov) max_cov = coverages[i];
+        if (coverages[i] > 0) ++observed;
+        else ++missing;
+        cov_sum += coverages[i];
+    }
+
+    for (int i = 0; i + 1 < km_num; ++i) {
+        double ratio = coverage_ratio(coverages[i], coverages[i + 1]);
+        if (ratio > max_ratio) max_ratio = ratio;
+    }
+
+    fprintf(stdout, "{\"type\":\"sequence\",\"length\":%d,\"k\":%d,\"kmerCount\":%d,", len, k, km_num);
+    fprintf(stdout, "\"observed\":%d,\"missing\":%d,\"complete\":%s,", observed, missing, missing == 0 ? "true" : "false");
+    fprintf(stdout, "\"minCoverage\":%d,\"maxCoverage\":%d,\"meanCoverage\":%.3f,\"maxAdjacentRatio\":%.3f,", min_cov, max_cov, km_num > 0 ? (double)cov_sum / km_num : 0.0, max_ratio);
+    fprintf(stdout, "\"coverages\":[");
+    for (int i = 0; i < km_num; ++i) {
+        if (i) fputc(',', stdout);
+        uint64_acgt(kms[i], (unsigned char*)canonical, (unsigned char)k);
+        canonical[k] = '\0';
+        fprintf(stdout, "{\"position\":%d,\"kmer\":", i);
+        json_string_n(stdout, seq + i, k);
+        fprintf(stdout, ",\"canonical\":");
+        json_string(stdout, canonical);
+        fprintf(stdout, ",\"coverage\":%d}", coverages[i]);
+    }
+    fprintf(stdout, "],\"ratios\":[");
+    for (int i = 0; i + 1 < km_num; ++i) {
+        if (i) fputc(',', stdout);
+        fprintf(stdout, "{\"position\":%d,\"ratio\":%.3f}", i, coverage_ratio(coverages[i], coverages[i + 1]));
+    }
+    fprintf(stdout, "]}\n");
+    fflush(stdout);
+
+    free(canonical);
+    free(coverages);
+    free(kms);
+}
+
+static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len)
+{
+    kc_c4x_t *h;
+    char *line = 0;
+    size_t line_cap = 0;
+    ssize_t line_len;
+    int file_count = argc - first_file;
+
+    if (file_count < 1) {
+        fprintf(stderr, "Error: interactive mode requires at least one NGS FASTA/FASTQ file\n");
+        return 1;
+    }
+    if (k < 1 || k > 31) {
+        fprintf(stderr, "Error: k-mer size must be in [1, 31] for the uint64_t k-mer index\n");
+        return 1;
+    }
+
+    fprintf(stderr, "Counting NGS file 1 ......\n");
+    h = count_file(argv[first_file], k, p, block_size, n_thread, read_len);
+    if (h == 0) {
+        fprintf(stderr, "Error: could not open NGS file %s\n", argv[first_file]);
+        return 1;
+    }
+
+    for (int i = first_file + 1; i < argc; ++i) {
+        kc_c4x_t *next;
+        fprintf(stderr, "Counting NGS file %d ......\n", i - first_file + 1);
+        next = count_file2(argv[i], h, k, p, block_size, n_thread, read_len);
+        if (next == 0) {
+            fprintf(stderr, "Error: could not open NGS file %s\n", argv[i]);
+            c4x_destroy(h);
+            return 1;
+        }
+        h = next;
+    }
+
+    emit_ready_json(h, k, n_thread, read_len, file_count, argv + first_file);
+
+    while ((line_len = getline(&line, &line_cap, stdin)) >= 0) {
+        char *cmd;
+        char *arg;
+        char err[160];
+        int seq_len = 0;
+        char *seq = 0;
+
+        (void)line_len;
+        trim_right(line);
+        cmd = trim_left(line);
+        if (*cmd == '\0') continue;
+
+        arg = cmd;
+        while (*arg && !isspace((unsigned char)*arg)) ++arg;
+        if (*arg) {
+            *arg++ = '\0';
+            arg = trim_left(arg);
+        }
+
+        if (command_equals(cmd, "exit") || command_equals(cmd, "quit")) {
+            fprintf(stdout, "{\"type\":\"bye\"}\n");
+            fflush(stdout);
+            break;
+        } else if (command_equals(cmd, "help")) {
+            emit_help_json();
+        } else if (command_equals(cmd, "summary")) {
+            emit_summary_json(h, k, n_thread, read_len);
+        } else if (command_equals(cmd, "kmer")) {
+            seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
+            if (seq == 0) {
+                emit_error_json(err);
+            } else if (seq_len != k) {
+                snprintf(err, sizeof(err), "kmer query length is %d, but k is %d", seq_len, k);
+                emit_error_json(err);
+            } else {
+                emit_kmer_query_json(h, k, seq);
+            }
+            free(seq);
+        } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
+            seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
+            if (seq == 0) {
+                emit_error_json(err);
+            } else if (seq_len < k) {
+                snprintf(err, sizeof(err), "sequence length is %d, but k is %d", seq_len, k);
+                emit_error_json(err);
+            } else {
+                emit_sequence_query_json(h, k, seq, seq_len);
+            }
+            free(seq);
+        } else {
+            snprintf(err, sizeof(err), "unknown command '%s'; use help for supported commands", cmd);
+            emit_error_json(err);
+        }
+    }
+
+    free(line);
+    c4x_destroy(h);
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
 
     int i, c, k = 31, p = KC_BITS, block_size = 10000000, n_thread = 3, min_cov_cut = 0, max_cov_cut=0;
     int read_len = 200;
+    int interactive = 0;
     double max_cov_ratio = 0.0; // No limitation on ratio by default
     double max_R = 0.0; // Upper bound for ratio range iteration
     double step_size = 0.20; // Default step size for ratio iteration
@@ -963,7 +1383,8 @@ int main(int argc, char *argv[])
     char *output_prefix = NULL;
 
     ketopt_t o = KETOPT_INIT;
-    while ((c = ketopt(&o, argc, argv, 1, "k:c:C:L:o:r:s:R:I:", 0)) >= 0) {
+    while ((c = ketopt(&o, argc, argv, 1, "ik:t:c:C:L:o:r:s:R:I:", 0)) >= 0) {
+        if (c == 'i') interactive = 1;
         if (c == 'k') k = atoi(o.arg);
         //else if (c == 'p') p = atoi(o.arg);
         else if (c == 't') n_thread = atoi(o.arg);
@@ -976,7 +1397,7 @@ int main(int argc, char *argv[])
         else if (c == 'R') max_R = atof(o.arg);
         else if (c == 'I') step_size = atof(o.arg);
     }
-    if (argc - o.ind < 1) {
+    if ((interactive && argc - o.ind < 1) || (!interactive && argc - o.ind < 2)) {
         fprintf(stderr, "\n************************************************************************\n");
         fprintf(stderr, "**                                                                    **\n");
         fprintf(stderr, "**                   Sm Kn Kd Caculator for DBGPS                     **\n");
@@ -985,8 +1406,10 @@ int main(int argc, char *argv[])
         fprintf(stderr, "**                                                                    **\n");
         fprintf(stderr, "************************************************************************\n\n");
         fprintf(stderr, "Usage: DBGPS-analyzer [options] <Strand seq file> <NGS files> \n");
+        fprintf(stderr, "       DBGPS-analyzer -i [options] <NGS files>\n");
         fprintf(stderr, "                       [Supporting formats: *fq, *fa, *fq.gz, *fa.gz]\n");
         fprintf(stderr, "Options:\n");
+        fprintf(stderr, "  -i         interactive JSON Lines diagnostics kernel mode\n");
         fprintf(stderr, "  -k INT     k-mer size [%d]\n", k);
         fprintf(stderr, "  -t INT     number of threads [%d]\n", n_thread);
         fprintf(stderr, "  -L INT     Maximal read length for k-mer counting [%d]\n", read_len);
@@ -1000,6 +1423,10 @@ int main(int argc, char *argv[])
         
         fprintf(stderr, "\n");
         return 1;
+    }
+
+    if (interactive) {
+        return run_interactive_kernel(argc, argv, o.ind, k, p, block_size, n_thread, read_len);
     }
 
     if(max_cov_cut < min_cov_cut){max_cov_cut = min_cov_cut;}
@@ -1189,5 +1616,3 @@ int main(int argc, char *argv[])
     free(h->h); free(h);
     return 0;
 }
-
-
