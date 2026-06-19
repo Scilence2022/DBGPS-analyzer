@@ -125,18 +125,34 @@ Supported commands:
 
 ### Electron Desktop App
 
-The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, dark/light styles, and an AI ChatBox with configurable LLM providers and models.
+The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, a Settings workspace, dark/light/system appearance modes, and a real AI ChatBox wired through the Electron main process.
 
-The ChatBox supports:
+The Settings workspace is organized into three tabs:
 
-| Provider | API shape | Required settings |
+| Tab | Purpose |
+|:---|:---|
+| Providers | Enable providers, configure API keys and base URLs, and refresh the available model catalog for each provider. |
+| Model Selection | Choose the active ChatBox provider, assign one model per enabled provider, and tune temperature and maximum tokens. |
+| Appearance | Switch between Light, Dark, and System styles. |
+
+The ChatBox can route diagnostics through these provider definitions:
+
+| Provider | API shape | Default base URL |
 |:---|:---|:---|
-| Local diagnostic | Offline rule-based diagnosis | None |
-| OpenAI Responses | `POST /v1/responses` | API key plus model; falls back to `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` when fields are empty |
-| Anthropic Messages | `POST /v1/messages` | API key plus model; falls back to `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, and `ANTHROPIC_BASE_URL` when fields are empty |
-| OpenAI-compatible | `POST /v1/chat/completions` | Base URL plus model; API key is optional for local providers and can fall back to `OPENAI_COMPATIBLE_API_KEY` |
+| OpenAI | Responses API | `https://api.openai.com/v1` |
+| Google | Gemini API | `https://generativelanguage.googleapis.com/v1beta` |
+| Anthropic | Messages API | `https://api.anthropic.com/v1` |
+| GLM | OpenAI-compatible chat completions | `https://open.bigmodel.cn/api/paas/v4` |
+| Kimi | OpenAI-compatible chat completions | `https://api.moonshot.cn/v1` |
+| DeepSeek | OpenAI-compatible chat completions | `https://api.deepseek.com/v1` |
+| MiniMax Local | OpenAI-compatible chat completions | `https://api.minimax.chat/v1` |
+| MiniMax Global | OpenAI-compatible chat completions | `https://api.minimaxi.chat/v1` |
+| SiliconFlow | OpenAI-compatible chat completions | `https://api.siliconflow.cn/v1` |
+| OpenRouter | OpenAI-compatible chat completions | `https://openrouter.ai/api/v1` |
+| Local | OpenAI-compatible chat completions | `http://localhost:11434/v1` |
+| Custom Endpoint | OpenAI-compatible chat completions | `http://localhost:8000/v1` |
 
-API keys entered in the UI are used for the current desktop session only. Provider, model, base URL, temperature, and token settings are stored in local app storage.
+Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. API keys entered in the UI are used for the current desktop session only. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage.
 
 ```bash
 cd desktop

@@ -30,8 +30,9 @@
             <i data-lucide="square"></i>
             <span>Stop</span>
           </button>
-          <button id="themeButton" class="icon-only" title="Toggle theme">
-            <i data-lucide="moon"></i>
+          <button id="settingsButton" class="icon-button" title="Open settings">
+            <i data-lucide="settings"></i>
+            <span>Settings</span>
           </button>
         </div>
       </header>
@@ -124,46 +125,6 @@
             </div>
             <span id="aiProvider" class="provider-pill">local</span>
           </div>
-          <form class="chat-settings" autocomplete="off">
-            <label>
-              <span>Provider</span>
-              <select id="providerSelect">
-                <option value="local">Local diagnostic</option>
-                <option value="openai">OpenAI Responses</option>
-                <option value="anthropic">Anthropic Messages</option>
-                <option value="openai-compatible">OpenAI-compatible</option>
-              </select>
-            </label>
-            <label>
-              <span>Model</span>
-              <input id="modelInput" list="modelPresets" type="text" value="offline-diagnostic" />
-              <datalist id="modelPresets">
-                <option value="offline-diagnostic"></option>
-                <option value="gpt-4.1-mini"></option>
-                <option value="gpt-4.1"></option>
-                <option value="gpt-4o-mini"></option>
-                <option value="claude-sonnet-4-5"></option>
-                <option value="claude-3-5-sonnet-latest"></option>
-                <option value="llama3.1"></option>
-              </datalist>
-            </label>
-            <label>
-              <span>API key</span>
-              <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Env fallback if empty" />
-            </label>
-            <label>
-              <span>Base URL</span>
-              <input id="baseUrlInput" type="url" placeholder="Provider default" />
-            </label>
-            <label>
-              <span>Temperature</span>
-              <input id="temperatureInput" type="number" min="0" max="2" step="0.1" value="0.2" />
-            </label>
-            <label>
-              <span>Max tokens</span>
-              <input id="maxTokensInput" type="number" min="128" step="128" value="900" />
-            </label>
-          </form>
           <div id="chatMessages" class="chat-messages">
             <div class="message assistant">Run a query and I will diagnose the current coverage and De Bruijn Graph adjacency evidence.</div>
           </div>
@@ -175,6 +136,102 @@
           </div>
         </aside>
       </main>
+
+      <section id="settingsPanel" class="settings-panel" hidden aria-label="Settings">
+        <div class="settings-window">
+          <nav class="settings-nav" aria-label="Settings tabs">
+            <div class="settings-title">
+              <i data-lucide="sliders-horizontal"></i>
+              <div>
+                <h2>Settings</h2>
+                <p>LLM providers, model routing, and appearance</p>
+              </div>
+            </div>
+            <button class="settings-tab-button active" data-settings-tab="providers">
+              <i data-lucide="server"></i>
+              <span>Providers</span>
+            </button>
+            <button class="settings-tab-button" data-settings-tab="models">
+              <i data-lucide="brain-circuit"></i>
+              <span>Model Selection</span>
+            </button>
+            <button class="settings-tab-button" data-settings-tab="appearance">
+              <i data-lucide="palette"></i>
+              <span>Appearance</span>
+            </button>
+          </nav>
+
+          <section class="settings-content">
+            <header class="settings-content-header">
+              <div>
+                <h2 id="settingsHeading">Providers</h2>
+                <p id="settingsSubheading">Configure provider credentials, endpoints, and model inventories.</p>
+              </div>
+              <button id="closeSettingsButton" class="icon-only" title="Close settings">
+                <i data-lucide="x"></i>
+              </button>
+            </header>
+
+            <div id="providersSettingsTab" class="settings-tab active">
+              <div class="settings-toolbar">
+                <div>
+                  <strong>Provider Registry</strong>
+                  <span>Enable providers, set endpoints, and refresh their model catalogs.</span>
+                </div>
+                <button id="refreshEnabledProvidersButton" class="icon-button">
+                  <i data-lucide="refresh-cw"></i>
+                  <span>Refresh enabled</span>
+                </button>
+              </div>
+              <div id="providerList" class="provider-list"></div>
+            </div>
+
+            <div id="modelsSettingsTab" class="settings-tab">
+              <div class="model-routing-panel">
+                <label>
+                  <span>Active ChatBox provider</span>
+                  <select id="activeProviderSelect"></select>
+                </label>
+                <label>
+                  <span>Temperature</span>
+                  <input id="temperatureInput" type="number" min="0" max="2" step="0.1" value="0.2" />
+                </label>
+                <label>
+                  <span>Max tokens</span>
+                  <input id="maxTokensInput" type="number" min="128" step="128" value="900" />
+                </label>
+              </div>
+              <div class="settings-toolbar compact">
+                <div>
+                  <strong>Per-provider model assignments</strong>
+                  <span>Assign a model for each enabled provider. The active provider controls ChatBox routing.</span>
+                </div>
+              </div>
+              <div id="modelAssignmentList" class="model-assignment-list"></div>
+            </div>
+
+            <div id="appearanceSettingsTab" class="settings-tab">
+              <div class="appearance-options">
+                <button class="appearance-card" data-theme-choice="light">
+                  <i data-lucide="sun"></i>
+                  <strong>Light</strong>
+                  <span>Bright interface for lab and office use.</span>
+                </button>
+                <button class="appearance-card" data-theme-choice="dark">
+                  <i data-lucide="moon"></i>
+                  <strong>Dark</strong>
+                  <span>Low-glare mode for long diagnostic sessions.</span>
+                </button>
+                <button class="appearance-card" data-theme-choice="system">
+                  <i data-lucide="monitor"></i>
+                  <strong>System</strong>
+                  <span>Follow the operating system appearance.</span>
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
     </div>
 
     <script src="./renderer.js"></script>

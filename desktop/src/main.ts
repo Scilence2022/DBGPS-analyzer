@@ -11,10 +11,24 @@ type AnalyzerConfig = {
   readLength: number;
 };
 
-type AiProvider = "local" | "openai" | "anthropic" | "openai-compatible";
+type ProviderId =
+  | "openai"
+  | "google"
+  | "anthropic"
+  | "glm"
+  | "kimi"
+  | "deepseek"
+  | "minimax-local"
+  | "minimax-global"
+  | "siliconflow"
+  | "openrouter"
+  | "local"
+  | "custom";
+
+type ProviderApiStyle = "openai-responses" | "google-gemini" | "anthropic-messages" | "openai-compatible";
 
 type AiSettings = {
-  provider?: AiProvider;
+  provider?: ProviderId;
   model?: string;
   apiKey?: string;
   baseUrl?: string;
@@ -22,10 +36,29 @@ type AiSettings = {
   maxTokens?: number;
 };
 
+type ProviderRefreshRequest = {
+  provider?: ProviderId;
+  apiKey?: string;
+  baseUrl?: string;
+};
+
 type AiRequest = {
   messages?: Array<{ role: string; content: string }>;
   context?: unknown;
   settings?: AiSettings;
+};
+
+type ProviderDefinition = {
+  id: ProviderId;
+  label: string;
+  apiStyle: ProviderApiStyle;
+  defaultBaseUrl: string;
+  defaultModel: string;
+  fallbackModels: string[];
+  apiKeyEnv?: string;
+  modelEnv?: string;
+  baseUrlEnv?: string;
+  apiKeyRequired: boolean;
 };
 
 type PendingQuery = {
@@ -39,6 +72,152 @@ let session: AnalyzerSession | null = null;
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const analyzerPath = path.join(repoRoot, "DBGPS-analyzer");
+
+const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
+  openai: {
+    id: "openai",
+    label: "OpenAI",
+    apiStyle: "openai-responses",
+    defaultBaseUrl: "https://api.openai.com/v1",
+    defaultModel: "gpt-4.1-mini",
+    fallbackModels: ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "o4-mini"],
+    apiKeyEnv: "OPENAI_API_KEY",
+    modelEnv: "OPENAI_MODEL",
+    baseUrlEnv: "OPENAI_BASE_URL",
+    apiKeyRequired: true
+  },
+  google: {
+    id: "google",
+    label: "Google",
+    apiStyle: "google-gemini",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    defaultModel: "gemini-2.5-flash",
+    fallbackModels: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    apiKeyEnv: "GOOGLE_API_KEY",
+    modelEnv: "GOOGLE_MODEL",
+    baseUrlEnv: "GOOGLE_BASE_URL",
+    apiKeyRequired: true
+  },
+  anthropic: {
+    id: "anthropic",
+    label: "Anthropic",
+    apiStyle: "anthropic-messages",
+    defaultBaseUrl: "https://api.anthropic.com/v1",
+    defaultModel: "claude-sonnet-4-5",
+    fallbackModels: ["claude-sonnet-4-5", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    modelEnv: "ANTHROPIC_MODEL",
+    baseUrlEnv: "ANTHROPIC_BASE_URL",
+    apiKeyRequired: true
+  },
+  glm: {
+    id: "glm",
+    label: "GLM",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    defaultModel: "glm-4.5",
+    fallbackModels: ["glm-4.5", "glm-4-plus", "glm-4-air"],
+    apiKeyEnv: "GLM_API_KEY",
+    modelEnv: "GLM_MODEL",
+    baseUrlEnv: "GLM_BASE_URL",
+    apiKeyRequired: true
+  },
+  kimi: {
+    id: "kimi",
+    label: "Kimi",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://api.moonshot.cn/v1",
+    defaultModel: "moonshot-v1-8k",
+    fallbackModels: ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    apiKeyEnv: "KIMI_API_KEY",
+    modelEnv: "KIMI_MODEL",
+    baseUrlEnv: "KIMI_BASE_URL",
+    apiKeyRequired: true
+  },
+  deepseek: {
+    id: "deepseek",
+    label: "DeepSeek",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://api.deepseek.com/v1",
+    defaultModel: "deepseek-chat",
+    fallbackModels: ["deepseek-chat", "deepseek-reasoner"],
+    apiKeyEnv: "DEEPSEEK_API_KEY",
+    modelEnv: "DEEPSEEK_MODEL",
+    baseUrlEnv: "DEEPSEEK_BASE_URL",
+    apiKeyRequired: true
+  },
+  "minimax-local": {
+    id: "minimax-local",
+    label: "MiniMax Local",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://api.minimax.chat/v1",
+    defaultModel: "MiniMax-Text-01",
+    fallbackModels: ["MiniMax-Text-01", "MiniMax-M1"],
+    apiKeyEnv: "MINIMAX_LOCAL_API_KEY",
+    modelEnv: "MINIMAX_LOCAL_MODEL",
+    baseUrlEnv: "MINIMAX_LOCAL_BASE_URL",
+    apiKeyRequired: true
+  },
+  "minimax-global": {
+    id: "minimax-global",
+    label: "MiniMax Global",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://api.minimaxi.chat/v1",
+    defaultModel: "MiniMax-Text-01",
+    fallbackModels: ["MiniMax-Text-01", "MiniMax-M1"],
+    apiKeyEnv: "MINIMAX_GLOBAL_API_KEY",
+    modelEnv: "MINIMAX_GLOBAL_MODEL",
+    baseUrlEnv: "MINIMAX_GLOBAL_BASE_URL",
+    apiKeyRequired: true
+  },
+  siliconflow: {
+    id: "siliconflow",
+    label: "SiliconFlow",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://api.siliconflow.cn/v1",
+    defaultModel: "Qwen/Qwen2.5-72B-Instruct",
+    fallbackModels: ["Qwen/Qwen2.5-72B-Instruct", "deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1"],
+    apiKeyEnv: "SILICONFLOW_API_KEY",
+    modelEnv: "SILICONFLOW_MODEL",
+    baseUrlEnv: "SILICONFLOW_BASE_URL",
+    apiKeyRequired: true
+  },
+  openrouter: {
+    id: "openrouter",
+    label: "OpenRouter",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    defaultModel: "openai/gpt-4.1-mini",
+    fallbackModels: ["openai/gpt-4.1-mini", "anthropic/claude-sonnet-4.5", "google/gemini-2.5-flash"],
+    apiKeyEnv: "OPENROUTER_API_KEY",
+    modelEnv: "OPENROUTER_MODEL",
+    baseUrlEnv: "OPENROUTER_BASE_URL",
+    apiKeyRequired: true
+  },
+  local: {
+    id: "local",
+    label: "Local",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "http://localhost:11434/v1",
+    defaultModel: "llama3.1",
+    fallbackModels: ["llama3.1", "qwen2.5", "deepseek-r1"],
+    modelEnv: "LOCAL_MODEL",
+    baseUrlEnv: "LOCAL_BASE_URL",
+    apiKeyRequired: false
+  },
+  custom: {
+    id: "custom",
+    label: "Custom Endpoint",
+    apiStyle: "openai-compatible",
+    defaultBaseUrl: "http://localhost:8000/v1",
+    defaultModel: "custom-model",
+    fallbackModels: ["custom-model"],
+    apiKeyEnv: "CUSTOM_LLM_API_KEY",
+    modelEnv: "CUSTOM_LLM_MODEL",
+    baseUrlEnv: "CUSTOM_LLM_BASE_URL",
+    apiKeyRequired: false
+  }
+};
 
 function sendWindow(channel: string, payload: unknown) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -216,105 +395,30 @@ class AnalyzerSession {
   }
 }
 
-function localDiagnosis(context: unknown, latestQuestion: string) {
-  const data = context as Record<string, unknown> | null;
-  if (!data || typeof data !== "object") {
-    return "Run a k-mer or sequence query first. There is not enough diagnostic context yet.";
-  }
-
-  if (data.type === "sequence") {
-    const missing = Number(data.missing || 0);
-    const observed = Number(data.observed || 0);
-    const minCoverage = Number(data.minCoverage || 0);
-    const maxRatio = Number(data.maxAdjacentRatio || 0);
-    const complete = data.complete === true;
-    const coverageState = complete ? "the path is complete" : `${missing} k-mers are missing`;
-    return [
-      `For the current sequence path, ${coverageState}; observed k-mers: ${observed}.`,
-      `Minimum coverage is ${minCoverage}; maximum adjacent coverage ratio is ${maxRatio.toFixed(3)}.`,
-      missing > 0
-        ? "Start with positions whose coverage is 0; they usually indicate dropout, synthesis/sequencing errors, or a missing target fragment."
-        : "If decoding still fails, inspect positions with unusually high adjacent coverage ratios; they can indicate local amplification bias or graph branching.",
-      latestQuestion ? `Regarding your question: ${latestQuestion}` : ""
-    ].filter(Boolean).join("\n");
-  }
-
-  if (data.type === "kmer") {
-    const coverage = Number(data.coverage || 0);
-    const inDegree = Number(data.inDegree || 0);
-    const outDegree = Number(data.outDegree || 0);
-    return [
-      `Current k-mer coverage is ${coverage}; in-degree is ${inDegree}; out-degree is ${outDegree}.`,
-      coverage === 0
-        ? "This k-mer was not observed in the sequencing table. If it comes from the designed sequence, this position may be a dropout or sequencing error."
-        : "Non-zero coverage means this node exists in the sequencing De Bruijn Graph.",
-      inDegree + outDegree > 2
-        ? "The neighborhood has multiple branches; inspect upstream/downstream repeats, cross-links, or noisy k-mers."
-        : "The neighborhood is concentrated, so path ambiguity is relatively low."
-    ].join("\n");
-  }
-
-  if (data.type === "summary") {
-    return `Current k=${data.k}, distinct k-mers=${data.distinctKmers}, total coverage=${data.totalKmerCoverage}. Continue by querying a target k-mer or entering a designed strand for path diagnostics.`;
-  }
-
-  return "This result type is not supported for automatic diagnosis yet. Provide a k-mer or sequence path query result.";
-}
-
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, "");
 }
 
+function providerDefinition(provider?: ProviderId) {
+  return provider && providerDefinitions[provider] ? providerDefinitions[provider] : providerDefinitions.openai;
+}
+
+function envValue(name?: string) {
+  return name ? process.env[name] || "" : "";
+}
+
 function normalizeAiSettings(settings?: AiSettings) {
-  const requestedProvider = settings?.provider;
-  const provider: AiProvider =
-    requestedProvider === "openai" ||
-    requestedProvider === "anthropic" ||
-    requestedProvider === "openai-compatible" ||
-    requestedProvider === "local"
-      ? requestedProvider
-      : "local";
+  const definition = providerDefinition(settings?.provider);
   const temperature = Number.isFinite(Number(settings?.temperature)) ? Number(settings?.temperature) : 0.2;
   const maxTokens = Number.isFinite(Number(settings?.maxTokens)) ? Math.max(128, Math.trunc(Number(settings?.maxTokens))) : 900;
-
-  if (provider === "local") {
-    return {
-      provider,
-      model: "offline-diagnostic",
-      apiKey: "",
-      baseUrl: "",
-      temperature,
-      maxTokens
-    };
-  }
-
-  if (provider === "openai") {
-    return {
-      provider,
-      model: (settings?.model || process.env.OPENAI_MODEL || "gpt-4.1-mini").trim(),
-      apiKey: (settings?.apiKey || process.env.OPENAI_API_KEY || "").trim(),
-      baseUrl: normalizeBaseUrl(settings?.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"),
-      temperature,
-      maxTokens
-    };
-  }
-
-  if (provider === "anthropic") {
-    return {
-      provider,
-      model: (settings?.model || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5").trim(),
-      apiKey: (settings?.apiKey || process.env.ANTHROPIC_API_KEY || "").trim(),
-      baseUrl: normalizeBaseUrl(settings?.baseUrl || process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com/v1"),
-      temperature,
-      maxTokens
-    };
-  }
-
   return {
-    provider,
-    model: (settings?.model || process.env.OPENAI_COMPATIBLE_MODEL || "llama3.1").trim(),
-    apiKey: (settings?.apiKey || process.env.OPENAI_COMPATIBLE_API_KEY || "").trim(),
-    baseUrl: normalizeBaseUrl(settings?.baseUrl || process.env.OPENAI_COMPATIBLE_BASE_URL || "http://localhost:11434/v1"),
+    provider: definition.id,
+    apiStyle: definition.apiStyle,
+    apiKeyRequired: definition.apiKeyRequired,
+    label: definition.label,
+    model: (settings?.model || envValue(definition.modelEnv) || definition.defaultModel).trim(),
+    apiKey: (settings?.apiKey || envValue(definition.apiKeyEnv)).trim(),
+    baseUrl: normalizeBaseUrl(settings?.baseUrl || envValue(definition.baseUrlEnv) || definition.defaultBaseUrl),
     temperature,
     maxTokens
   };
@@ -400,20 +504,100 @@ function extractAnthropicText(payload: any) {
   return chunks.join("\n").trim();
 }
 
-async function aiDiagnose(request: AiRequest) {
-  const latestQuestion = request.messages?.filter((message) => message.role === "user").at(-1)?.content || "";
-  const settings = normalizeAiSettings(request.settings);
+function extractGoogleText(payload: any) {
+  const parts = payload?.candidates?.[0]?.content?.parts || [];
+  return parts.map((part: any) => typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
+}
 
-  if (settings.provider === "local") {
-    return { provider: "local", model: settings.model, content: localDiagnosis(request.context, latestQuestion) };
+function uniqueModels(models: string[]) {
+  return Array.from(new Set(models.map((model) => model.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+}
+
+function parseOpenAiCompatibleModels(payload: any) {
+  return uniqueModels((payload?.data || []).map((item: any) => item.id || item.name || item.model));
+}
+
+function parseAnthropicModels(payload: any) {
+  return uniqueModels((payload?.data || []).map((item: any) => item.id || item.name));
+}
+
+function parseGoogleModels(payload: any) {
+  return uniqueModels((payload?.models || [])
+    .filter((item: any) => {
+      const methods = item?.supportedGenerationMethods;
+      return !Array.isArray(methods) || methods.includes("generateContent");
+    })
+    .map((item: any) => String(item.name || "").replace(/^models\//, ""))
+    .filter((name: string) => name && !name.toLowerCase().includes("embedding")));
+}
+
+async function getJson(url: string, headers: Record<string, string>, timeoutMs = 60000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { method: "GET", headers, signal: controller.signal });
+    const text = await response.text();
+    let payload: any = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = { text };
+      }
+    }
+
+    if (!response.ok) {
+      const detail = payload?.error?.message || payload?.message || payload?.text || response.statusText;
+      throw new Error(`Model refresh failed (${response.status}): ${String(detail).slice(0, 600)}`);
+    }
+
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refreshProviderModels(request: ProviderRefreshRequest) {
+  const definition = providerDefinition(request.provider);
+  const apiKey = (request.apiKey || envValue(definition.apiKeyEnv)).trim();
+  const baseUrl = normalizeBaseUrl(request.baseUrl || envValue(definition.baseUrlEnv) || definition.defaultBaseUrl);
+
+  if (definition.apiKeyRequired && !apiKey) {
+    throw new Error(`${definition.label} requires an API key before refreshing models.`);
   }
 
+  if (definition.apiStyle === "google-gemini") {
+    const query = apiKey ? `?key=${encodeURIComponent(apiKey)}` : "";
+    const payload = await getJson(`${baseUrl}/models${query}`, {});
+    return { provider: definition.id, source: "remote", models: parseGoogleModels(payload) };
+  }
+
+  if (definition.apiStyle === "anthropic-messages") {
+    const payload = await getJson(`${baseUrl}/models`, {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    });
+    return { provider: definition.id, source: "remote", models: parseAnthropicModels(payload) };
+  }
+
+  const headers: Record<string, string> = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const payload = await getJson(`${baseUrl}/models`, headers);
+  return { provider: definition.id, source: "remote", models: parseOpenAiCompatibleModels(payload) };
+}
+
+async function aiDiagnose(request: AiRequest) {
+  const settings = normalizeAiSettings(request.settings);
+
   requireSetting(settings.model, "Select or enter a model before sending an AI diagnosis request.");
+  if (settings.apiKeyRequired) {
+    requireSetting(settings.apiKey, `${settings.label} API key is required before sending an AI diagnosis request.`);
+  }
   const system = diagnosticSystemPrompt();
   const user = diagnosticUserPrompt(request);
 
-  if (settings.provider === "openai") {
-    requireSetting(settings.apiKey, "OpenAI API key is required. Enter one in AI settings or set OPENAI_API_KEY.");
+  if (settings.apiStyle === "openai-responses") {
     const payload = await postJson(`${settings.baseUrl}/responses`, {
       "Content-Type": "application/json",
       Authorization: `Bearer ${settings.apiKey}`
@@ -429,8 +613,23 @@ async function aiDiagnose(request: AiRequest) {
     return { provider: "openai", model: settings.model, content };
   }
 
-  if (settings.provider === "anthropic") {
-    requireSetting(settings.apiKey, "Anthropic API key is required. Enter one in AI settings or set ANTHROPIC_API_KEY.");
+  if (settings.apiStyle === "google-gemini") {
+    const payload = await postJson(`${settings.baseUrl}/models/${encodeURIComponent(settings.model)}:generateContent?key=${encodeURIComponent(settings.apiKey)}`, {
+      "Content-Type": "application/json"
+    }, {
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: "user", parts: [{ text: user }] }],
+      generationConfig: {
+        temperature: settings.temperature,
+        maxOutputTokens: settings.maxTokens
+      }
+    });
+    const content = extractGoogleText(payload);
+    if (!content) throw new Error("Google returned an empty response.");
+    return { provider: settings.provider, model: settings.model, content };
+  }
+
+  if (settings.apiStyle === "anthropic-messages") {
     const payload = await postJson(`${settings.baseUrl}/messages`, {
       "Content-Type": "application/json",
       "x-api-key": settings.apiKey,
@@ -461,8 +660,8 @@ async function aiDiagnose(request: AiRequest) {
     max_tokens: settings.maxTokens
   });
   const content = extractChatCompletionText(payload);
-  if (!content) throw new Error("OpenAI-compatible provider returned an empty response.");
-  return { provider: "openai-compatible", model: settings.model, content };
+  if (!content) throw new Error(`${settings.label} returned an empty response.`);
+  return { provider: settings.provider, model: settings.model, content };
 }
 
 function createWindow() {
@@ -521,6 +720,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("ai:diagnose", async (_event, request) => aiDiagnose(request));
+  ipcMain.handle("ai:refreshModels", async (_event, request) => refreshProviderModels(request));
 
   createWindow();
 });

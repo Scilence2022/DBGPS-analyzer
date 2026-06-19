@@ -63,10 +63,22 @@ type ChatMessage = {
   content: string;
 };
 
-type AiProvider = "local" | "openai" | "anthropic" | "openai-compatible";
+type ProviderId =
+  | "openai"
+  | "google"
+  | "anthropic"
+  | "glm"
+  | "kimi"
+  | "deepseek"
+  | "minimax-local"
+  | "minimax-global"
+  | "siliconflow"
+  | "openrouter"
+  | "local"
+  | "custom";
 
 type AiSettings = {
-  provider: AiProvider;
+  provider: ProviderId;
   model: string;
   apiKey?: string;
   baseUrl?: string;
@@ -74,34 +86,174 @@ type AiSettings = {
   maxTokens: number;
 };
 
-const AI_SETTINGS_STORAGE_KEY = "dbgps-ai-settings";
-
-const providerDefaults: Record<AiProvider, { label: string; model: string; baseUrl: string; apiKeyPlaceholder: string }> = {
-  local: {
-    label: "Local",
-    model: "offline-diagnostic",
-    baseUrl: "",
-    apiKeyPlaceholder: ""
-  },
-  openai: {
-    label: "OpenAI",
-    model: "gpt-4.1-mini",
-    baseUrl: "https://api.openai.com/v1",
-    apiKeyPlaceholder: "OPENAI_API_KEY if empty"
-  },
-  anthropic: {
-    label: "Anthropic",
-    model: "claude-sonnet-4-5",
-    baseUrl: "https://api.anthropic.com/v1",
-    apiKeyPlaceholder: "ANTHROPIC_API_KEY if empty"
-  },
-  "openai-compatible": {
-    label: "Compatible",
-    model: "llama3.1",
-    baseUrl: "http://localhost:11434/v1",
-    apiKeyPlaceholder: "Optional"
-  }
+type ProviderCatalogItem = {
+  id: ProviderId;
+  label: string;
+  region: string;
+  apiStyle: string;
+  defaultModel: string;
+  defaultBaseUrl: string;
+  models: string[];
+  apiKeyRequired: boolean;
+  envHint: string;
 };
+
+type ProviderSettings = {
+  enabled: boolean;
+  baseUrl: string;
+  models: string[];
+  selectedModel: string;
+  lastRefresh?: string;
+  refreshStatus?: string;
+};
+
+type AppSettings = {
+  activeProvider: ProviderId;
+  providers: Record<ProviderId, ProviderSettings>;
+  temperature: number;
+  maxTokens: number;
+  appearance: "light" | "dark" | "system";
+};
+
+const SETTINGS_STORAGE_KEY = "dbgps-settings-v3";
+
+const PROVIDERS: ProviderCatalogItem[] = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    region: "Global",
+    apiStyle: "Responses API",
+    defaultModel: "gpt-4.1-mini",
+    defaultBaseUrl: "https://api.openai.com/v1",
+    models: ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "o4-mini"],
+    apiKeyRequired: true,
+    envHint: "OPENAI_API_KEY"
+  },
+  {
+    id: "google",
+    label: "Google",
+    region: "Global",
+    apiStyle: "Gemini API",
+    defaultModel: "gemini-2.5-flash",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    apiKeyRequired: true,
+    envHint: "GOOGLE_API_KEY"
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    region: "Global",
+    apiStyle: "Messages API",
+    defaultModel: "claude-sonnet-4-5",
+    defaultBaseUrl: "https://api.anthropic.com/v1",
+    models: ["claude-sonnet-4-5", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+    apiKeyRequired: true,
+    envHint: "ANTHROPIC_API_KEY"
+  },
+  {
+    id: "glm",
+    label: "GLM",
+    region: "China",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "glm-4.5",
+    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    models: ["glm-4.5", "glm-4-plus", "glm-4-air"],
+    apiKeyRequired: true,
+    envHint: "GLM_API_KEY"
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    region: "China",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "moonshot-v1-8k",
+    defaultBaseUrl: "https://api.moonshot.cn/v1",
+    models: ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    apiKeyRequired: true,
+    envHint: "KIMI_API_KEY"
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    region: "Global",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "deepseek-chat",
+    defaultBaseUrl: "https://api.deepseek.com/v1",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    apiKeyRequired: true,
+    envHint: "DEEPSEEK_API_KEY"
+  },
+  {
+    id: "minimax-local",
+    label: "MiniMax Local",
+    region: "China",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "MiniMax-Text-01",
+    defaultBaseUrl: "https://api.minimax.chat/v1",
+    models: ["MiniMax-Text-01", "MiniMax-M1"],
+    apiKeyRequired: true,
+    envHint: "MINIMAX_LOCAL_API_KEY"
+  },
+  {
+    id: "minimax-global",
+    label: "MiniMax Global",
+    region: "International",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "MiniMax-Text-01",
+    defaultBaseUrl: "https://api.minimaxi.chat/v1",
+    models: ["MiniMax-Text-01", "MiniMax-M1"],
+    apiKeyRequired: true,
+    envHint: "MINIMAX_GLOBAL_API_KEY"
+  },
+  {
+    id: "siliconflow",
+    label: "SiliconFlow",
+    region: "China",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "Qwen/Qwen2.5-72B-Instruct",
+    defaultBaseUrl: "https://api.siliconflow.cn/v1",
+    models: ["Qwen/Qwen2.5-72B-Instruct", "deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1"],
+    apiKeyRequired: true,
+    envHint: "SILICONFLOW_API_KEY"
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    region: "Global",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "openai/gpt-4.1-mini",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    models: ["openai/gpt-4.1-mini", "anthropic/claude-sonnet-4.5", "google/gemini-2.5-flash"],
+    apiKeyRequired: true,
+    envHint: "OPENROUTER_API_KEY"
+  },
+  {
+    id: "local",
+    label: "Local",
+    region: "Local endpoint",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "llama3.1",
+    defaultBaseUrl: "http://localhost:11434/v1",
+    models: ["llama3.1", "qwen2.5", "deepseek-r1"],
+    apiKeyRequired: false,
+    envHint: "Optional"
+  },
+  {
+    id: "custom",
+    label: "Custom Endpoint",
+    region: "Custom API",
+    apiStyle: "OpenAI-compatible",
+    defaultModel: "custom-model",
+    defaultBaseUrl: "http://localhost:8000/v1",
+    models: ["custom-model"],
+    apiKeyRequired: false,
+    envHint: "Optional"
+  }
+];
+
+const PROVIDER_BY_ID = Object.fromEntries(PROVIDERS.map((provider) => [provider.id, provider])) as Record<ProviderId, ProviderCatalogItem>;
+const providerApiKeys: Partial<Record<ProviderId, string>> = {};
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -109,7 +261,7 @@ const elements = {
   statusText: $("statusText"),
   buildButton: $("buildButton") as HTMLButtonElement,
   stopButton: $("stopButton") as HTMLButtonElement,
-  themeButton: $("themeButton") as HTMLButtonElement,
+  settingsButton: $("settingsButton") as HTMLButtonElement,
   selectFilesButton: $("selectFilesButton") as HTMLButtonElement,
   fileList: $("fileList"),
   kInput: $("kInput") as HTMLInputElement,
@@ -128,10 +280,14 @@ const elements = {
   chatInput: $("chatInput") as HTMLTextAreaElement,
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
   aiProvider: $("aiProvider"),
-  providerSelect: $("providerSelect") as HTMLSelectElement,
-  modelInput: $("modelInput") as HTMLInputElement,
-  apiKeyInput: $("apiKeyInput") as HTMLInputElement,
-  baseUrlInput: $("baseUrlInput") as HTMLInputElement,
+  settingsPanel: $("settingsPanel"),
+  closeSettingsButton: $("closeSettingsButton") as HTMLButtonElement,
+  settingsHeading: $("settingsHeading"),
+  settingsSubheading: $("settingsSubheading"),
+  providerList: $("providerList"),
+  activeProviderSelect: $("activeProviderSelect") as HTMLSelectElement,
+  modelAssignmentList: $("modelAssignmentList"),
+  refreshEnabledProvidersButton: $("refreshEnabledProvidersButton") as HTMLButtonElement,
   temperatureInput: $("temperatureInput") as HTMLInputElement,
   maxTokensInput: $("maxTokensInput") as HTMLInputElement
 };
@@ -141,6 +297,7 @@ let analyzerReady = false;
 let queryMode: "kmer" | "sequence" = "kmer";
 let latestResult: AnalyzerResult | null = null;
 const chatMessages: ChatMessage[] = [];
+let appSettings: AppSettings = createDefaultSettings();
 
 function renderIcons() {
   createIcons({ icons });
@@ -172,75 +329,116 @@ function setStatus(text: string, state: "idle" | "running" | "error" = "idle") {
   document.body.dataset.status = state;
 }
 
-function providerLabel(provider: string) {
-  return providerDefaults[provider as AiProvider]?.label || provider;
+function createDefaultSettings(): AppSettings {
+  const providers = {} as Record<ProviderId, ProviderSettings>;
+  for (const provider of PROVIDERS) {
+    providers[provider.id] = {
+      enabled: ["openai", "anthropic", "google", "local"].includes(provider.id),
+      baseUrl: provider.defaultBaseUrl,
+      models: provider.models,
+      selectedModel: provider.defaultModel
+    };
+  }
+
+  return {
+    activeProvider: "openai",
+    providers,
+    temperature: 0.2,
+    maxTokens: 900,
+    appearance: "system"
+  };
 }
 
-function readStoredAiSettings(): Partial<AiSettings> {
+function mergeSettings(input: unknown): AppSettings {
+  const defaults = createDefaultSettings();
+  if (!input || typeof input !== "object") return defaults;
+  const stored = input as Partial<AppSettings>;
+  const providers = { ...defaults.providers };
+
+  for (const provider of PROVIDERS) {
+    const storedProvider = stored.providers?.[provider.id];
+    if (storedProvider) {
+      providers[provider.id] = {
+        ...providers[provider.id],
+        ...storedProvider,
+        models: Array.isArray(storedProvider.models) && storedProvider.models.length > 0 ? storedProvider.models : provider.models,
+        selectedModel: storedProvider.selectedModel || provider.defaultModel,
+        baseUrl: storedProvider.baseUrl || provider.defaultBaseUrl
+      };
+    }
+  }
+
+  if (!firstEnabledProvider(providers)) providers.openai.enabled = true;
+
+  const activeProvider = stored.activeProvider && providers[stored.activeProvider]?.enabled
+    ? stored.activeProvider
+    : firstEnabledProvider(providers) || defaults.activeProvider;
+  const appearance = stored.appearance === "light" || stored.appearance === "dark" || stored.appearance === "system" ? stored.appearance : "system";
+
+  return {
+    activeProvider,
+    providers,
+    temperature: Number.isFinite(Number(stored.temperature)) ? Number(stored.temperature) : defaults.temperature,
+    maxTokens: Number.isFinite(Number(stored.maxTokens)) ? Number(stored.maxTokens) : defaults.maxTokens,
+    appearance
+  };
+}
+
+function loadSettings() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(AI_SETTINGS_STORAGE_KEY) || "{}");
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed;
+    appSettings = mergeSettings(JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}"));
   } catch {
-    return {};
+    appSettings = createDefaultSettings();
+  }
+}
+
+function saveSettings() {
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
+}
+
+function enabledProviders() {
+  return PROVIDERS.filter((provider) => appSettings.providers[provider.id]?.enabled);
+}
+
+function firstEnabledProvider(providers: Record<ProviderId, ProviderSettings>) {
+  return PROVIDERS.find((provider) => providers[provider.id]?.enabled)?.id;
+}
+
+function ensureActiveProvider() {
+  if (!appSettings.providers[appSettings.activeProvider]?.enabled) {
+    appSettings.activeProvider = firstEnabledProvider(appSettings.providers) || "openai";
   }
 }
 
 function currentAiSettings(): AiSettings {
-  const provider = (elements.providerSelect.value || "local") as AiProvider;
-  const defaults = providerDefaults[provider];
-  const temperature = Number(elements.temperatureInput.value);
-  const maxTokens = Number(elements.maxTokensInput.value);
+  ensureActiveProvider();
+  const provider = appSettings.activeProvider;
+  const settings = appSettings.providers[provider];
   return {
     provider,
-    model: (elements.modelInput.value || defaults.model).trim(),
-    apiKey: elements.apiKeyInput.value.trim(),
-    baseUrl: (elements.baseUrlInput.value || defaults.baseUrl).trim(),
-    temperature: Number.isFinite(temperature) ? temperature : 0.2,
-    maxTokens: Number.isFinite(maxTokens) ? Math.max(128, Math.trunc(maxTokens)) : 900
+    model: settings.selectedModel || PROVIDER_BY_ID[provider].defaultModel,
+    apiKey: providerApiKeys[provider] || "",
+    baseUrl: settings.baseUrl || PROVIDER_BY_ID[provider].defaultBaseUrl,
+    temperature: appSettings.temperature,
+    maxTokens: appSettings.maxTokens
   };
 }
 
-function persistAiSettings() {
+function applyAppearance() {
+  const theme = appSettings.appearance === "system"
+    ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+    : appSettings.appearance;
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.appearance = appSettings.appearance;
+  document.querySelectorAll<HTMLButtonElement>(".appearance-card").forEach((button) => {
+    button.classList.toggle("active", button.dataset.themeChoice === appSettings.appearance);
+  });
+}
+
+function updateProviderBadge() {
   const settings = currentAiSettings();
-  const { apiKey: _apiKey, ...persisted } = settings;
-  localStorage.setItem(AI_SETTINGS_STORAGE_KEY, JSON.stringify(persisted));
-}
-
-function updateProviderControls(resetProviderDefaults = false) {
-  const provider = (elements.providerSelect.value || "local") as AiProvider;
-  const defaults = providerDefaults[provider];
-
-  if (resetProviderDefaults) {
-    elements.modelInput.value = defaults.model;
-    elements.baseUrlInput.value = defaults.baseUrl;
-    elements.apiKeyInput.value = "";
-  }
-
-  const isLocal = provider === "local";
-  elements.modelInput.disabled = isLocal;
-  elements.apiKeyInput.disabled = isLocal;
-  elements.baseUrlInput.disabled = isLocal;
-  elements.temperatureInput.disabled = isLocal;
-  elements.maxTokensInput.disabled = isLocal;
-  elements.apiKeyInput.placeholder = defaults.apiKeyPlaceholder;
-  elements.baseUrlInput.placeholder = defaults.baseUrl || "Provider default";
-  elements.aiProvider.textContent = defaults.label;
-  elements.aiProvider.title = currentAiSettings().model;
-}
-
-function initializeAiSettings() {
-  const stored = readStoredAiSettings();
-  const provider = (stored.provider && providerDefaults[stored.provider]) ? stored.provider : "local";
-  const defaults = providerDefaults[provider];
-
-  elements.providerSelect.value = provider;
-  elements.modelInput.value = stored.model || defaults.model;
-  elements.baseUrlInput.value = stored.baseUrl || defaults.baseUrl;
-  elements.temperatureInput.value = String(stored.temperature ?? 0.2);
-  elements.maxTokensInput.value = String(stored.maxTokens ?? 900);
-  elements.apiKeyInput.value = "";
-  updateProviderControls(false);
+  elements.aiProvider.textContent = PROVIDER_BY_ID[settings.provider].label;
+  elements.aiProvider.title = settings.model;
 }
 
 function appendLog(text: string) {
@@ -251,11 +449,164 @@ function appendLog(text: string) {
   elements.logView.scrollTop = elements.logView.scrollHeight;
 }
 
-function setTheme(theme: "light" | "dark") {
-  document.documentElement.dataset.theme = theme;
-  localStorage.setItem("dbgps-theme", theme);
-  elements.themeButton.innerHTML = theme === "dark" ? '<i data-lucide="sun"></i>' : '<i data-lucide="moon"></i>';
+function modelOptions(providerId: ProviderId, selectedModel: string) {
+  const models = appSettings.providers[providerId].models;
+  const allModels = models.includes(selectedModel) ? models : [selectedModel, ...models];
+  return allModels
+    .map((model) => `<option value="${escapeHtml(model)}" ${model === selectedModel ? "selected" : ""}>${escapeHtml(model)}</option>`)
+    .join("");
+}
+
+function renderProviderList() {
+  elements.providerList.innerHTML = PROVIDERS.map((provider) => {
+    const settings = appSettings.providers[provider.id];
+    const keyValue = providerApiKeys[provider.id] || "";
+    const status = settings.refreshStatus || `${settings.models.length} catalog models`;
+    const lastRefresh = settings.lastRefresh ? `Last refresh: ${escapeHtml(settings.lastRefresh)}` : "Not refreshed this session";
+
+    return `
+      <article class="provider-card" data-provider-id="${provider.id}">
+        <div class="provider-card-main">
+          <label class="provider-enabled">
+            <input type="checkbox" data-provider-enabled="${provider.id}" ${settings.enabled ? "checked" : ""} />
+            <span>
+              <strong>${escapeHtml(provider.label)}</strong>
+              <small>${escapeHtml(provider.region)} · ${escapeHtml(provider.apiStyle)}</small>
+            </span>
+          </label>
+          <span class="provider-status">${escapeHtml(status)}</span>
+        </div>
+        <div class="provider-fields">
+          <label>
+            <span>Base URL</span>
+            <input data-provider-base-url="${provider.id}" type="url" value="${escapeHtml(settings.baseUrl)}" />
+          </label>
+          <label>
+            <span>API key</span>
+            <input class="secret-input" data-provider-api-key="${provider.id}" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(keyValue)}" placeholder="${escapeHtml(provider.envHint)}" />
+          </label>
+          <button type="button" class="icon-button refresh-provider-button" data-refresh-provider="${provider.id}">
+            <i data-lucide="refresh-cw"></i>
+            <span>Refresh models</span>
+          </button>
+        </div>
+        <div class="model-chip-list">
+          ${settings.models.slice(0, 8).map((model) => `<code>${escapeHtml(model)}</code>`).join("")}
+          ${settings.models.length > 8 ? `<span class="chip-more">+${settings.models.length - 8}</span>` : ""}
+        </div>
+        <p class="provider-note">${lastRefresh}</p>
+      </article>
+    `;
+  }).join("");
   renderIcons();
+}
+
+function renderModelSelection() {
+  ensureActiveProvider();
+  elements.activeProviderSelect.innerHTML = enabledProviders()
+    .map((provider) => `<option value="${provider.id}" ${provider.id === appSettings.activeProvider ? "selected" : ""}>${escapeHtml(provider.label)}</option>`)
+    .join("");
+  elements.temperatureInput.value = String(appSettings.temperature);
+  elements.maxTokensInput.value = String(appSettings.maxTokens);
+
+  const enabled = enabledProviders();
+  elements.modelAssignmentList.innerHTML = enabled.length > 0
+    ? enabled.map((provider) => {
+        const settings = appSettings.providers[provider.id];
+        return `
+          <div class="model-assignment-row" data-provider-id="${provider.id}">
+            <div>
+              <strong>${escapeHtml(provider.label)}</strong>
+              <span>${escapeHtml(provider.apiStyle)} · ${settings.models.length} models</span>
+            </div>
+            <select data-model-assignment="${provider.id}">
+              ${modelOptions(provider.id, settings.selectedModel)}
+            </select>
+          </div>
+        `;
+      }).join("")
+    : `<div class="empty-settings">Enable at least one provider in the Providers tab.</div>`;
+}
+
+function renderSettings() {
+  ensureActiveProvider();
+  renderProviderList();
+  renderModelSelection();
+  applyAppearance();
+  updateProviderBadge();
+}
+
+function openSettings(tab = "providers") {
+  elements.settingsPanel.hidden = false;
+  selectSettingsTab(tab);
+  renderIcons();
+}
+
+function closeSettings() {
+  elements.settingsPanel.hidden = true;
+}
+
+function selectSettingsTab(tab: string) {
+  const titles: Record<string, { title: string; subtitle: string }> = {
+    providers: {
+      title: "Providers",
+      subtitle: "Configure provider credentials, endpoints, and model inventories."
+    },
+    models: {
+      title: "Model Selection",
+      subtitle: "Assign detailed model choices across enabled providers."
+    },
+    appearance: {
+      title: "Appearance",
+      subtitle: "Choose the desktop style used across the analyzer."
+    }
+  };
+  const active = titles[tab] ? tab : "providers";
+  elements.settingsHeading.textContent = titles[active].title;
+  elements.settingsSubheading.textContent = titles[active].subtitle;
+
+  document.querySelectorAll<HTMLButtonElement>(".settings-tab-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.settingsTab === active);
+  });
+  document.querySelectorAll<HTMLElement>(".settings-tab").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === `${active === "models" ? "models" : active}SettingsTab`);
+  });
+}
+
+async function refreshProviderModels(providerId: ProviderId) {
+  const provider = PROVIDER_BY_ID[providerId];
+  const settings = appSettings.providers[providerId];
+  settings.refreshStatus = "Refreshing...";
+  renderProviderList();
+
+  try {
+    const result = await window.dbgps.refreshProviderModels({
+      provider: providerId,
+      apiKey: providerApiKeys[providerId] || "",
+      baseUrl: settings.baseUrl
+    });
+    if (result.models.length === 0) {
+      settings.refreshStatus = "No models returned";
+    } else {
+      settings.models = result.models;
+      if (!settings.models.includes(settings.selectedModel)) settings.selectedModel = settings.models[0];
+      settings.lastRefresh = new Date().toLocaleString();
+      settings.refreshStatus = `${result.models.length} refreshed models`;
+    }
+    saveSettings();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    settings.refreshStatus = message;
+    appendLog(`${provider.label} model refresh failed: ${message}`);
+  }
+
+  renderSettings();
+}
+
+async function refreshEnabledProviders() {
+  for (const provider of enabledProviders()) {
+    await refreshProviderModels(provider.id);
+  }
 }
 
 function renderFileList() {
@@ -526,7 +877,7 @@ async function sendChat() {
       context: latestResult,
       settings: currentAiSettings()
     });
-    elements.aiProvider.textContent = providerLabel(result.provider);
+    elements.aiProvider.textContent = PROVIDER_BY_ID[result.provider as ProviderId]?.label || result.provider;
     elements.aiProvider.title = result.model;
     appendChat("assistant", result.content);
   } catch (error) {
@@ -534,15 +885,6 @@ async function sendChat() {
     appendChat("assistant", `Diagnosis failed: ${message}`);
   } finally {
     elements.sendChatButton.disabled = false;
-  }
-}
-
-function initializeTheme() {
-  const saved = localStorage.getItem("dbgps-theme");
-  if (saved === "light" || saved === "dark") {
-    setTheme(saved);
-  } else {
-    setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   }
 }
 
@@ -554,35 +896,82 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
   });
 });
 
-document.querySelector<HTMLFormElement>(".chat-settings")?.addEventListener("submit", (event) => {
-  event.preventDefault();
-});
-
 elements.selectFilesButton.addEventListener("click", selectFiles);
 elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
 elements.stopButton.addEventListener("click", stopAnalyzer);
 elements.queryButton.addEventListener("click", runQuery);
 elements.sendChatButton.addEventListener("click", sendChat);
-elements.themeButton.addEventListener("click", () => {
-  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+elements.settingsButton.addEventListener("click", () => openSettings("providers"));
+elements.closeSettingsButton.addEventListener("click", closeSettings);
+elements.settingsPanel.addEventListener("click", (event) => {
+  if (event.target === elements.settingsPanel) closeSettings();
 });
-elements.providerSelect.addEventListener("change", () => {
-  updateProviderControls(true);
-  persistAiSettings();
+document.querySelectorAll<HTMLButtonElement>(".settings-tab-button").forEach((button) => {
+  button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab || "providers"));
 });
-[
-  elements.modelInput,
-  elements.baseUrlInput,
-  elements.temperatureInput,
-  elements.maxTokensInput
-].forEach((input) => {
-  input.addEventListener("input", () => {
-    updateProviderControls(false);
-    persistAiSettings();
+elements.refreshEnabledProvidersButton.addEventListener("click", refreshEnabledProviders);
+elements.providerList.addEventListener("input", (event) => {
+  const target = event.target as HTMLInputElement;
+  const enabledProvider = target.dataset.providerEnabled as ProviderId | undefined;
+  const baseUrlProvider = target.dataset.providerBaseUrl as ProviderId | undefined;
+  const apiKeyProvider = target.dataset.providerApiKey as ProviderId | undefined;
+
+  if (enabledProvider) {
+    if (!target.checked && appSettings.providers[enabledProvider].enabled && enabledProviders().length === 1) {
+      target.checked = true;
+      appendLog("Keep at least one AI provider enabled.");
+      return;
+    }
+    appSettings.providers[enabledProvider].enabled = target.checked;
+    ensureActiveProvider();
+    saveSettings();
+    renderSettings();
+  } else if (baseUrlProvider) {
+    appSettings.providers[baseUrlProvider].baseUrl = target.value.trim();
+    saveSettings();
+  } else if (apiKeyProvider) {
+    providerApiKeys[apiKeyProvider] = target.value.trim();
+  }
+});
+elements.providerList.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-refresh-provider]");
+  if (button?.dataset.refreshProvider) refreshProviderModels(button.dataset.refreshProvider as ProviderId);
+});
+elements.activeProviderSelect.addEventListener("change", () => {
+  appSettings.activeProvider = elements.activeProviderSelect.value as ProviderId;
+  saveSettings();
+  renderSettings();
+});
+elements.modelAssignmentList.addEventListener("change", (event) => {
+  const select = event.target as HTMLSelectElement;
+  const providerId = select.dataset.modelAssignment as ProviderId | undefined;
+  if (!providerId) return;
+  appSettings.providers[providerId].selectedModel = select.value;
+  saveSettings();
+  renderSettings();
+});
+elements.temperatureInput.addEventListener("input", () => {
+  appSettings.temperature = Number(elements.temperatureInput.value) || 0.2;
+  saveSettings();
+});
+elements.maxTokensInput.addEventListener("input", () => {
+  appSettings.maxTokens = Math.max(128, Math.trunc(Number(elements.maxTokensInput.value) || 900));
+  saveSettings();
+});
+document.querySelectorAll<HTMLButtonElement>(".appearance-card").forEach((button) => {
+  button.addEventListener("click", () => {
+    const choice = button.dataset.themeChoice;
+    if (choice === "light" || choice === "dark" || choice === "system") {
+      appSettings.appearance = choice;
+      saveSettings();
+      applyAppearance();
+    }
   });
 });
-elements.apiKeyInput.addEventListener("input", () => updateProviderControls(false));
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (appSettings.appearance === "system") applyAppearance();
+});
 
 elements.queryInput.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") runQuery();
@@ -602,7 +991,7 @@ window.dbgps.onAnalyzerEvent((event) => {
   }
 });
 
-initializeTheme();
-initializeAiSettings();
+loadSettings();
+renderSettings();
 renderFileList();
 renderIcons();
