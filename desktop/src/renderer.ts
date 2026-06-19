@@ -143,7 +143,7 @@ function setTheme(theme: "light" | "dark") {
 
 function renderFileList() {
   if (selectedFiles.length === 0) {
-    elements.fileList.textContent = "未选择文件";
+    elements.fileList.textContent = "No files selected";
     return;
   }
   elements.fileList.innerHTML = selectedFiles
@@ -208,8 +208,8 @@ function renderKmerResult(data: KmerResult) {
       </div>
     </div>
     <div class="neighbor-grid">
-      ${renderNeighborTable("上游 k-mer", data.upstream)}
-      ${renderNeighborTable("下游 k-mer", data.downstream)}
+      ${renderNeighborTable("Upstream k-mers", data.upstream)}
+      ${renderNeighborTable("Downstream k-mers", data.downstream)}
     </div>
   `;
 }
@@ -218,7 +218,7 @@ function renderCoverageBars(data: SequenceResult) {
   const maxCoverage = Math.max(1, ...data.coverages.map((item) => item.coverage));
   const shown = data.coverages.slice(0, 180);
   return `
-    <div class="coverage-bars" aria-label="k-mer 覆盖度">
+    <div class="coverage-bars" aria-label="k-mer coverage">
       ${shown
         .map((item) => {
           const height = Math.max(4, Math.round((item.coverage / maxCoverage) * 100));
@@ -226,7 +226,7 @@ function renderCoverageBars(data: SequenceResult) {
         })
         .join("")}
     </div>
-    ${data.coverages.length > shown.length ? `<p class="table-note">显示前 ${shown.length} 个 k-mer，共 ${data.coverages.length} 个。</p>` : ""}
+    ${data.coverages.length > shown.length ? `<p class="table-note">Showing the first ${shown.length} of ${data.coverages.length} k-mers.</p>` : ""}
   `;
 }
 
@@ -268,7 +268,7 @@ function renderSequenceResult(data: SequenceResult) {
     <div class="result-grid">
       <div class="metric ${data.complete ? "metric-ok" : "metric-alert"}">
         <span>Path</span>
-        <strong>${data.complete ? "完整" : "断裂"}</strong>
+        <strong>${data.complete ? "Complete" : "Broken"}</strong>
       </div>
       <div class="metric">
         <span>Observed</span>
@@ -315,15 +315,15 @@ async function selectFiles() {
 
 async function buildAnalyzer() {
   elements.buildButton.disabled = true;
-  setStatus("正在构建 C 内核", "running");
+  setStatus("Building C kernel", "running");
   try {
     const result = await window.dbgps.buildAnalyzer();
     appendLog(result.log || "DBGPS-analyzer is up to date.");
-    setStatus("构建完成");
+    setStatus("Build complete");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(message);
-    setStatus("构建失败", "error");
+    setStatus("Build failed", "error");
   } finally {
     elements.buildButton.disabled = false;
   }
@@ -334,7 +334,7 @@ async function startAnalyzer() {
   if (selectedFiles.length === 0) return;
 
   setAnalyzerReady(false);
-  setStatus("正在加载测序 k-mer 表", "running");
+  setStatus("Loading sequencing k-mer table", "running");
   elements.startButton.disabled = true;
 
   try {
@@ -347,11 +347,11 @@ async function startAnalyzer() {
     renderSummary(ready);
     latestResult = ready;
     setAnalyzerReady(true);
-    setStatus("内核运行中", "running");
+    setStatus("Kernel running", "running");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(message);
-    setStatus("内核启动失败", "error");
+    setStatus("Kernel failed to start", "error");
     setAnalyzerReady(false);
     elements.startButton.disabled = false;
   }
@@ -361,7 +361,7 @@ async function stopAnalyzer() {
   await window.dbgps.stopAnalyzer();
   setAnalyzerReady(false);
   elements.startButton.disabled = false;
-  setStatus("内核已停止");
+  setStatus("Kernel stopped");
 }
 
 function buildQueryCommand() {
@@ -374,15 +374,15 @@ async function runQuery() {
   const command = buildQueryCommand();
   if (!command) return;
   elements.queryButton.disabled = true;
-  setStatus("正在查询", "running");
+  setStatus("Querying", "running");
   try {
     const result = (await window.dbgps.queryAnalyzer(command)) as AnalyzerResult;
     renderResult(result);
-    setStatus("内核运行中", "running");
+    setStatus("Kernel running", "running");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     renderResult({ type: "error", message });
-    setStatus("查询失败", "error");
+    setStatus("Query failed", "error");
   } finally {
     elements.queryButton.disabled = !analyzerReady;
   }
@@ -412,7 +412,7 @@ async function sendChat() {
     appendChat("assistant", result.content);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    appendChat("assistant", `诊断失败：${message}`);
+    appendChat("assistant", `Diagnosis failed: ${message}`);
   } finally {
     elements.sendChatButton.disabled = false;
   }
@@ -459,7 +459,7 @@ window.dbgps.onAnalyzerEvent((event) => {
   if (payload.kind === "exit") {
     setAnalyzerReady(false);
     elements.startButton.disabled = false;
-    setStatus(`内核退出：${payload.code ?? ""}`.trim());
+    setStatus(`Kernel exited: ${payload.code ?? ""}`.trim());
   }
 });
 

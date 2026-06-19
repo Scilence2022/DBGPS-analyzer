@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -18,19 +18,19 @@
           <div class="brand-mark">DB</div>
           <div>
             <h1>DBGPS Analyzer</h1>
-            <p id="statusText">内核未启动</p>
+            <p id="statusText">Kernel not running</p>
           </div>
         </div>
         <div class="top-actions">
-          <button id="buildButton" class="icon-button" title="构建 C 内核">
+          <button id="buildButton" class="icon-button" title="Build C kernel">
             <i data-lucide="refresh-cw"></i>
-            <span>构建</span>
+            <span>Build</span>
           </button>
-          <button id="stopButton" class="icon-button" title="停止内核" disabled>
+          <button id="stopButton" class="icon-button" title="Stop kernel" disabled>
             <i data-lucide="square"></i>
-            <span>停止</span>
+            <span>Stop</span>
           </button>
-          <button id="themeButton" class="icon-only" title="切换主题">
+          <button id="themeButton" class="icon-only" title="Toggle theme">
             <i data-lucide="moon"></i>
           </button>
         </div>
@@ -42,9 +42,9 @@
             <div class="file-picker">
               <button id="selectFilesButton" class="primary-button">
                 <i data-lucide="folder-open"></i>
-                <span>选择测序文件</span>
+                <span>Select sequencing files</span>
               </button>
-              <div id="fileList" class="file-list">未选择文件</div>
+              <div id="fileList" class="file-list">No files selected</div>
             </div>
             <div class="config-grid">
               <label>
@@ -52,16 +52,16 @@
                 <input id="kInput" type="number" min="1" max="31" value="31" />
               </label>
               <label>
-                <span>线程</span>
+                <span>Threads</span>
                 <input id="threadsInput" type="number" min="1" max="64" value="3" />
               </label>
               <label>
-                <span>读长上限</span>
+                <span>Read length limit</span>
                 <input id="readLengthInput" type="number" min="1" value="200" />
               </label>
               <button id="startButton" class="primary-button">
                 <i data-lucide="play"></i>
-                <span>启动内核</span>
+                <span>Start kernel</span>
               </button>
             </div>
           </section>
@@ -87,30 +87,30 @@
 
           <section class="query-band">
             <div class="query-header">
-              <div class="segmented" role="tablist" aria-label="查询类型">
+              <div class="segmented" role="tablist" aria-label="Query type">
                 <button class="active" data-mode="kmer" role="tab">k-mer</button>
-                <button data-mode="sequence" role="tab">序列路径</button>
+                <button data-mode="sequence" role="tab">Sequence path</button>
               </div>
               <button id="queryButton" class="primary-button" disabled>
                 <i data-lucide="search"></i>
-                <span>查询</span>
+                <span>Query</span>
               </button>
             </div>
-            <textarea id="queryInput" spellcheck="false" placeholder="输入 A/C/G/T 序列"></textarea>
+            <textarea id="queryInput" spellcheck="false" placeholder="Enter an A/C/G/T sequence"></textarea>
           </section>
 
           <section class="result-band">
             <div class="section-title">
               <i data-lucide="activity"></i>
-              <h2>诊断结果</h2>
+              <h2>Diagnostics</h2>
             </div>
-            <div id="resultView" class="result-view empty-state">等待查询结果</div>
+            <div id="resultView" class="result-view empty-state">Waiting for query results</div>
           </section>
 
           <section class="log-band">
             <div class="section-title">
               <i data-lucide="terminal"></i>
-              <h2>内核日志</h2>
+              <h2>Kernel Log</h2>
             </div>
             <pre id="logView"></pre>
           </section>
@@ -125,11 +125,11 @@
             <span id="aiProvider" class="provider-pill">local</span>
           </div>
           <div id="chatMessages" class="chat-messages">
-            <div class="message assistant">运行查询后，我会基于当前覆盖度和 De Bruijn Graph 邻接结果给出诊断。</div>
+            <div class="message assistant">Run a query and I will diagnose the current coverage and De Bruijn Graph adjacency evidence.</div>
           </div>
           <div class="chat-input-row">
-            <textarea id="chatInput" spellcheck="false" placeholder="询问当前结果"></textarea>
-            <button id="sendChatButton" class="icon-only" title="发送">
+            <textarea id="chatInput" spellcheck="false" placeholder="Ask about the current result"></textarea>
+            <button id="sendChatButton" class="icon-only" title="Send">
               <i data-lucide="send"></i>
             </button>
           </div>
