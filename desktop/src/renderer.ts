@@ -63,6 +63,46 @@ type ChatMessage = {
   content: string;
 };
 
+type AiProvider = "local" | "openai" | "anthropic" | "openai-compatible";
+
+type AiSettings = {
+  provider: AiProvider;
+  model: string;
+  apiKey?: string;
+  baseUrl?: string;
+  temperature: number;
+  maxTokens: number;
+};
+
+const AI_SETTINGS_STORAGE_KEY = "dbgps-ai-settings";
+
+const providerDefaults: Record<AiProvider, { label: string; model: string; baseUrl: string; apiKeyPlaceholder: string }> = {
+  local: {
+    label: "Local",
+    model: "offline-diagnostic",
+    baseUrl: "",
+    apiKeyPlaceholder: ""
+  },
+  openai: {
+    label: "OpenAI",
+    model: "gpt-4.1-mini",
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyPlaceholder: "OPENAI_API_KEY if empty"
+  },
+  anthropic: {
+    label: "Anthropic",
+    model: "claude-sonnet-4-5",
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKeyPlaceholder: "ANTHROPIC_API_KEY if empty"
+  },
+  "openai-compatible": {
+    label: "Compatible",
+    model: "llama3.1",
+    baseUrl: "http://localhost:11434/v1",
+    apiKeyPlaceholder: "Optional"
+  }
+};
+
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const elements = {
@@ -87,7 +127,13 @@ const elements = {
   chatMessages: $("chatMessages"),
   chatInput: $("chatInput") as HTMLTextAreaElement,
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
-  aiProvider: $("aiProvider")
+  aiProvider: $("aiProvider"),
+  providerSelect: $("providerSelect") as HTMLSelectElement,
+  modelInput: $("modelInput") as HTMLInputElement,
+  apiKeyInput: $("apiKeyInput") as HTMLInputElement,
+  baseUrlInput: $("baseUrlInput") as HTMLInputElement,
+  temperatureInput: $("temperatureInput") as HTMLInputElement,
+  maxTokensInput: $("maxTokensInput") as HTMLInputElement
 };
 
 let selectedFiles: string[] = [];
@@ -124,6 +170,77 @@ function compactPath(file: string) {
 function setStatus(text: string, state: "idle" | "running" | "error" = "idle") {
   elements.statusText.textContent = text;
   document.body.dataset.status = state;
+}
+
+function providerLabel(provider: string) {
+  return providerDefaults[provider as AiProvider]?.label || provider;
+}
+
+function readStoredAiSettings(): Partial<AiSettings> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AI_SETTINGS_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function currentAiSettings(): AiSettings {
+  const provider = (elements.providerSelect.value || "local") as AiProvider;
+  const defaults = providerDefaults[provider];
+  const temperature = Number(elements.temperatureInput.value);
+  const maxTokens = Number(elements.maxTokensInput.value);
+  return {
+    provider,
+    model: (elements.modelInput.value || defaults.model).trim(),
+    apiKey: elements.apiKeyInput.value.trim(),
+    baseUrl: (elements.baseUrlInput.value || defaults.baseUrl).trim(),
+    temperature: Number.isFinite(temperature) ? temperature : 0.2,
+    maxTokens: Number.isFinite(maxTokens) ? Math.max(128, Math.trunc(maxTokens)) : 900
+  };
+}
+
+function persistAiSettings() {
+  const settings = currentAiSettings();
+  const { apiKey: _apiKey, ...persisted } = settings;
+  localStorage.setItem(AI_SETTINGS_STORAGE_KEY, JSON.stringify(persisted));
+}
+
+function updateProviderControls(resetProviderDefaults = false) {
+  const provider = (elements.providerSelect.value || "local") as AiProvider;
+  const defaults = providerDefaults[provider];
+
+  if (resetProviderDefaults) {
+    elements.modelInput.value = defaults.model;
+    elements.baseUrlInput.value = defaults.baseUrl;
+    elements.apiKeyInput.value = "";
+  }
+
+  const isLocal = provider === "local";
+  elements.modelInput.disabled = isLocal;
+  elements.apiKeyInput.disabled = isLocal;
+  elements.baseUrlInput.disabled = isLocal;
+  elements.temperatureInput.disabled = isLocal;
+  elements.maxTokensInput.disabled = isLocal;
+  elements.apiKeyInput.placeholder = defaults.apiKeyPlaceholder;
+  elements.baseUrlInput.placeholder = defaults.baseUrl || "Provider default";
+  elements.aiProvider.textContent = defaults.label;
+  elements.aiProvider.title = currentAiSettings().model;
+}
+
+function initializeAiSettings() {
+  const stored = readStoredAiSettings();
+  const provider = (stored.provider && providerDefaults[stored.provider]) ? stored.provider : "local";
+  const defaults = providerDefaults[provider];
+
+  elements.providerSelect.value = provider;
+  elements.modelInput.value = stored.model || defaults.model;
+  elements.baseUrlInput.value = stored.baseUrl || defaults.baseUrl;
+  elements.temperatureInput.value = String(stored.temperature ?? 0.2);
+  elements.maxTokensInput.value = String(stored.maxTokens ?? 900);
+  elements.apiKeyInput.value = "";
+  updateProviderControls(false);
 }
 
 function appendLog(text: string) {
@@ -406,9 +523,11 @@ async function sendChat() {
   try {
     const result = await window.dbgps.aiDiagnose({
       messages: chatMessages,
-      context: latestResult
+      context: latestResult,
+      settings: currentAiSettings()
     });
-    elements.aiProvider.textContent = result.provider;
+    elements.aiProvider.textContent = providerLabel(result.provider);
+    elements.aiProvider.title = result.model;
     appendChat("assistant", result.content);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -435,6 +554,10 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
   });
 });
 
+document.querySelector<HTMLFormElement>(".chat-settings")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+});
+
 elements.selectFilesButton.addEventListener("click", selectFiles);
 elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
@@ -444,6 +567,22 @@ elements.sendChatButton.addEventListener("click", sendChat);
 elements.themeButton.addEventListener("click", () => {
   setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 });
+elements.providerSelect.addEventListener("change", () => {
+  updateProviderControls(true);
+  persistAiSettings();
+});
+[
+  elements.modelInput,
+  elements.baseUrlInput,
+  elements.temperatureInput,
+  elements.maxTokensInput
+].forEach((input) => {
+  input.addEventListener("input", () => {
+    updateProviderControls(false);
+    persistAiSettings();
+  });
+});
+elements.apiKeyInput.addEventListener("input", () => updateProviderControls(false));
 
 elements.queryInput.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") runQuery();
@@ -464,5 +603,6 @@ window.dbgps.onAnalyzerEvent((event) => {
 });
 
 initializeTheme();
+initializeAiSettings();
 renderFileList();
 renderIcons();
