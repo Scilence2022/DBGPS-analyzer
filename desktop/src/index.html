@@ -97,6 +97,16 @@
                 <span>Query</span>
               </button>
             </div>
+            <div id="queryOptions" class="query-options">
+              <label>
+                <span>Upstream steps</span>
+                <input id="upstreamDepthInput" type="number" min="0" max="6" step="1" value="2" />
+              </label>
+              <label>
+                <span>Downstream steps</span>
+                <input id="downstreamDepthInput" type="number" min="0" max="6" step="1" value="2" />
+              </label>
+            </div>
             <textarea id="queryInput" spellcheck="false" placeholder="Enter an A/C/G/T sequence"></textarea>
           </section>
 
@@ -226,6 +236,24 @@
                   <i data-lucide="monitor"></i>
                   <strong>System</strong>
                   <span>Follow the operating system appearance.</span>
+                </button>
+              </div>
+              <div class="settings-toolbar compact">
+                <div>
+                  <strong>Graph Display</strong>
+                  <span>Choose how multi-step k-mer branches are rendered in Diagnostics.</span>
+                </div>
+              </div>
+              <div class="graph-mode-options">
+                <button class="graph-mode-card" data-graph-mode="cards">
+                  <i data-lucide="panel-top"></i>
+                  <strong>Detailed cards</strong>
+                  <span>Show full k-mer labels and coverage on every branch node.</span>
+                </button>
+                <button class="graph-mode-card" data-graph-mode="bases">
+                  <i data-lucide="circle-dot"></i>
+                  <strong>Base nodes</strong>
+                  <span>Show only the added base on branch nodes; hover for full details.</span>
                 </button>
               </div>
             </div>

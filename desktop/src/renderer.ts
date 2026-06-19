@@ -14,6 +14,11 @@ type Neighbor = {
   present: boolean;
 };
 
+type KmerTreeNode = Neighbor & {
+  step: number;
+  children: KmerTreeNode[];
+};
+
 type KmerResult = {
   type: "kmer";
   query: string;
@@ -23,6 +28,10 @@ type KmerResult = {
   downstream: Neighbor[];
   inDegree: number;
   outDegree: number;
+  upstreamDepth?: number;
+  downstreamDepth?: number;
+  upstreamTree?: KmerTreeNode[];
+  downstreamTree?: KmerTreeNode[];
 };
 
 type SequenceCoverage = {
@@ -113,6 +122,7 @@ type AppSettings = {
   temperature: number;
   maxTokens: number;
   appearance: "light" | "dark" | "system";
+  kmerTreeMode: "cards" | "bases";
 };
 
 const SETTINGS_STORAGE_KEY = "dbgps-settings-v3";
@@ -269,7 +279,10 @@ const elements = {
   readLengthInput: $("readLengthInput") as HTMLInputElement,
   startButton: $("startButton") as HTMLButtonElement,
   queryButton: $("queryButton") as HTMLButtonElement,
+  queryOptions: $("queryOptions"),
   queryInput: $("queryInput") as HTMLTextAreaElement,
+  upstreamDepthInput: $("upstreamDepthInput") as HTMLInputElement,
+  downstreamDepthInput: $("downstreamDepthInput") as HTMLInputElement,
   resultView: $("resultView"),
   logView: $("logView"),
   distinctKmers: $("distinctKmers"),
@@ -345,7 +358,8 @@ function createDefaultSettings(): AppSettings {
     providers,
     temperature: 0.2,
     maxTokens: 900,
-    appearance: "system"
+    appearance: "system",
+    kmerTreeMode: "cards"
   };
 }
 
@@ -374,13 +388,15 @@ function mergeSettings(input: unknown): AppSettings {
     ? stored.activeProvider
     : firstEnabledProvider(providers) || defaults.activeProvider;
   const appearance = stored.appearance === "light" || stored.appearance === "dark" || stored.appearance === "system" ? stored.appearance : "system";
+  const kmerTreeMode = stored.kmerTreeMode === "bases" || stored.kmerTreeMode === "cards" ? stored.kmerTreeMode : "cards";
 
   return {
     activeProvider,
     providers,
     temperature: Number.isFinite(Number(stored.temperature)) ? Number(stored.temperature) : defaults.temperature,
     maxTokens: Number.isFinite(Number(stored.maxTokens)) ? Number(stored.maxTokens) : defaults.maxTokens,
-    appearance
+    appearance,
+    kmerTreeMode
   };
 }
 
@@ -432,6 +448,9 @@ function applyAppearance() {
   document.documentElement.dataset.appearance = appSettings.appearance;
   document.querySelectorAll<HTMLButtonElement>(".appearance-card").forEach((button) => {
     button.classList.toggle("active", button.dataset.themeChoice === appSettings.appearance);
+  });
+  document.querySelectorAll<HTMLButtonElement>(".graph-mode-card").forEach((button) => {
+    button.classList.toggle("active", button.dataset.graphMode === appSettings.kmerTreeMode);
   });
 }
 
@@ -653,6 +672,86 @@ function renderNeighborTable(title: string, neighbors: Neighbor[]) {
   `;
 }
 
+function maxTreeCoverage(nodes: KmerTreeNode[] | undefined, current = 0): number {
+  if (!nodes) return current;
+  return nodes.reduce((max, node) => maxTreeCoverage(node.children, Math.max(max, node.coverage)), current);
+}
+
+function circularNodeSize(coverage: number, maxCoverage: number) {
+  if (maxCoverage <= 0) return 30;
+  const scale = Math.max(1, maxCoverage / 3);
+  return Math.round(30 + 38 * (1 - Math.exp(-coverage / scale)));
+}
+
+function renderTreeNodeCard(node: { kmer: string; coverage: number; base?: string; step?: number }, center = false, maxCoverage = node.coverage) {
+  const meta = center ? "Query k-mer" : `Step ${formatNumber(node.step)} · ${escapeHtml(node.base || "")}`;
+  const detail = center
+    ? `Query k-mer: ${node.kmer}\nCoverage: ${formatNumber(node.coverage)}`
+    : `Base: ${node.base || ""}\nStep: ${formatNumber(node.step)}\nk-mer: ${node.kmer}\nCoverage: ${formatNumber(node.coverage)}`;
+  if (appSettings.kmerTreeMode === "bases") {
+    const size = center ? 86 : circularNodeSize(node.coverage, maxCoverage);
+    return `
+      <div class="tree-node-card compact ${center ? "center" : ""} ${coverageClass(node.coverage)}" style="--node-size:${size}px" title="${escapeHtml(detail)}">
+        ${center ? `<code>${escapeHtml(node.kmer)}</code>` : `<strong>${escapeHtml(node.base || "?")}</strong>`}
+        <span>${formatNumber(node.coverage)}</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="tree-node-card ${center ? "center" : ""} ${coverageClass(node.coverage)}" title="${escapeHtml(detail)}">
+      <span>${meta}</span>
+      <code>${escapeHtml(node.kmer)}</code>
+      <strong class="coverage ${coverageClass(node.coverage)}">${formatNumber(node.coverage)}</strong>
+    </div>
+  `;
+}
+
+function renderTreeNodes(nodes: KmerTreeNode[] | undefined, direction: "upstream" | "downstream", maxCoverage: number, showEmpty = true): string {
+  if (!nodes || nodes.length === 0) {
+    return showEmpty ? `<div class="tree-empty">No covered branches</div>` : "";
+  }
+
+  return nodes.map((node) => {
+    const children = renderTreeNodes(node.children, direction, maxCoverage, false);
+    const card = renderTreeNodeCard(node, false, maxCoverage);
+    return direction === "upstream"
+      ? `
+        <div class="tree-node-row upstream">
+          <div class="tree-children">${children}</div>
+          <span class="tree-edge" aria-hidden="true"></span>
+          ${card}
+        </div>
+      `
+      : `
+        <div class="tree-node-row downstream">
+          ${card}
+          <span class="tree-edge" aria-hidden="true"></span>
+          <div class="tree-children">${children}</div>
+        </div>
+      `;
+  }).join("");
+}
+
+function renderKmerTree(data: KmerResult) {
+  const maxCoverage = Math.max(data.coverage, maxTreeCoverage(data.upstreamTree), maxTreeCoverage(data.downstreamTree));
+  return `
+    <div class="kmer-tree-panel ${appSettings.kmerTreeMode === "bases" ? "compact-mode" : "card-mode"}">
+      <div class="tree-side upstream">
+        <div class="tree-side-title">Upstream · ${formatNumber(data.upstreamDepth ?? 1)} steps</div>
+        ${renderTreeNodes(data.upstreamTree, "upstream", maxCoverage)}
+      </div>
+      <div class="tree-center">
+        ${renderTreeNodeCard({ kmer: data.query, coverage: data.coverage }, true, maxCoverage)}
+      </div>
+      <div class="tree-side downstream">
+        <div class="tree-side-title">Downstream · ${formatNumber(data.downstreamDepth ?? 1)} steps</div>
+        ${renderTreeNodes(data.downstreamTree, "downstream", maxCoverage)}
+      </div>
+    </div>
+  `;
+}
+
 function renderKmerResult(data: KmerResult) {
   elements.resultView.className = "result-view";
   elements.resultView.innerHTML = `
@@ -675,6 +774,7 @@ function renderKmerResult(data: KmerResult) {
         <strong>${formatNumber(data.outDegree)}</strong>
       </div>
     </div>
+    ${renderKmerTree(data)}
     <div class="neighbor-grid">
       ${renderNeighborTable("Upstream k-mers", data.upstream)}
       ${renderNeighborTable("Downstream k-mers", data.downstream)}
@@ -832,10 +932,24 @@ async function stopAnalyzer() {
   setStatus("Kernel stopped");
 }
 
+function depthInputValue(input: HTMLInputElement) {
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.min(6, Math.max(0, Math.trunc(parsed)));
+}
+
+function updateQueryModeControls() {
+  elements.queryOptions.classList.toggle("hidden", queryMode !== "kmer");
+  elements.queryInput.placeholder = queryMode === "kmer" ? "Enter one k-mer sequence" : "Enter a full A/C/G/T sequence path";
+}
+
 function buildQueryCommand() {
   const input = elements.queryInput.value.trim().replace(/\s+/g, "");
   if (!input) return "";
-  return queryMode === "kmer" ? `kmer ${input}` : `sequence ${input}`;
+  if (queryMode === "kmer") {
+    return `kmer ${input} ${depthInputValue(elements.upstreamDepthInput)} ${depthInputValue(elements.downstreamDepthInput)}`;
+  }
+  return `sequence ${input}`;
 }
 
 async function runQuery() {
@@ -893,6 +1007,7 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
     document.querySelectorAll(".segmented button").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
     queryMode = button.dataset.mode === "sequence" ? "sequence" : "kmer";
+    updateQueryModeControls();
   });
 });
 
@@ -969,6 +1084,17 @@ document.querySelectorAll<HTMLButtonElement>(".appearance-card").forEach((button
     }
   });
 });
+document.querySelectorAll<HTMLButtonElement>(".graph-mode-card").forEach((button) => {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.graphMode;
+    if (mode === "cards" || mode === "bases") {
+      appSettings.kmerTreeMode = mode;
+      saveSettings();
+      applyAppearance();
+      if (latestResult?.type === "kmer") renderKmerResult(latestResult);
+    }
+  });
+});
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if (appSettings.appearance === "system") applyAppearance();
 });
@@ -993,5 +1119,6 @@ window.dbgps.onAnalyzerEvent((event) => {
 
 loadSettings();
 renderSettings();
+updateQueryModeControls();
 renderFileList();
 renderIcons();
