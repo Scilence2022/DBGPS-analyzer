@@ -152,7 +152,7 @@ The ChatBox can route diagnostics through these provider definitions:
 | Local | OpenAI-compatible chat completions | `http://localhost:11434/v1` |
 | Custom Endpoint | OpenAI-compatible chat completions | `http://localhost:8000/v1` |
 
-Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. API keys entered in the UI are used for the current desktop session only. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage.
+Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, API keys, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage.
 
 ```bash
 cd desktop

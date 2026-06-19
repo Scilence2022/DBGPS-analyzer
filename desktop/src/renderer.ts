@@ -110,6 +110,7 @@ type ProviderCatalogItem = {
 type ProviderSettings = {
   enabled: boolean;
   baseUrl: string;
+  apiKey: string;
   models: string[];
   selectedModel: string;
   lastRefresh?: string;
@@ -263,7 +264,6 @@ const PROVIDERS: ProviderCatalogItem[] = [
 ];
 
 const PROVIDER_BY_ID = Object.fromEntries(PROVIDERS.map((provider) => [provider.id, provider])) as Record<ProviderId, ProviderCatalogItem>;
-const providerApiKeys: Partial<Record<ProviderId, string>> = {};
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -348,6 +348,7 @@ function createDefaultSettings(): AppSettings {
     providers[provider.id] = {
       enabled: ["openai", "anthropic", "google", "local"].includes(provider.id),
       baseUrl: provider.defaultBaseUrl,
+      apiKey: "",
       models: provider.models,
       selectedModel: provider.defaultModel
     };
@@ -433,7 +434,7 @@ function currentAiSettings(): AiSettings {
   return {
     provider,
     model: settings.selectedModel || PROVIDER_BY_ID[provider].defaultModel,
-    apiKey: providerApiKeys[provider] || "",
+    apiKey: settings.apiKey || "",
     baseUrl: settings.baseUrl || PROVIDER_BY_ID[provider].defaultBaseUrl,
     temperature: appSettings.temperature,
     maxTokens: appSettings.maxTokens
@@ -479,7 +480,6 @@ function modelOptions(providerId: ProviderId, selectedModel: string) {
 function renderProviderList() {
   elements.providerList.innerHTML = PROVIDERS.map((provider) => {
     const settings = appSettings.providers[provider.id];
-    const keyValue = providerApiKeys[provider.id] || "";
     const status = settings.refreshStatus || `${settings.models.length} catalog models`;
     const lastRefresh = settings.lastRefresh ? `Last refresh: ${escapeHtml(settings.lastRefresh)}` : "Not refreshed this session";
 
@@ -502,7 +502,7 @@ function renderProviderList() {
           </label>
           <label>
             <span>API key</span>
-            <input class="secret-input" data-provider-api-key="${provider.id}" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(keyValue)}" placeholder="${escapeHtml(provider.envHint)}" />
+            <input class="secret-input" data-provider-api-key="${provider.id}" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.apiKey)}" placeholder="${escapeHtml(provider.envHint)}" />
           </label>
           <button type="button" class="icon-button refresh-provider-button" data-refresh-provider="${provider.id}">
             <i data-lucide="refresh-cw"></i>
@@ -601,7 +601,7 @@ async function refreshProviderModels(providerId: ProviderId) {
   try {
     const result = await window.dbgps.refreshProviderModels({
       provider: providerId,
-      apiKey: providerApiKeys[providerId] || "",
+      apiKey: settings.apiKey || "",
       baseUrl: settings.baseUrl
     });
     if (result.models.length === 0) {
@@ -1046,7 +1046,8 @@ elements.providerList.addEventListener("input", (event) => {
     appSettings.providers[baseUrlProvider].baseUrl = target.value.trim();
     saveSettings();
   } else if (apiKeyProvider) {
-    providerApiKeys[apiKeyProvider] = target.value.trim();
+    appSettings.providers[apiKeyProvider].apiKey = target.value.trim();
+    saveSettings();
   }
 });
 elements.providerList.addEventListener("click", (event) => {
