@@ -341,7 +341,7 @@ textarea:focus {
 
 .segmented {
   display: inline-grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
@@ -414,6 +414,14 @@ textarea:focus {
   background: var(--surface-strong);
 }
 
+.focus-kmer small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 code {
   display: inline-block;
   max-width: 100%;
@@ -446,6 +454,83 @@ code {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.index-start-list {
+  display: grid;
+  gap: 12px;
+}
+
+.index-start {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.index-start-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.index-start-header span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.index-anchor-grid,
+.greedy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.greedy-grid {
+  margin-top: 10px;
+}
+
+.greedy-path {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+}
+
+.greedy-path h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.greedy-step {
+  display: grid;
+  grid-template-columns: minmax(52px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.greedy-step.low {
+  border-left-color: var(--amber);
+}
+
+.greedy-step.zero {
+  border-left-color: var(--red);
+}
+
+.greedy-step > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .kmer-tree-panel {
@@ -482,6 +567,18 @@ code {
 .tree-center {
   display: grid;
   place-items: center;
+}
+
+.tree-anchor-pair {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.anchor-gap {
+  color: var(--muted);
+  font-weight: 800;
+  letter-spacing: 0;
 }
 
 .tree-node-row {

@@ -118,7 +118,8 @@ Supported commands:
 | Command | Description |
 |:---|:---|
 | `summary` | Return k, read-length limit, distinct k-mer count, and total saturated k-mer coverage. |
-| `kmer <ACGT...> [upstreamDepth] [downstreamDepth]` | Query one k-mer of length k and return canonical coverage, one-step upstream/downstream neighbors, and optional multi-step covered branch trees for De Bruijn Graph inspection. Depth values are clamped to 0-6. |
+| `kmer <ACGT...> [upstreamDepth] [downstreamDepth]` | Query one DNA sequence. If the sequence is exactly k bases, it is used directly. If it is longer than k, the leftmost k-mer anchors upstream analysis and the rightmost k-mer anchors downstream analysis. Returns canonical coverage, one-step neighbors, and optional multi-step covered branch trees. Depth values are clamped to 0-6. |
+| `index <INT> [upstreamDepth] [downstreamDepth]` | Decode a non-negative integer index to DNA with the default 0/1/2/3 to A/C/G/T scheme, then run greedy upstream/downstream path search. If the decoded DNA is shorter than k, covered k-mers matching that prefix are selected as greedy start k-mers. If multiple starts tie for best coverage, all tied starts are reported up to the start limit. |
 | `sequence <ACGT...>` | Query every ordered k-mer in a DNA strand and return coverage, missing positions, path completeness, and adjacent coverage ratios. |
 | `help` | Return supported commands. |
 | `exit` | Stop the interactive kernel. |

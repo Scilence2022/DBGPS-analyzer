@@ -19,11 +19,27 @@ type KmerTreeNode = Neighbor & {
   children: KmerTreeNode[];
 };
 
+type GreedyStep = {
+  step: number;
+  base: string;
+  kmer: string;
+  canonical: string;
+  coverage: number;
+};
+
 type KmerResult = {
   type: "kmer";
   query: string;
+  queryLength?: number;
+  truncated?: boolean;
+  leftAnchor?: string;
+  rightAnchor?: string;
   canonical: string;
+  leftCanonical?: string;
+  rightCanonical?: string;
   coverage: number;
+  leftCoverage?: number;
+  rightCoverage?: number;
   upstream: Neighbor[];
   downstream: Neighbor[];
   inDegree: number;
@@ -32,6 +48,40 @@ type KmerResult = {
   downstreamDepth?: number;
   upstreamTree?: KmerTreeNode[];
   downstreamTree?: KmerTreeNode[];
+};
+
+type IndexStart = {
+  seed: string;
+  seedLength: number;
+  leftAnchor: string;
+  rightAnchor: string;
+  canonical: string;
+  leftCanonical?: string;
+  rightCanonical?: string;
+  coverage: number;
+  leftCoverage: number;
+  rightCoverage: number;
+  upstream: GreedyStep[];
+  downstream: GreedyStep[];
+};
+
+type IndexResult = {
+  type: "index";
+  index: string;
+  decoded: string;
+  decodedLength: number;
+  k: number;
+  completed: boolean;
+  truncated: boolean;
+  upstreamDepth: number;
+  downstreamDepth: number;
+  maxStartKmers: number;
+  startCount: number;
+  reportedStarts: number;
+  bestStartCoverage?: number;
+  startLimitReached: boolean;
+  starts: IndexStart[];
+  message?: string;
 };
 
 type SequenceCoverage = {
@@ -65,7 +115,7 @@ type SummaryResult = {
   totalKmerCoverage: number;
 };
 
-type AnalyzerResult = KmerResult | SequenceResult | SummaryResult | { type: "error"; message: string };
+type AnalyzerResult = KmerResult | IndexResult | SequenceResult | SummaryResult | { type: "error"; message: string };
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -307,7 +357,7 @@ const elements = {
 
 let selectedFiles: string[] = [];
 let analyzerReady = false;
-let queryMode: "kmer" | "sequence" = "kmer";
+let queryMode: "kmer" | "index" | "sequence" = "kmer";
 let latestResult: AnalyzerResult | null = null;
 const chatMessages: ChatMessage[] = [];
 let appSettings: AppSettings = createDefaultSettings();
@@ -734,7 +784,19 @@ function renderTreeNodes(nodes: KmerTreeNode[] | undefined, direction: "upstream
 }
 
 function renderKmerTree(data: KmerResult) {
-  const maxCoverage = Math.max(data.coverage, maxTreeCoverage(data.upstreamTree), maxTreeCoverage(data.downstreamTree));
+  const maxCoverage = Math.max(data.coverage, data.leftCoverage ?? 0, data.rightCoverage ?? 0, maxTreeCoverage(data.upstreamTree), maxTreeCoverage(data.downstreamTree));
+  const leftAnchor = data.leftAnchor || data.query;
+  const rightAnchor = data.rightAnchor || data.query;
+  const splitAnchors = data.truncated && leftAnchor !== rightAnchor;
+  const center = splitAnchors
+    ? `
+      <div class="tree-anchor-pair">
+        ${renderTreeNodeCard({ kmer: leftAnchor, coverage: data.leftCoverage ?? data.coverage }, true, maxCoverage)}
+        <span class="anchor-gap">...</span>
+        ${renderTreeNodeCard({ kmer: rightAnchor, coverage: data.rightCoverage ?? data.coverage }, true, maxCoverage)}
+      </div>
+    `
+    : renderTreeNodeCard({ kmer: leftAnchor, coverage: data.coverage }, true, maxCoverage);
   return `
     <div class="kmer-tree-panel ${appSettings.kmerTreeMode === "bases" ? "compact-mode" : "card-mode"}">
       <div class="tree-side upstream">
@@ -742,7 +804,7 @@ function renderKmerTree(data: KmerResult) {
         ${renderTreeNodes(data.upstreamTree, "upstream", maxCoverage)}
       </div>
       <div class="tree-center">
-        ${renderTreeNodeCard({ kmer: data.query, coverage: data.coverage }, true, maxCoverage)}
+        ${center}
       </div>
       <div class="tree-side downstream">
         <div class="tree-side-title">Downstream · ${formatNumber(data.downstreamDepth ?? 1)} steps</div>
@@ -753,18 +815,36 @@ function renderKmerTree(data: KmerResult) {
 }
 
 function renderKmerResult(data: KmerResult) {
+  const leftAnchor = data.leftAnchor || data.query;
+  const rightAnchor = data.rightAnchor || data.query;
+  const splitAnchors = data.truncated && leftAnchor !== rightAnchor;
   elements.resultView.className = "result-view";
   elements.resultView.innerHTML = `
     <div class="result-grid">
       <div class="focus-kmer">
-        <span>Query</span>
+        <span>${splitAnchors ? "Input sequence" : "Query"}</span>
         <code>${escapeHtml(data.query)}</code>
-        <strong class="coverage ${coverageClass(data.coverage)}">${formatNumber(data.coverage)}</strong>
+        ${splitAnchors ? `<small>${formatNumber(data.queryLength ?? data.query.length)} bases, end-anchored</small>` : `<strong class="coverage ${coverageClass(data.coverage)}">${formatNumber(data.coverage)}</strong>`}
       </div>
-      <div class="metric">
-        <span>Canonical</span>
-        <strong>${escapeHtml(data.canonical)}</strong>
-      </div>
+      ${
+        splitAnchors
+          ? `
+            <div class="metric">
+              <span>Left anchor</span>
+              <strong><code>${escapeHtml(leftAnchor)}</code> ${formatNumber(data.leftCoverage ?? data.coverage)}</strong>
+            </div>
+            <div class="metric">
+              <span>Right anchor</span>
+              <strong><code>${escapeHtml(rightAnchor)}</code> ${formatNumber(data.rightCoverage ?? data.coverage)}</strong>
+            </div>
+          `
+          : `
+            <div class="metric">
+              <span>Canonical</span>
+              <strong>${escapeHtml(data.canonical)}</strong>
+            </div>
+          `
+      }
       <div class="metric">
         <span>In degree</span>
         <strong>${formatNumber(data.inDegree)}</strong>
@@ -779,6 +859,88 @@ function renderKmerResult(data: KmerResult) {
       ${renderNeighborTable("Upstream k-mers", data.upstream)}
       ${renderNeighborTable("Downstream k-mers", data.downstream)}
     </div>
+  `;
+}
+
+function renderGreedyPath(title: string, steps: GreedyStep[], direction: "upstream" | "downstream") {
+  return `
+    <div class="greedy-path ${direction}">
+      <h3>${escapeHtml(title)}</h3>
+      ${
+        steps.length === 0
+          ? `<div class="tree-empty">No covered greedy step</div>`
+          : steps
+              .map(
+                (step) => `
+                  <div class="greedy-step ${coverageClass(step.coverage)}">
+                    <span>${formatNumber(step.step)} · ${escapeHtml(step.base)}</span>
+                    <code>${escapeHtml(step.kmer)}</code>
+                    <strong class="coverage ${coverageClass(step.coverage)}">${formatNumber(step.coverage)}</strong>
+                  </div>
+                `
+              )
+              .join("")
+      }
+    </div>
+  `;
+}
+
+function renderIndexStart(start: IndexStart) {
+  const splitAnchors = start.leftAnchor !== start.rightAnchor;
+  return `
+    <div class="index-start">
+      <div class="index-start-header">
+        <div>
+          <span>${splitAnchors ? "Decoded sequence anchors" : "Starting k-mer"}</span>
+          <code>${escapeHtml(splitAnchors ? start.seed : start.leftAnchor)}</code>
+        </div>
+        <strong class="coverage ${coverageClass(start.coverage)}">${formatNumber(start.coverage)}</strong>
+      </div>
+      <div class="index-anchor-grid">
+        <div class="metric">
+          <span>Left anchor</span>
+          <strong><code>${escapeHtml(start.leftAnchor)}</code> ${formatNumber(start.leftCoverage)}</strong>
+        </div>
+        <div class="metric">
+          <span>Right anchor</span>
+          <strong><code>${escapeHtml(start.rightAnchor)}</code> ${formatNumber(start.rightCoverage)}</strong>
+        </div>
+      </div>
+      <div class="greedy-grid">
+        ${renderGreedyPath("Upstream greedy path", start.upstream, "upstream")}
+        ${renderGreedyPath("Downstream greedy path", start.downstream, "downstream")}
+      </div>
+    </div>
+  `;
+}
+
+function renderIndexResult(data: IndexResult) {
+  elements.resultView.className = "result-view";
+  elements.resultView.innerHTML = `
+    <div class="result-grid">
+      <div class="focus-kmer">
+        <span>Index</span>
+        <code>${escapeHtml(data.index)}</code>
+        <small>${data.completed ? "auto-completed to k-mer" : data.truncated ? "end-anchored" : "exact k-mer length"}</small>
+      </div>
+      <div class="metric">
+        <span>Decoded DNA</span>
+        <strong><code>${escapeHtml(data.decoded)}</code></strong>
+      </div>
+      <div class="metric">
+        <span>Decoded / k</span>
+        <strong>${formatNumber(data.decodedLength)} / ${formatNumber(data.k)}</strong>
+      </div>
+      <div class="metric ${data.startCount > 0 ? "metric-ok" : "metric-alert"}">
+        <span>Starts</span>
+        <strong>${formatNumber(data.reportedStarts)}${data.startLimitReached ? ` / ${formatNumber(data.maxStartKmers)}+` : ""}</strong>
+      </div>
+    </div>
+    ${
+      data.starts.length === 0
+        ? `<div class="empty-state">${escapeHtml(data.message || "No covered start k-mers")}</div>`
+        : `<div class="index-start-list">${data.starts.map(renderIndexStart).join("")}</div>`
+    }
   `;
 }
 
@@ -864,6 +1026,7 @@ function renderResult(result: AnalyzerResult) {
     return;
   }
   if (result.type === "kmer") renderKmerResult(result);
+  else if (result.type === "index") renderIndexResult(result);
   else if (result.type === "sequence") renderSequenceResult(result);
   else renderSummary(result);
   renderIcons();
@@ -939,8 +1102,14 @@ function depthInputValue(input: HTMLInputElement) {
 }
 
 function updateQueryModeControls() {
-  elements.queryOptions.classList.toggle("hidden", queryMode !== "kmer");
-  elements.queryInput.placeholder = queryMode === "kmer" ? "Enter one k-mer sequence" : "Enter a full A/C/G/T sequence path";
+  elements.queryOptions.classList.toggle("hidden", queryMode === "sequence");
+  if (queryMode === "kmer") {
+    elements.queryInput.placeholder = "Enter a k-mer or longer A/C/G/T sequence";
+  } else if (queryMode === "index") {
+    elements.queryInput.placeholder = "Enter a non-negative integer index";
+  } else {
+    elements.queryInput.placeholder = "Enter a full A/C/G/T sequence path";
+  }
 }
 
 function buildQueryCommand() {
@@ -948,6 +1117,9 @@ function buildQueryCommand() {
   if (!input) return "";
   if (queryMode === "kmer") {
     return `kmer ${input} ${depthInputValue(elements.upstreamDepthInput)} ${depthInputValue(elements.downstreamDepthInput)}`;
+  }
+  if (queryMode === "index") {
+    return `index ${input} ${depthInputValue(elements.upstreamDepthInput)} ${depthInputValue(elements.downstreamDepthInput)}`;
   }
   return `sequence ${input}`;
 }
@@ -1006,7 +1178,7 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
   button.addEventListener("click", () => {
     document.querySelectorAll(".segmented button").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
-    queryMode = button.dataset.mode === "sequence" ? "sequence" : "kmer";
+    queryMode = button.dataset.mode === "sequence" ? "sequence" : button.dataset.mode === "index" ? "index" : "kmer";
     updateQueryModeControls();
   });
 });
