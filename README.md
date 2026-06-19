@@ -73,16 +73,19 @@ Computes coverage metrics ($S_m$, $K_n$, $K_d$) by comparing a pool of target/de
 - Support for multi-threaded k-mer counting.
 - Coverage ratio range iteration and step size control.
 - Output prefix options for logs, coverage details, coverage ratios, ratio ranges, and $S_m, K_d, K_n$ values.
+- Interactive JSON Lines diagnostics kernel for k-mer coverage, upstream/downstream De Bruijn Graph neighbors, and strand path completeness.
 
 #### Usage
 ```bash
 DBGPS-analyzer [options] <Strand seq file> <NGS files>
+DBGPS-analyzer -i [options] <NGS files>
 ```
 *Supported formats: `.fa`, `.fq`, `.fa.gz`, `.fq.gz`*
 
 #### Options
 | Option | Argument | Description | Default |
 |:---|:---|:---|:---|
+| `-i` | `None` | Start interactive JSON Lines diagnostics kernel mode | `Off` |
 | `-k` | `INT` | k-mer size | `31` |
 | `-t` | `INT` | Number of threads for multi-threading | `3` |
 | `-L` | `INT` | Maximum read length for k-mer counting | `200` |
@@ -99,6 +102,37 @@ DBGPS-analyzer [options] <Strand seq file> <NGS files>
 - `STR.cov_ratios`: Calculated inter-k-mer coverage ratios per strand.
 - `STR.ratio_ranges`: Aggregated minimum and maximum ratios tracked.
 - `STR.SmKdKn`: Complete tab-delimited table of calculated $S_m$, $K_d$, and $K_n$ metrics.
+
+#### Interactive Kernel Protocol
+
+Interactive mode builds the sequencing k-mer coverage table from one or more NGS files, then accepts one command per line on stdin and writes one JSON object per line on stdout.
+
+```bash
+make DBGPS-analyzer
+printf 'summary\nkmer ACGTACGT\nsequence ACGTACGTACGT\nexit\n' \
+  | ./DBGPS-analyzer -i -k 8 reads.fa
+```
+
+Supported commands:
+
+| Command | Description |
+|:---|:---|
+| `summary` | Return k, read-length limit, distinct k-mer count, and total saturated k-mer coverage. |
+| `kmer <ACGT...>` | Query one k-mer of length k and return canonical coverage plus four upstream and four downstream De Bruijn Graph neighbors. |
+| `sequence <ACGT...>` | Query every ordered k-mer in a DNA strand and return coverage, missing positions, path completeness, and adjacent coverage ratios. |
+| `help` | Return supported commands. |
+| `exit` | Stop the interactive kernel. |
+
+### Electron Desktop App
+
+The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, dark/light styles, and an AI ChatBox. The ChatBox uses a local diagnostic fallback by default. If `OPENAI_API_KEY` is present, it calls the OpenAI Responses API; `OPENAI_MODEL` can override the default model.
+
+```bash
+cd desktop
+npm install
+npm run build
+npm run dev
+```
 
 ---
 

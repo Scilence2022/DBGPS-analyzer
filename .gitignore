@@ -3,3 +3,5 @@ DBGPS-analyzer
 DBGPS-links
 DBGPS-seq-filter
 *.dSYM/
+desktop/dist/
+desktop/node_modules/

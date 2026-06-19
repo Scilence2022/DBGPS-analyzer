@@ -1,0 +1,22 @@
+{
+  "name": "dbgps-analyzer-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron desktop diagnostics console for DBGPS-analyzer.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && esbuild src/renderer.ts --bundle --platform=browser --format=iife --outfile=dist/renderer.js && node scripts/copy-static.mjs",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "lucide": "^0.468.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "electron": "^40.10.4",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.7.2"
+  }
+}
