@@ -236,6 +236,7 @@ body[data-status="error"] .brand p {
 }
 
 input,
+select,
 textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -250,12 +251,19 @@ input {
   padding: 0 10px;
 }
 
+select {
+  width: 100%;
+  height: 36px;
+  padding: 0 9px;
+}
+
 textarea {
   resize: vertical;
   line-height: 1.45;
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
@@ -557,7 +565,7 @@ td {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   padding: 14px;
 }
 
@@ -572,6 +580,35 @@ td {
   color: var(--muted);
   border: 1px solid var(--border);
   font-size: 12px;
+}
+
+.chat-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-bottom: 12px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-settings label {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chat-settings label:nth-child(1),
+.chat-settings label:nth-child(2),
+.chat-settings label:nth-child(3),
+.chat-settings label:nth-child(4) {
+  grid-column: span 2;
+}
+
+.chat-settings input {
+  width: 100%;
+  height: 36px;
 }
 
 .chat-messages {

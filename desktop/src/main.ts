@@ -11,6 +11,23 @@ type AnalyzerConfig = {
   readLength: number;
 };
 
+type AiProvider = "local" | "openai" | "anthropic" | "openai-compatible";
+
+type AiSettings = {
+  provider?: AiProvider;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  temperature?: number;
+  maxTokens?: number;
+};
+
+type AiRequest = {
+  messages?: Array<{ role: string; content: string }>;
+  context?: unknown;
+  settings?: AiSettings;
+};
+
 type PendingQuery = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -244,6 +261,122 @@ function localDiagnosis(context: unknown, latestQuestion: string) {
   return "This result type is not supported for automatic diagnosis yet. Provide a k-mer or sequence path query result.";
 }
 
+function normalizeBaseUrl(baseUrl: string) {
+  return baseUrl.replace(/\/+$/, "");
+}
+
+function normalizeAiSettings(settings?: AiSettings) {
+  const requestedProvider = settings?.provider;
+  const provider: AiProvider =
+    requestedProvider === "openai" ||
+    requestedProvider === "anthropic" ||
+    requestedProvider === "openai-compatible" ||
+    requestedProvider === "local"
+      ? requestedProvider
+      : "local";
+  const temperature = Number.isFinite(Number(settings?.temperature)) ? Number(settings?.temperature) : 0.2;
+  const maxTokens = Number.isFinite(Number(settings?.maxTokens)) ? Math.max(128, Math.trunc(Number(settings?.maxTokens))) : 900;
+
+  if (provider === "local") {
+    return {
+      provider,
+      model: "offline-diagnostic",
+      apiKey: "",
+      baseUrl: "",
+      temperature,
+      maxTokens
+    };
+  }
+
+  if (provider === "openai") {
+    return {
+      provider,
+      model: (settings?.model || process.env.OPENAI_MODEL || "gpt-4.1-mini").trim(),
+      apiKey: (settings?.apiKey || process.env.OPENAI_API_KEY || "").trim(),
+      baseUrl: normalizeBaseUrl(settings?.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"),
+      temperature,
+      maxTokens
+    };
+  }
+
+  if (provider === "anthropic") {
+    return {
+      provider,
+      model: (settings?.model || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5").trim(),
+      apiKey: (settings?.apiKey || process.env.ANTHROPIC_API_KEY || "").trim(),
+      baseUrl: normalizeBaseUrl(settings?.baseUrl || process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com/v1"),
+      temperature,
+      maxTokens
+    };
+  }
+
+  return {
+    provider,
+    model: (settings?.model || process.env.OPENAI_COMPATIBLE_MODEL || "llama3.1").trim(),
+    apiKey: (settings?.apiKey || process.env.OPENAI_COMPATIBLE_API_KEY || "").trim(),
+    baseUrl: normalizeBaseUrl(settings?.baseUrl || process.env.OPENAI_COMPATIBLE_BASE_URL || "http://localhost:11434/v1"),
+    temperature,
+    maxTokens
+  };
+}
+
+function requireSetting(value: string, message: string) {
+  if (!value) throw new Error(message);
+  return value;
+}
+
+function diagnosticSystemPrompt() {
+  return "You are a DNA information storage sequencing quality diagnostician. Explain DBGPS k-mer graph evidence concisely in English. Focus on coverage, dropout, path completeness, adjacent coverage ratio, and graph branching. Be explicit about which evidence supports each diagnosis.";
+}
+
+function diagnosticUserPrompt(request: AiRequest) {
+  const messages = request.messages || [];
+  const latestQuestion = messages.filter((message) => message.role === "user").at(-1)?.content || "";
+  const history = messages
+    .slice(-8)
+    .map((message) => `${message.role}: ${message.content}`)
+    .join("\n");
+
+  return [
+    `Analyzer context JSON:\n${JSON.stringify(request.context).slice(0, 12000)}`,
+    history ? `Recent conversation:\n${history}` : "",
+    `Current user question:\n${latestQuestion || "Diagnose the current analyzer result."}`
+  ].filter(Boolean).join("\n\n");
+}
+
+async function postJson(url: string, headers: Record<string, string>, body: unknown, timeoutMs = 60000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const text = await response.text();
+    let payload: any = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = { text };
+      }
+    }
+
+    if (!response.ok) {
+      const detail = payload?.error?.message || payload?.message || payload?.text || response.statusText;
+      throw new Error(`Provider request failed (${response.status}): ${String(detail).slice(0, 600)}`);
+    }
+
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function extractResponsesText(payload: any) {
   if (typeof payload?.output_text === "string") return payload.output_text;
   const chunks: string[] = [];
@@ -255,43 +388,81 @@ function extractResponsesText(payload: any) {
   return chunks.join("\n").trim();
 }
 
-async function aiDiagnose(request: { messages?: Array<{ role: string; content: string }>; context?: unknown }) {
+function extractChatCompletionText(payload: any) {
+  return String(payload?.choices?.[0]?.message?.content || "").trim();
+}
+
+function extractAnthropicText(payload: any) {
+  const chunks: string[] = [];
+  for (const item of payload?.content || []) {
+    if (item?.type === "text" && typeof item.text === "string") chunks.push(item.text);
+  }
+  return chunks.join("\n").trim();
+}
+
+async function aiDiagnose(request: AiRequest) {
   const latestQuestion = request.messages?.filter((message) => message.role === "user").at(-1)?.content || "";
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return { provider: "local", content: localDiagnosis(request.context, latestQuestion) };
+  const settings = normalizeAiSettings(request.settings);
+
+  if (settings.provider === "local") {
+    return { provider: "local", model: settings.model, content: localDiagnosis(request.context, latestQuestion) };
   }
 
-  const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
+  requireSetting(settings.model, "Select or enter a model before sending an AI diagnosis request.");
+  const system = diagnosticSystemPrompt();
+  const user = diagnosticUserPrompt(request);
+
+  if (settings.provider === "openai") {
+    requireSetting(settings.apiKey, "OpenAI API key is required. Enter one in AI settings or set OPENAI_API_KEY.");
+    const payload = await postJson(`${settings.baseUrl}/responses`, {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          role: "system",
-          content: "You are a DNA information storage sequencing quality diagnostician. Explain DBGPS k-mer graph evidence concisely in English. Focus on coverage, dropout, path completeness, adjacent coverage ratio, and graph branching."
-        },
-        {
-          role: "user",
-          content: `Analyzer context JSON:\n${JSON.stringify(request.context).slice(0, 10000)}\n\nUser question:\n${latestQuestion}`
-        }
-      ],
-      temperature: 0.2
-    })
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    return { provider: "local", content: `${localDiagnosis(request.context, latestQuestion)}\n\nAI service returned an error: ${text.slice(0, 400)}` };
+      Authorization: `Bearer ${settings.apiKey}`
+    }, {
+      model: settings.model,
+      instructions: system,
+      input: user,
+      temperature: settings.temperature,
+      max_output_tokens: settings.maxTokens
+    });
+    const content = extractResponsesText(payload);
+    if (!content) throw new Error("OpenAI returned an empty response.");
+    return { provider: "openai", model: settings.model, content };
   }
 
-  const payload = await response.json();
-  return { provider: "openai", content: extractResponsesText(payload) || localDiagnosis(request.context, latestQuestion) };
+  if (settings.provider === "anthropic") {
+    requireSetting(settings.apiKey, "Anthropic API key is required. Enter one in AI settings or set ANTHROPIC_API_KEY.");
+    const payload = await postJson(`${settings.baseUrl}/messages`, {
+      "Content-Type": "application/json",
+      "x-api-key": settings.apiKey,
+      "anthropic-version": "2023-06-01"
+    }, {
+      model: settings.model,
+      system,
+      messages: [{ role: "user", content: user }],
+      temperature: settings.temperature,
+      max_tokens: settings.maxTokens
+    });
+    const content = extractAnthropicText(payload);
+    if (!content) throw new Error("Anthropic returned an empty response.");
+    return { provider: "anthropic", model: settings.model, content };
+  }
+
+  requireSetting(settings.baseUrl, "Base URL is required for OpenAI-compatible providers.");
+  const compatibleHeaders: Record<string, string> = { "Content-Type": "application/json" };
+  if (settings.apiKey) compatibleHeaders.Authorization = `Bearer ${settings.apiKey}`;
+
+  const payload = await postJson(`${settings.baseUrl}/chat/completions`, compatibleHeaders, {
+    model: settings.model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature: settings.temperature,
+    max_tokens: settings.maxTokens
+  });
+  const content = extractChatCompletionText(payload);
+  if (!content) throw new Error("OpenAI-compatible provider returned an empty response.");
+  return { provider: "openai-compatible", model: settings.model, content };
 }
 
 function createWindow() {

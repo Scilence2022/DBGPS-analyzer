@@ -124,6 +124,46 @@
             </div>
             <span id="aiProvider" class="provider-pill">local</span>
           </div>
+          <form class="chat-settings" autocomplete="off">
+            <label>
+              <span>Provider</span>
+              <select id="providerSelect">
+                <option value="local">Local diagnostic</option>
+                <option value="openai">OpenAI Responses</option>
+                <option value="anthropic">Anthropic Messages</option>
+                <option value="openai-compatible">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label>
+              <span>Model</span>
+              <input id="modelInput" list="modelPresets" type="text" value="offline-diagnostic" />
+              <datalist id="modelPresets">
+                <option value="offline-diagnostic"></option>
+                <option value="gpt-4.1-mini"></option>
+                <option value="gpt-4.1"></option>
+                <option value="gpt-4o-mini"></option>
+                <option value="claude-sonnet-4-5"></option>
+                <option value="claude-3-5-sonnet-latest"></option>
+                <option value="llama3.1"></option>
+              </datalist>
+            </label>
+            <label>
+              <span>API key</span>
+              <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Env fallback if empty" />
+            </label>
+            <label>
+              <span>Base URL</span>
+              <input id="baseUrlInput" type="url" placeholder="Provider default" />
+            </label>
+            <label>
+              <span>Temperature</span>
+              <input id="temperatureInput" type="number" min="0" max="2" step="0.1" value="0.2" />
+            </label>
+            <label>
+              <span>Max tokens</span>
+              <input id="maxTokensInput" type="number" min="128" step="128" value="900" />
+            </label>
+          </form>
           <div id="chatMessages" class="chat-messages">
             <div class="message assistant">Run a query and I will diagnose the current coverage and De Bruijn Graph adjacency evidence.</div>
           </div>

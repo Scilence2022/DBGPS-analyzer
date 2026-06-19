@@ -125,7 +125,18 @@ Supported commands:
 
 ### Electron Desktop App
 
-The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, dark/light styles, and an AI ChatBox. The ChatBox uses a local diagnostic fallback by default. If `OPENAI_API_KEY` is present, it calls the OpenAI Responses API; `OPENAI_MODEL` can override the default model.
+The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, dark/light styles, and an AI ChatBox with configurable LLM providers and models.
+
+The ChatBox supports:
+
+| Provider | API shape | Required settings |
+|:---|:---|:---|
+| Local diagnostic | Offline rule-based diagnosis | None |
+| OpenAI Responses | `POST /v1/responses` | API key plus model; falls back to `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` when fields are empty |
+| Anthropic Messages | `POST /v1/messages` | API key plus model; falls back to `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, and `ANTHROPIC_BASE_URL` when fields are empty |
+| OpenAI-compatible | `POST /v1/chat/completions` | Base URL plus model; API key is optional for local providers and can fall back to `OPENAI_COMPATIBLE_API_KEY` |
+
+API keys entered in the UI are used for the current desktop session only. Provider, model, base URL, temperature, and token settings are stored in local app storage.
 
 ```bash
 cd desktop
