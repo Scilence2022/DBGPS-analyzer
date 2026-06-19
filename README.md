@@ -109,7 +109,7 @@ Interactive mode builds the sequencing k-mer coverage table from one or more NGS
 
 ```bash
 make DBGPS-analyzer
-printf 'summary\nkmer ACGTACGT\nsequence ACGTACGTACGT\nexit\n' \
+printf 'summary\nkmer ACGTACGT 2 2\nsequence ACGTACGTACGT\nexit\n' \
   | ./DBGPS-analyzer -i -k 8 reads.fa
 ```
 
@@ -118,14 +118,14 @@ Supported commands:
 | Command | Description |
 |:---|:---|
 | `summary` | Return k, read-length limit, distinct k-mer count, and total saturated k-mer coverage. |
-| `kmer <ACGT...>` | Query one k-mer of length k and return canonical coverage plus four upstream and four downstream De Bruijn Graph neighbors. |
+| `kmer <ACGT...> [upstreamDepth] [downstreamDepth]` | Query one k-mer of length k and return canonical coverage, one-step upstream/downstream neighbors, and optional multi-step covered branch trees for De Bruijn Graph inspection. Depth values are clamped to 0-6. |
 | `sequence <ACGT...>` | Query every ordered k-mer in a DNA strand and return coverage, missing positions, path completeness, and adjacent coverage ratios. |
 | `help` | Return supported commands. |
 | `exit` | Stop the interactive kernel. |
 
 ### Electron Desktop App
 
-The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, a Settings workspace, dark/light/system appearance modes, and a real AI ChatBox wired through the Electron main process.
+The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, multi-step upstream/downstream k-mer tree visualization, a Settings workspace, dark/light/system appearance modes, and a real AI ChatBox wired through the Electron main process.
 
 The Settings workspace is organized into three tabs:
 
@@ -152,7 +152,7 @@ The ChatBox can route diagnostics through these provider definitions:
 | Local | OpenAI-compatible chat completions | `http://localhost:11434/v1` |
 | Custom Endpoint | OpenAI-compatible chat completions | `http://localhost:8000/v1` |
 
-Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. API keys entered in the UI are used for the current desktop session only. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage.
+Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, API keys, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage.
 
 ```bash
 cd desktop

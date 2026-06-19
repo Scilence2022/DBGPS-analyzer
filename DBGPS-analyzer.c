@@ -23,6 +23,7 @@ KSEQ_INIT(gzFile, gzread)
 
 #define Max_Path_Num 10000
 #define Max_Path_Len 300
+#define Max_Kmer_Tree_Depth 6
 // Removed Max_Cov_Ratio define, now using a variable instead
 
 
@@ -31,6 +32,14 @@ KHASHL_SET_INIT(, kc_c4_t, kc_c4, uint64_t, kc_c4_hash, kc_c4_eq)
 #define CALLOC(ptr, len) ((ptr) = (__typeof__(ptr))calloc((len), sizeof(*(ptr))))
 #define MALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc((len) * sizeof(*(ptr))))
 #define REALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), (len) * sizeof(*(ptr))))
+
+typedef struct {
+    char base;
+    char *kmer;
+    int coverage;
+} kmer_branch_t;
+
+static int clamp_tree_depth(int depth);
 
 const unsigned char seq_nt4_table[256] = { // translate ACGT to 0123
         0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
@@ -1059,6 +1068,32 @@ static int command_equals(const char *a, const char *b)
     return *a == '\0' && *b == '\0';
 }
 
+static int parse_nonnegative_int_token(char **arg, int fallback, int *out)
+{
+    char *s;
+    char *end;
+    long value;
+
+    if (arg == 0 || *arg == 0 || **arg == '\0') {
+        *out = fallback;
+        return 1;
+    }
+
+    s = trim_left(*arg);
+    if (*s == '\0') {
+        *arg = s;
+        *out = fallback;
+        return 1;
+    }
+
+    value = strtol(s, &end, 10);
+    if (end == s || value < 0) return 0;
+
+    *out = clamp_tree_depth((int)value);
+    *arg = trim_left(end);
+    return 1;
+}
+
 static char *normalize_dna_arg(const char *arg, int *out_len, char *err, size_t err_len)
 {
     int n = 0;
@@ -1137,7 +1172,7 @@ static void emit_help_json(void)
     fprintf(stdout, "{\"type\":\"help\",\"commands\":[");
     json_string(stdout, "summary");
     fprintf(stdout, ",");
-    json_string(stdout, "kmer <ACGT...>");
+    json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
@@ -1177,12 +1212,86 @@ static void emit_neighbor_array(const char *label, const char *query, int k, uin
     free(neighbor);
 }
 
-static void emit_kmer_query_json(kc_c4x_t *h, int k, const char *query)
+static void build_neighbor_kmer(char *neighbor, const char *query, int k, char base, int upstream)
+{
+    if (upstream) {
+        neighbor[0] = base;
+        memcpy(neighbor + 1, query, k - 1);
+    } else {
+        memcpy(neighbor, query + 1, k - 1);
+        neighbor[k - 1] = base;
+    }
+    neighbor[k] = '\0';
+}
+
+static int compare_branch_coverage(const void *a, const void *b)
+{
+    const kmer_branch_t *pa = (const kmer_branch_t*)a;
+    const kmer_branch_t *pb = (const kmer_branch_t*)b;
+    if (pa->coverage != pb->coverage) return pb->coverage - pa->coverage;
+    return (int)pa->base - (int)pb->base;
+}
+
+static void load_neighbor_branches(kmer_branch_t branches[4], const char *query, int k, uint64_t mask, kc_c4x_t *h, int upstream)
+{
+    static const char bases[4] = {'A', 'C', 'G', 'T'};
+    for (int i = 0; i < 4; ++i) {
+        branches[i].base = bases[i];
+        MALLOC(branches[i].kmer, k + 1);
+        build_neighbor_kmer(branches[i].kmer, query, k, bases[i], upstream);
+        uint64_t key = actgkmer_hashkey((unsigned char*)branches[i].kmer, (unsigned char)k);
+        branches[i].coverage = kmer_cov(key, mask, h);
+    }
+    qsort(branches, 4, sizeof(kmer_branch_t), compare_branch_coverage);
+}
+
+static void free_neighbor_branches(kmer_branch_t branches[4])
+{
+    for (int i = 0; i < 4; ++i) {
+        free(branches[i].kmer);
+    }
+}
+
+static int clamp_tree_depth(int depth)
+{
+    if (depth < 0) return 0;
+    if (depth > Max_Kmer_Tree_Depth) return Max_Kmer_Tree_Depth;
+    return depth;
+}
+
+static void emit_kmer_branch_tree(const char *query, int k, uint64_t mask, kc_c4x_t *h, int upstream, int remaining_depth, int step)
+{
+    kmer_branch_t branches[4];
+    int emitted = 0;
+
+    fprintf(stdout, "[");
+    if (remaining_depth <= 0) {
+        fprintf(stdout, "]");
+        return;
+    }
+
+    load_neighbor_branches(branches, query, k, mask, h, upstream);
+    for (int i = 0; i < 4; ++i) {
+        if (branches[i].coverage <= 0) continue;
+        if (emitted++) fputc(',', stdout);
+        fprintf(stdout, "{\"base\":\"%c\",\"kmer\":", branches[i].base);
+        json_string(stdout, branches[i].kmer);
+        fprintf(stdout, ",\"coverage\":%d,\"present\":true,\"step\":%d,\"children\":", branches[i].coverage, step);
+        emit_kmer_branch_tree(branches[i].kmer, k, mask, h, upstream, remaining_depth - 1, step + 1);
+        fprintf(stdout, "}");
+    }
+    free_neighbor_branches(branches);
+    fprintf(stdout, "]");
+}
+
+static void emit_kmer_query_json(kc_c4x_t *h, int k, const char *query, int upstream_depth, int downstream_depth)
 {
     uint64_t mask = (1ULL<<k*2) - 1;
     uint64_t key = actgkmer_hashkey((unsigned char*)query, (unsigned char)k);
     char *canonical;
     int in_degree = 0, out_degree = 0;
+    int up_depth = clamp_tree_depth(upstream_depth);
+    int down_depth = clamp_tree_depth(downstream_depth);
 
     MALLOC(canonical, k + 1);
     uint64_acgt(key, (unsigned char*)canonical, (unsigned char)k);
@@ -1196,7 +1305,13 @@ static void emit_kmer_query_json(kc_c4x_t *h, int k, const char *query)
     emit_neighbor_array("upstream", query, k, mask, h, 1, &in_degree);
     fprintf(stdout, ",");
     emit_neighbor_array("downstream", query, k, mask, h, 0, &out_degree);
-    fprintf(stdout, ",\"inDegree\":%d,\"outDegree\":%d}\n", in_degree, out_degree);
+    fprintf(stdout, ",\"inDegree\":%d,\"outDegree\":%d", in_degree, out_degree);
+    fprintf(stdout, ",\"upstreamDepth\":%d,\"downstreamDepth\":%d,\"maxTreeDepth\":%d", up_depth, down_depth, Max_Kmer_Tree_Depth);
+    fprintf(stdout, ",\"upstreamTree\":");
+    emit_kmer_branch_tree(query, k, mask, h, 1, up_depth, 1);
+    fprintf(stdout, ",\"downstreamTree\":");
+    emit_kmer_branch_tree(query, k, mask, h, 0, down_depth, 1);
+    fprintf(stdout, "}\n");
     fflush(stdout);
 
     free(canonical);
@@ -1338,14 +1453,26 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         } else if (command_equals(cmd, "summary")) {
             emit_summary_json(h, k, n_thread, read_len);
         } else if (command_equals(cmd, "kmer")) {
+            char *depth_arg = arg;
+            int upstream_depth = 1;
+            int downstream_depth = 1;
+            while (*depth_arg && !isspace((unsigned char)*depth_arg)) ++depth_arg;
+            if (*depth_arg) {
+                *depth_arg++ = '\0';
+                depth_arg = trim_left(depth_arg);
+            }
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
             if (seq == 0) {
                 emit_error_json(err);
             } else if (seq_len != k) {
                 snprintf(err, sizeof(err), "kmer query length is %d, but k is %d", seq_len, k);
                 emit_error_json(err);
+            } else if (!parse_nonnegative_int_token(&depth_arg, 1, &upstream_depth)) {
+                emit_error_json("upstream depth must be a non-negative integer");
+            } else if (!parse_nonnegative_int_token(&depth_arg, upstream_depth, &downstream_depth)) {
+                emit_error_json("downstream depth must be a non-negative integer");
             } else {
-                emit_kmer_query_json(h, k, seq);
+                emit_kmer_query_json(h, k, seq, upstream_depth, downstream_depth);
             }
             free(seq);
         } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
