@@ -344,6 +344,7 @@ const elements = {
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
   aiProvider: $("aiProvider"),
   settingsPanel: $("settingsPanel"),
+  saveSettingsButton: $("saveSettingsButton") as HTMLButtonElement,
   closeSettingsButton: $("closeSettingsButton") as HTMLButtonElement,
   settingsHeading: $("settingsHeading"),
   settingsSubheading: $("settingsSubheading"),
@@ -461,6 +462,19 @@ function loadSettings() {
 
 function saveSettings() {
   localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
+}
+
+function rerenderLatestResult() {
+  if (latestResult?.type === "kmer") renderKmerResult(latestResult);
+  else if (latestResult?.type === "index") renderIndexResult(latestResult);
+}
+
+function commitSettings() {
+  saveSettings();
+  applyAppearance();
+  updateProviderBadge();
+  rerenderLatestResult();
+  appendLog("Settings saved.");
 }
 
 function enabledProviders() {
@@ -863,21 +877,32 @@ function renderKmerResult(data: KmerResult) {
 }
 
 function renderGreedyPath(title: string, steps: GreedyStep[], direction: "upstream" | "downstream") {
+  const compact = appSettings.kmerTreeMode === "bases";
   return `
-    <div class="greedy-path ${direction}">
+    <div class="greedy-path ${direction} ${compact ? "compact" : ""}">
       <h3>${escapeHtml(title)}</h3>
       ${
         steps.length === 0
           ? `<div class="tree-empty">No covered greedy step</div>`
           : steps
               .map(
-                (step) => `
-                  <div class="greedy-step ${coverageClass(step.coverage)}">
-                    <span>${formatNumber(step.step)} · ${escapeHtml(step.base)}</span>
-                    <code>${escapeHtml(step.kmer)}</code>
-                    <strong class="coverage ${coverageClass(step.coverage)}">${formatNumber(step.coverage)}</strong>
-                  </div>
-                `
+                (step) => {
+                  const detail = `Step: ${step.step}\nBase: ${step.base}\nk-mer: ${step.kmer}\nCoverage: ${formatNumber(step.coverage)}`;
+                  return compact
+                    ? `
+                      <div class="greedy-step compact ${coverageClass(step.coverage)}" title="${escapeHtml(detail)}">
+                        <strong>${escapeHtml(step.base)}</strong>
+                        <span>${formatNumber(step.coverage)}</span>
+                      </div>
+                    `
+                    : `
+                      <div class="greedy-step ${coverageClass(step.coverage)}">
+                        <span>${formatNumber(step.step)} · ${escapeHtml(step.base)}</span>
+                        <code>${escapeHtml(step.kmer)}</code>
+                        <strong class="coverage ${coverageClass(step.coverage)}">${formatNumber(step.coverage)}</strong>
+                      </div>
+                    `;
+                }
               )
               .join("")
       }
@@ -1106,7 +1131,7 @@ function updateQueryModeControls() {
   if (queryMode === "kmer") {
     elements.queryInput.placeholder = "Enter a k-mer or longer A/C/G/T sequence";
   } else if (queryMode === "index") {
-    elements.queryInput.placeholder = "Enter a 0/1/2/3 encoded index";
+    elements.queryInput.placeholder = "Enter a decimal index";
   } else {
     elements.queryInput.placeholder = "Enter a full A/C/G/T sequence path";
   }
@@ -1190,6 +1215,7 @@ elements.stopButton.addEventListener("click", stopAnalyzer);
 elements.queryButton.addEventListener("click", runQuery);
 elements.sendChatButton.addEventListener("click", sendChat);
 elements.settingsButton.addEventListener("click", () => openSettings("providers"));
+elements.saveSettingsButton.addEventListener("click", commitSettings);
 elements.closeSettingsButton.addEventListener("click", closeSettings);
 elements.settingsPanel.addEventListener("click", (event) => {
   if (event.target === elements.settingsPanel) closeSettings();
@@ -1264,7 +1290,7 @@ document.querySelectorAll<HTMLButtonElement>(".graph-mode-card").forEach((button
       appSettings.kmerTreeMode = mode;
       saveSettings();
       applyAppearance();
-      if (latestResult?.type === "kmer") renderKmerResult(latestResult);
+      rerenderLatestResult();
     }
   });
 });

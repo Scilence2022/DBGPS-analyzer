@@ -119,7 +119,7 @@ Supported commands:
 |:---|:---|
 | `summary` | Return k, read-length limit, distinct k-mer count, and total saturated k-mer coverage. |
 | `kmer <ACGT...> [upstreamDepth] [downstreamDepth]` | Query one DNA sequence. If the sequence is exactly k bases, it is used directly. If it is longer than k, the leftmost k-mer anchors upstream analysis and the rightmost k-mer anchors downstream analysis. Returns canonical coverage, one-step neighbors, and optional multi-step covered branch trees. Depth values are clamped to 0-6. |
-| `index <0123...> [upstreamDepth] [downstreamDepth]` | Decode each index digit with the default 0/1/2/3 to A/C/G/T scheme, then run greedy upstream/downstream path search. If the decoded DNA is shorter than k, covered k-mers matching that prefix are returned as multiple greedy start k-mers up to the start limit. |
+| `index <DECIMAL> [upstreamDepth] [downstreamDepth]` | Convert a decimal index to base-4, decode 0/1/2/3 with the default A/C/G/T scheme, then run greedy upstream/downstream path search. If the decoded DNA is shorter than k, covered k-mers matching that prefix are returned as multiple greedy start k-mers up to the start limit. |
 | `sequence <ACGT...>` | Query every ordered k-mer in a DNA strand and return coverage, missing positions, path completeness, and adjacent coverage ratios. |
 | `help` | Return supported commands. |
 | `exit` | Stop the interactive kernel. |

@@ -533,6 +533,43 @@ code {
   font-weight: 700;
 }
 
+.greedy-path.compact {
+  grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+  align-items: start;
+}
+
+.greedy-path.compact h3,
+.greedy-path.compact .tree-empty {
+  grid-column: 1 / -1;
+}
+
+.greedy-step.compact {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  grid-template-columns: 1fr;
+  place-items: center;
+  align-content: center;
+  gap: 0;
+  padding: 0;
+  border-width: 2px;
+  border-left-width: 2px;
+  border-radius: 999px;
+}
+
+.greedy-step.compact strong {
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.greedy-step.compact span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+}
+
 .kmer-tree-panel {
   min-height: 280px;
   display: grid;
@@ -1051,6 +1088,12 @@ td {
   gap: 16px;
   padding: 18px 20px;
   border-bottom: 1px solid var(--border);
+}
+
+.settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .settings-tab {

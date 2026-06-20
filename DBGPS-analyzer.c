@@ -1165,7 +1165,13 @@ static int kmer_string_coverage(const char *seq, int k, uint64_t mask, kc_c4x_t 
 
 static char *index_token_to_dna(const char *token, int *out_len, char *err, size_t err_len)
 {
-    int n = 0;
+    int digit_count = 0;
+    int start = 0;
+    int current_len;
+    int rev_len = 0;
+    int rev_cap;
+    unsigned char *digits;
+    char *reversed;
     char *seq;
 
     if (token == 0 || *token == '\0') {
@@ -1173,25 +1179,70 @@ static char *index_token_to_dna(const char *token, int *out_len, char *err, size
         return 0;
     }
 
-    MALLOC(seq, strlen(token) + 1);
+    MALLOC(digits, strlen(token) + 1);
     for (const unsigned char *p = (const unsigned char*)token; *p; ++p) {
         if (isspace(*p)) continue;
-        if (*p < '0' || *p > '3') {
-            snprintf(err, err_len, "invalid index digit '%c'; only 0/1/2/3 are supported", *p);
-            free(seq);
+        if (!isdigit(*p)) {
+            snprintf(err, err_len, "invalid decimal index digit '%c'; only 0-9 are supported", *p);
+            free(digits);
             return 0;
         }
-        seq[n++] = (char)nt4_seq_table[*p - '0'];
+        digits[digit_count++] = (unsigned char)(*p - '0');
     }
 
-    if (n == 0) {
+    if (digit_count == 0) {
         snprintf(err, err_len, "empty index argument");
-        free(seq);
+        free(digits);
         return 0;
     }
 
-    seq[n] = '\0';
-    *out_len = n;
+    while (start < digit_count && digits[start] == 0) ++start;
+    if (start == digit_count) {
+        MALLOC(seq, 2);
+        seq[0] = (char)nt4_seq_table[0];
+        seq[1] = '\0';
+        *out_len = 1;
+        free(digits);
+        return seq;
+    }
+
+    current_len = digit_count - start;
+    memmove(digits, digits + start, current_len);
+    rev_cap = digit_count * 2 + 2;
+    MALLOC(reversed, rev_cap);
+
+    while (current_len > 0) {
+        int carry = 0;
+        int write = 0;
+        int seen_nonzero = 0;
+
+        for (int i = 0; i < current_len; ++i) {
+            int value = carry * 10 + digits[i];
+            int quotient = value / 4;
+            carry = value % 4;
+            if (quotient > 0 || seen_nonzero) {
+                digits[write++] = (unsigned char)quotient;
+                seen_nonzero = 1;
+            }
+        }
+
+        if (rev_len + 1 >= rev_cap) {
+            rev_cap *= 2;
+            REALLOC(reversed, rev_cap);
+        }
+        reversed[rev_len++] = (char)nt4_seq_table[carry];
+        current_len = write;
+    }
+
+    MALLOC(seq, rev_len + 1);
+    for (int i = 0; i < rev_len; ++i) {
+        seq[i] = reversed[rev_len - 1 - i];
+    }
+    seq[rev_len] = '\0';
+    *out_len = rev_len;
+
+    free(reversed);
+    free(digits);
     return seq;
 }
 
@@ -1378,7 +1429,7 @@ static void emit_help_json(void)
     fprintf(stdout, ",");
     json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
-    json_string(stdout, "index <0123...> [upstreamDepth] [downstreamDepth]");
+    json_string(stdout, "index <decimalInteger> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
