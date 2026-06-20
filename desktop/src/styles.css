@@ -328,6 +328,10 @@ textarea:focus {
   display: none;
 }
 
+.query-options label.hidden {
+  display: none;
+}
+
 .query-options label {
   display: grid;
   gap: 5px;
@@ -375,6 +379,16 @@ textarea:focus {
 
 .section-title {
   margin-bottom: 12px;
+}
+
+.result-band .section-title {
+  justify-content: space-between;
+}
+
+.section-title-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .section-title svg {

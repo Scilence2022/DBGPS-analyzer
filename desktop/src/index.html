@@ -99,6 +99,10 @@
               </button>
             </div>
             <div id="queryOptions" class="query-options">
+              <label id="indexBaseLengthOption" class="hidden">
+                <span>Index base length</span>
+                <input id="indexBaseLengthInput" type="number" min="1" max="300" step="1" value="31" />
+              </label>
               <label>
                 <span>Upstream steps</span>
                 <input id="upstreamDepthInput" type="number" min="0" max="6" step="1" value="2" />
@@ -113,8 +117,13 @@
 
           <section class="result-band">
             <div class="section-title">
-              <i data-lucide="activity"></i>
-              <h2>Diagnostics</h2>
+              <div class="section-title-main">
+                <i data-lucide="activity"></i>
+                <h2>Diagnostics</h2>
+              </div>
+              <button id="diagnosticsSettingsButton" class="icon-only" title="Open diagnostics settings">
+                <i data-lucide="settings"></i>
+              </button>
             </div>
             <div id="resultView" class="result-view empty-state">Waiting for query results</div>
           </section>
@@ -155,7 +164,7 @@
               <i data-lucide="sliders-horizontal"></i>
               <div>
                 <h2>Settings</h2>
-                <p>LLM providers, model routing, and appearance</p>
+                <p>LLM providers, model routing, diagnostics, and appearance</p>
               </div>
             </div>
             <button class="settings-tab-button active" data-settings-tab="providers">
@@ -169,6 +178,10 @@
             <button class="settings-tab-button" data-settings-tab="appearance">
               <i data-lucide="palette"></i>
               <span>Appearance</span>
+            </button>
+            <button class="settings-tab-button" data-settings-tab="diagnostics">
+              <i data-lucide="activity"></i>
+              <span>Diagnostics</span>
             </button>
           </nav>
 
@@ -245,7 +258,10 @@
                   <span>Follow the operating system appearance.</span>
                 </button>
               </div>
-              <div class="settings-toolbar compact">
+            </div>
+
+            <div id="diagnosticsSettingsTab" class="settings-tab">
+              <div class="settings-toolbar">
                 <div>
                   <strong>Graph Display</strong>
                   <span>Choose how multi-step k-mer branches are rendered in Diagnostics.</span>

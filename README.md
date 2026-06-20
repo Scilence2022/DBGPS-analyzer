@@ -119,7 +119,7 @@ Supported commands:
 |:---|:---|
 | `summary` | Return k, read-length limit, distinct k-mer count, and total saturated k-mer coverage. |
 | `kmer <ACGT...> [upstreamDepth] [downstreamDepth]` | Query one DNA sequence. If the sequence is exactly k bases, it is used directly. If it is longer than k, the leftmost k-mer anchors upstream analysis and the rightmost k-mer anchors downstream analysis. Returns canonical coverage, one-step neighbors, and optional multi-step covered branch trees. Depth values are clamped to 0-6. |
-| `index <DECIMAL> [upstreamDepth] [downstreamDepth]` | Convert a decimal index to base-4, decode 0/1/2/3 with the default A/C/G/T scheme, then run greedy upstream/downstream path search. If the decoded DNA is shorter than k, covered k-mers matching that prefix are returned as multiple greedy start k-mers up to the start limit. |
+| `index <DECIMAL> <baseLength> [upstreamDepth] [downstreamDepth]` | Convert a decimal index to base-4, decode 0/1/2/3 with the default A/C/G/T scheme, left-pad with A bases when the decoded length is shorter than `baseLength`, then run greedy upstream/downstream path search. If the decoded DNA is still shorter than k, covered k-mers matching that prefix are returned as multiple greedy start k-mers up to the start limit. |
 | `sequence <ACGT...>` | Query every ordered k-mer in a DNA strand and return coverage, missing positions, path completeness, and adjacent coverage ratios. |
 | `help` | Return supported commands. |
 | `exit` | Stop the interactive kernel. |
@@ -128,13 +128,14 @@ Supported commands:
 
 The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, multi-step upstream/downstream k-mer tree visualization, a Settings workspace, dark/light/system appearance modes, and a real AI ChatBox wired through the Electron main process.
 
-The Settings workspace is organized into three tabs:
+The Settings workspace is organized into four tabs:
 
 | Tab | Purpose |
 |:---|:---|
 | Providers | Enable providers, configure API keys and base URLs, and refresh the available model catalog for each provider. |
 | Model Selection | Choose the active ChatBox provider, assign one model per enabled provider, and tune temperature and maximum tokens. |
 | Appearance | Switch between Light, Dark, and System styles. |
+| Diagnostics | Configure diagnostics graph display behavior. |
 
 The ChatBox can route diagnostics through these provider definitions:
 
