@@ -1,7 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import path from "node:path";
 
 type AnalyzerConfig = {
@@ -70,7 +70,10 @@ type PendingQuery = {
 let mainWindow: BrowserWindow | null = null;
 let session: AnalyzerSession | null = null;
 
-const repoRoot = path.resolve(__dirname, "..", "..");
+// In a packaged app the analyzer binary is shipped as an extra resource; in dev
+// it lives at the repo root (two levels up from desktop/dist) and can be built
+// on demand with `make`.
+const repoRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
 const analyzerPath = path.join(repoRoot, "DBGPS-analyzer");
 
 const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
@@ -250,8 +253,71 @@ function runMake(): Promise<string> {
 }
 
 async function ensureAnalyzerBuilt(force = false) {
+  if (app.isPackaged) {
+    if (!existsSync(analyzerPath)) {
+      throw new Error(`Bundled analyzer binary not found at ${analyzerPath}.`);
+    }
+    return "";
+  }
   if (!force && existsSync(analyzerPath)) return "";
   return runMake();
+}
+
+// --------------------------------------------------------------------------- #
+// Secret storage: API keys are persisted out of the renderer, encrypted with
+// the OS keychain (Electron safeStorage) when available. The renderer never
+// writes keys to localStorage.
+// --------------------------------------------------------------------------- #
+type SecretsFile = { encrypted: boolean; values: Record<string, string> };
+
+function secretsPath() {
+  return path.join(app.getPath("userData"), "provider-secrets.json");
+}
+
+function loadSecrets(): Record<string, string> {
+  const file = secretsPath();
+  if (!existsSync(file)) return {};
+  let parsed: SecretsFile;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [provider, stored] of Object.entries(parsed.values || {})) {
+    if (typeof stored !== "string" || !stored) continue;
+    if (parsed.encrypted && safeStorage.isEncryptionAvailable()) {
+      try {
+        out[provider] = safeStorage.decryptString(Buffer.from(stored, "base64"));
+      } catch {
+        /* skip values that cannot be decrypted (e.g. moved between machines) */
+      }
+    } else if (!parsed.encrypted) {
+      out[provider] = stored;
+    }
+  }
+  return out;
+}
+
+function saveSecrets(map: Record<string, string>) {
+  const encrypt = safeStorage.isEncryptionAvailable();
+  const values: Record<string, string> = {};
+  for (const [provider, key] of Object.entries(map || {})) {
+    if (typeof key !== "string" || !key) continue;
+    values[provider] = encrypt
+      ? safeStorage.encryptString(key).toString("base64")
+      : key;
+  }
+  const payload: SecretsFile = { encrypted: encrypt, values };
+  const file = secretsPath();
+  writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
+  // writeFileSync's mode only applies on creation; enforce it on every rewrite.
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    /* best effort (e.g. unsupported filesystem) */
+  }
+  return { ok: true, encrypted: encrypt };
 }
 
 class AnalyzerSession {
@@ -721,6 +787,9 @@ app.whenReady().then(() => {
 
   ipcMain.handle("ai:diagnose", async (_event, request) => aiDiagnose(request));
   ipcMain.handle("ai:refreshModels", async (_event, request) => refreshProviderModels(request));
+
+  ipcMain.handle("secrets:load", async () => loadSecrets());
+  ipcMain.handle("secrets:save", async (_event, map: Record<string, string>) => saveSecrets(map));
 
   createWindow();
 });

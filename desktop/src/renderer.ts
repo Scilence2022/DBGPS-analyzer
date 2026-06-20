@@ -471,8 +471,46 @@ function loadSettings() {
   }
 }
 
+// API keys are never written to localStorage; they live in the OS keychain via
+// the main process. `secretsReady` guards against persisting an empty secrets
+// map before the stored keys have been loaded back in at startup.
+let secretsReady = false;
+
+function persistSecrets() {
+  if (!secretsReady) return;
+  const map: Record<string, string> = {};
+  for (const provider of PROVIDERS) {
+    const key = appSettings.providers[provider.id]?.apiKey;
+    if (key) map[provider.id] = key;
+  }
+  window.dbgps.saveSecrets(map).catch(() => {});
+}
+
+async function loadSecrets() {
+  try {
+    const secrets = await window.dbgps.loadSecrets();
+    for (const id of Object.keys(secrets) as ProviderId[]) {
+      if (appSettings.providers[id]) appSettings.providers[id].apiKey = secrets[id];
+    }
+  } catch {
+    /* keychain unavailable: continue with no stored keys */
+  } finally {
+    secretsReady = true;
+    // Migrate + scrub: persist keys to the keychain and rewrite localStorage
+    // without them, removing any plaintext keys left by pre-keychain versions.
+    saveSettings();
+    renderSettings();
+    updateProviderBadge();
+  }
+}
+
 function saveSettings() {
-  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
+  const providers: Record<string, ProviderSettings> = {};
+  for (const id of Object.keys(appSettings.providers) as ProviderId[]) {
+    providers[id] = { ...appSettings.providers[id], apiKey: "" };
+  }
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ ...appSettings, providers }));
+  persistSecrets();
 }
 
 function rerenderLatestResult() {
@@ -579,7 +617,7 @@ function renderProviderList() {
           </label>
           <label>
             <span>API key</span>
-            <input class="secret-input" data-provider-api-key="${provider.id}" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.apiKey)}" placeholder="${escapeHtml(provider.envHint)}" />
+            <input class="secret-input" data-provider-api-key="${provider.id}" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.apiKey)}" placeholder="${escapeHtml(provider.envHint)}" />
           </label>
           <button type="button" class="icon-button refresh-provider-button" data-refresh-provider="${provider.id}">
             <i data-lucide="refresh-cw"></i>
@@ -1523,3 +1561,4 @@ renderSettings();
 updateQueryModeControls();
 renderFileList();
 renderIcons();
+void loadSecrets();
