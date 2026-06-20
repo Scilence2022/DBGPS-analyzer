@@ -17,6 +17,7 @@ type Neighbor = {
 type KmerTreeNode = Neighbor & {
   step: number;
   children: KmerTreeNode[];
+  exhausted?: boolean;
 };
 
 type GreedyStep = {
@@ -478,6 +479,7 @@ function rerenderLatestResult() {
   if (latestResult?.type === "kmer") renderKmerResult(latestResult);
   else if (latestResult?.type === "index") renderIndexResult(latestResult);
   else if (latestResult?.type === "sequence") renderSequenceResult(latestResult);
+  renderIcons();
 }
 
 function commitSettings() {
@@ -786,18 +788,31 @@ function renderTreeNodeCard(node: { kmer: string; coverage: number; base?: strin
   `;
 }
 
-function renderTreeNodes(nodes: KmerTreeNode[] | undefined, direction: "upstream" | "downstream", maxCoverage: number, showEmpty = true): string {
+function renderTreeExpandButton(direction: "upstream" | "downstream", path: string, kmer: string) {
+  const icon = direction === "upstream" ? "arrow-left" : "arrow-right";
+  const label = direction === "upstream" ? "Search one more upstream step" : "Search one more downstream step";
+  return `
+    <button type="button" class="tree-expand-button ${direction}" data-expand-tree="${direction}" data-tree-path="${escapeHtml(path)}" data-tree-kmer="${escapeHtml(kmer)}" title="${label}" aria-label="${label}">
+      <i data-lucide="${icon}"></i>
+    </button>
+  `;
+}
+
+function renderTreeNodes(nodes: KmerTreeNode[] | undefined, direction: "upstream" | "downstream", maxCoverage: number, showEmpty = true, pathPrefix = ""): string {
   if (!nodes || nodes.length === 0) {
     return showEmpty ? `<div class="tree-empty">No covered branches</div>` : "";
   }
 
-  return nodes.map((node) => {
-    const children = renderTreeNodes(node.children, direction, maxCoverage, false);
+  return nodes.map((node, index) => {
+    const path = pathPrefix ? `${pathPrefix}.${index}` : String(index);
+    const hasChildren = Boolean(node.children?.length);
+    const children = hasChildren ? renderTreeNodes(node.children, direction, maxCoverage, false, path) : "";
+    const leafAction = !hasChildren && !node.exhausted ? renderTreeExpandButton(direction, path, node.kmer) : "";
     const card = renderTreeNodeCard(node, false, maxCoverage);
     return direction === "upstream"
       ? `
         <div class="tree-node-row upstream">
-          <div class="tree-children">${children}</div>
+          <div class="tree-children ${hasChildren ? "has-branches" : "terminal-action"}">${hasChildren ? children : leafAction}</div>
           <span class="tree-edge" aria-hidden="true"></span>
           ${card}
         </div>
@@ -806,7 +821,7 @@ function renderTreeNodes(nodes: KmerTreeNode[] | undefined, direction: "upstream
         <div class="tree-node-row downstream">
           ${card}
           <span class="tree-edge" aria-hidden="true"></span>
-          <div class="tree-children">${children}</div>
+          <div class="tree-children ${hasChildren ? "has-branches" : "terminal-action"}">${hasChildren ? children : leafAction}</div>
         </div>
       `;
   }).join("");
@@ -889,6 +904,67 @@ function renderKmerResult(data: KmerResult) {
       ${renderNeighborTable("Downstream k-mers", data.downstream)}
     </div>
   `;
+}
+
+function findTreeNode(nodes: KmerTreeNode[] | undefined, path: string) {
+  if (!nodes) return null;
+  const indexes = path.split(".").map((part) => Number(part));
+  let current: KmerTreeNode | undefined;
+  let level = nodes;
+  for (const index of indexes) {
+    if (!Number.isInteger(index) || index < 0 || index >= level.length) return null;
+    current = level[index];
+    level = current.children || [];
+  }
+  return current || null;
+}
+
+function shiftTreeSteps(nodes: KmerTreeNode[] | undefined, baseStep: number): KmerTreeNode[] {
+  return (nodes || []).map((node) => ({
+    ...node,
+    step: baseStep + node.step,
+    children: shiftTreeSteps(node.children, baseStep)
+  }));
+}
+
+async function expandTreeNode(button: HTMLButtonElement) {
+  if (!analyzerReady || latestResult?.type !== "kmer") return;
+  const direction = button.dataset.expandTree === "upstream" ? "upstream" : button.dataset.expandTree === "downstream" ? "downstream" : null;
+  const path = button.dataset.treePath || "";
+  const kmer = button.dataset.treeKmer || "";
+  if (!direction || !path || !kmer) return;
+
+  const node = findTreeNode(direction === "upstream" ? latestResult.upstreamTree : latestResult.downstreamTree, path);
+  if (!node) return;
+
+  button.disabled = true;
+  button.classList.add("loading");
+  setStatus("Expanding graph", "running");
+  try {
+    const command = direction === "upstream" ? `kmer ${kmer} 1 0` : `kmer ${kmer} 0 1`;
+    const result = (await window.dbgps.queryAnalyzer(command)) as AnalyzerResult;
+    if (result.type !== "kmer") {
+      throw new Error(result.type === "error" ? result.message : "Unexpected expansion result.");
+    }
+    const next = direction === "upstream" ? result.upstreamTree : result.downstreamTree;
+    node.children = shiftTreeSteps(next, node.step);
+    node.exhausted = node.children.length === 0;
+    if (direction === "upstream") {
+      latestResult.upstreamDepth = Math.max(latestResult.upstreamDepth ?? 0, node.step + 1);
+    } else {
+      latestResult.downstreamDepth = Math.max(latestResult.downstreamDepth ?? 0, node.step + 1);
+    }
+    renderKmerResult(latestResult);
+    renderIcons();
+    setStatus("Kernel running", "running");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendLog(`Graph expansion failed: ${message}`);
+    setStatus("Expansion failed", "error");
+  } finally {
+    button.disabled = false;
+    button.classList.remove("loading");
+  }
 }
 
 function renderGreedyPath(title: string, steps: GreedyStep[], direction: "upstream" | "downstream") {
@@ -1319,6 +1395,12 @@ elements.stopButton.addEventListener("click", stopAnalyzer);
 elements.queryButton.addEventListener("click", runQuery);
 elements.diagnosticsSettingsButton.addEventListener("click", () => openSettings("diagnostics"));
 elements.resultView.addEventListener("click", (event) => {
+  const expandButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-expand-tree]");
+  if (expandButton) {
+    expandTreeNode(expandButton);
+    return;
+  }
+
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-chart]");
   const chartType = button?.dataset.sequenceChart;
   if (chartType === "bar" || chartType === "line") {
