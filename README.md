@@ -128,16 +128,36 @@ Supported commands:
 
 ### Electron Desktop App
 
-The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It is organized into four top-level views (plus a Settings workspace), all wired to the C tools through the Electron main process:
+The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It is organized into five top-level views (plus a Settings workspace), all wired to the C tools through the Electron main process:
 
 | View | Purpose |
 |:---|:---|
 | **Interactive** | Start/stop the `DBGPS-analyzer` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees; chat with the AI diagnostician. |
+| **Batch QC** | Load a reference set (FASTA **or** tab-delimited) and automatically score **every** strand against the loaded sequencing k-mer table — one row per strand showing observed/total k-mers, path completeness, and min/mean/max coverage. Front/back primer regions are trimmed first; click any strand to drill into its full coverage profile, and export the whole table as CSV. Reuses the kernel started in the Interactive tab. |
 | **Cross-links** | Run `DBGPS-links` on a FASTA and report the total number of k-mers shared across strands (entanglement), with k and minimum-shared-strands controls. |
 | **Seq-Filter** | Run `DBGPS-seq-filter` to screen entangled strands; choose k, max cross-links, primer length, and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
 | **Report** | Generate a **comprehensive diagnostics report** over a reference strand set: run all three tools (and `DBGPS-analyzer` batch metrics when NGS reads are supplied), with headline metrics, rule-based verdicts, the Sm/Kd/Kn table, cross-link and entanglement summaries, an optional AI interpretation, and one-click export to HTML or Markdown. |
 
 The combined report runs the three tools concurrently. `DBGPS-links` and `DBGPS-seq-filter` analyze the reference strands (k-mer entanglement of the designed library); `DBGPS-analyzer` additionally computes strand recovery (Sm), k-mer dropout (Kd), and k-mer noise (Kn) when NGS reads are provided.
+
+#### Input formats
+
+Every reference picker in the desktop app accepts two formats and auto-detects which one a file uses:
+
+1. **FASTA** (`>name` headers followed by sequence lines), optionally gzip-compressed.
+2. **Tab-delimited** index tables — one record per line as `Head-Index<TAB>DNA`, with an optional header row (e.g. `Head-Index   DNA`) that is skipped automatically:
+
+   ```text
+   Head-Index      DNA
+   101010102       CCTGCAGAGTAGCATGTCATTGATTCTAGTGC...GACACTGATGCATCCG
+   101010104       CCTGCAGAGTAGCATGTCATTGATTCTAGTGC...GACACTGATGCATCCG
+   ```
+
+   The first column becomes the strand name and the DNA column its sequence. Because the C tools read FASTA/FASTQ, tab-delimited inputs are converted to a temporary FASTA in the Electron main process before a tool runs.
+
+#### Primer trimming
+
+The Batch QC view exposes separate **front** and **back** primer lengths (default **18 bp** each, persisted across sessions). The configured number of bases is removed from each end of every reference strand before it is scored, so adapter/primer regions do not distort coverage or path-completeness. Strands shorter than `k` after trimming are reported as skipped. (`DBGPS-seq-filter` and the Report view keep their own symmetric primer length `-p`.)
 
 The Settings workspace is organized into four tabs:
 

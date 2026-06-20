@@ -1772,3 +1772,72 @@ details > summary {
 .narrative-body {
   line-height: 1.55;
 }
+
+/* Batch QC view */
+.batch-grid {
+  align-items: end;
+}
+.batch-hint {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+.batch-hint code {
+  background: var(--surface-strong);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.batch-progress {
+  font-size: 12px;
+  color: var(--muted, #667085);
+  font-variant-numeric: tabular-nums;
+}
+.batch-table td,
+.batch-table th {
+  white-space: nowrap;
+}
+.batch-table tbody tr.clickable {
+  cursor: pointer;
+}
+.batch-table tbody tr.clickable:hover {
+  background: var(--surface-strong);
+}
+.batch-table tr.skipped,
+.batch-table tr.error {
+  color: var(--muted, #667085);
+}
+.batch-note {
+  font-style: italic;
+}
+.path-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.path-pill.ok {
+  background: rgba(19, 122, 75, 0.14);
+  color: #137a4b;
+}
+.path-pill.bad {
+  background: rgba(180, 35, 24, 0.14);
+  color: #b42318;
+}
+.batch-detail:not(:empty) {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.batch-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.batch-detail-head h3 {
+  margin: 0;
+  font-size: 15px;
+  word-break: break-all;
+}
