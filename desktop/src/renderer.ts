@@ -78,7 +78,7 @@ type IndexResult = {
   maxStartKmers: number;
   startCount: number;
   reportedStarts: number;
-  bestStartCoverage?: number;
+  maxStartCoverage?: number;
   startLimitReached: boolean;
   starts: IndexStart[];
   message?: string;
@@ -1106,7 +1106,7 @@ function updateQueryModeControls() {
   if (queryMode === "kmer") {
     elements.queryInput.placeholder = "Enter a k-mer or longer A/C/G/T sequence";
   } else if (queryMode === "index") {
-    elements.queryInput.placeholder = "Enter a non-negative integer index";
+    elements.queryInput.placeholder = "Enter a 0/1/2/3 encoded index";
   } else {
     elements.queryInput.placeholder = "Enter a full A/C/G/T sequence path";
   }
