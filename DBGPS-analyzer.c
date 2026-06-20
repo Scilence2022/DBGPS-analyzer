@@ -7,7 +7,6 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/types.h>
-#include <errno.h>
 
 #include "ketopt.h" // command-line argument parser
 #include "kthread.h" // multi-threading models: pipeline and multi-threaded for loop
@@ -50,7 +49,7 @@ typedef struct {
 typedef struct {
     start_kmer_t items[Max_Index_Start_Kmers];
     int count;
-    int best_coverage;
+    int max_coverage;
     int limited;
 } start_kmer_list_t;
 
@@ -1151,25 +1150,6 @@ static char *copy_dna_slice(const char *seq, int start, int len)
     return out;
 }
 
-static char complement_base(char base)
-{
-    switch (base) {
-        case 'A': return 'T';
-        case 'C': return 'G';
-        case 'G': return 'C';
-        case 'T': return 'A';
-        default: return 'N';
-    }
-}
-
-static void reverse_complement_dna(const char *seq, int len, char *out)
-{
-    for (int i = 0; i < len; ++i) {
-        out[i] = complement_base(seq[len - 1 - i]);
-    }
-    out[len] = '\0';
-}
-
 static void canonical_kmer_string(const char *seq, int k, char *canonical)
 {
     uint64_t key = actgkmer_hashkey((unsigned char*)seq, (unsigned char)k);
@@ -1183,49 +1163,35 @@ static int kmer_string_coverage(const char *seq, int k, uint64_t mask, kc_c4x_t 
     return kmer_cov(key, mask, h);
 }
 
-static int parse_uint64_token(const char *token, uint64_t *out, char *err, size_t err_len)
+static char *index_token_to_dna(const char *token, int *out_len, char *err, size_t err_len)
 {
-    char *end = 0;
-    unsigned long long value;
+    int n = 0;
+    char *seq;
 
     if (token == 0 || *token == '\0') {
         snprintf(err, err_len, "missing index argument");
         return 0;
     }
-    if (*token == '-') {
-        snprintf(err, err_len, "index must be a non-negative integer");
+
+    MALLOC(seq, strlen(token) + 1);
+    for (const unsigned char *p = (const unsigned char*)token; *p; ++p) {
+        if (isspace(*p)) continue;
+        if (*p < '0' || *p > '3') {
+            snprintf(err, err_len, "invalid index digit '%c'; only 0/1/2/3 are supported", *p);
+            free(seq);
+            return 0;
+        }
+        seq[n++] = (char)nt4_seq_table[*p - '0'];
+    }
+
+    if (n == 0) {
+        snprintf(err, err_len, "empty index argument");
+        free(seq);
         return 0;
     }
 
-    errno = 0;
-    value = strtoull(token, &end, 10);
-    if (end == token || *end != '\0' || errno == ERANGE) {
-        snprintf(err, err_len, "index must be a non-negative integer");
-        return 0;
-    }
-
-    *out = (uint64_t)value;
-    return 1;
-}
-
-static char *index_to_dna(uint64_t index, int *out_len)
-{
-    uint64_t tmp = index;
-    int len = 1;
-    char *seq;
-
-    while (tmp >= 4) {
-        tmp >>= 2;
-        ++len;
-    }
-
-    MALLOC(seq, len + 1);
-    for (int i = len - 1; i >= 0; --i) {
-        seq[i] = (char)nt4_seq_table[index & 3ULL];
-        index >>= 2;
-    }
-    seq[len] = '\0';
-    *out_len = len;
+    seq[n] = '\0';
+    *out_len = n;
     return seq;
 }
 
@@ -1236,7 +1202,7 @@ static void clear_start_kmer_list(start_kmer_list_t *list)
         list->items[i].kmer = 0;
     }
     list->count = 0;
-    list->best_coverage = 0;
+    list->max_coverage = 0;
     list->limited = 0;
 }
 
@@ -1251,14 +1217,6 @@ static int start_kmer_exists(start_kmer_list_t *list, const char *kmer)
 static void add_start_kmer_candidate(start_kmer_list_t *list, const char *kmer, int coverage)
 {
     if (coverage <= 0) return;
-
-    if (coverage > list->best_coverage) {
-        clear_start_kmer_list(list);
-        list->best_coverage = coverage;
-    } else if (coverage < list->best_coverage) {
-        return;
-    }
-
     if (start_kmer_exists(list, kmer)) return;
     if (list->count >= Max_Index_Start_Kmers) {
         list->limited = 1;
@@ -1267,12 +1225,18 @@ static void add_start_kmer_candidate(start_kmer_list_t *list, const char *kmer, 
 
     list->items[list->count].kmer = copy_dna_slice(kmer, 0, (int)strlen(kmer));
     list->items[list->count].coverage = coverage;
+    if (coverage > list->max_coverage) list->max_coverage = coverage;
     ++list->count;
 }
 
 static void collect_index_completions_recursive(start_kmer_list_t *list, char *candidate, int pos, int k, uint64_t mask, kc_c4x_t *h)
 {
     static const char bases[4] = {'A', 'C', 'G', 'T'};
+
+    if (list->count >= Max_Index_Start_Kmers) {
+        list->limited = 1;
+        return;
+    }
 
     if (pos == k) {
         candidate[k] = '\0';
@@ -1286,13 +1250,27 @@ static void collect_index_completions_recursive(start_kmer_list_t *list, char *c
     }
 }
 
+static uint64_t dna_prefix_code(const char *prefix, int prefix_len)
+{
+    uint64_t code = 0;
+    for (int i = 0; i < prefix_len; ++i) {
+        code = (code << 2) | (uint64_t)seq_nt4_table[(uint8_t)prefix[i]];
+    }
+    return code;
+}
+
+static int kmer_has_prefix(uint64_t kmer, int k, uint64_t prefix_code, int prefix_len)
+{
+    int shift = (k - prefix_len) * 2;
+    return (kmer >> shift) == prefix_code;
+}
+
 static void collect_index_starts_by_scan(start_kmer_list_t *list, kc_c4x_t *h, int k, const char *prefix, int prefix_len, uint64_t mask)
 {
+    uint64_t prefix_code = dna_prefix_code(prefix, prefix_len);
     char *seq;
-    char *rc;
 
     MALLOC(seq, k + 1);
-    MALLOC(rc, k + 1);
 
     for (int j = 0; j < 1<<h->p; ++j) {
         kc_c4_t *g = h->h[j];
@@ -1306,22 +1284,31 @@ static void collect_index_starts_by_scan(start_kmer_list_t *list, kc_c4x_t *h, i
 
                 if (cov <= 0) continue;
 
-                uint64_acgt(kmer, (unsigned char*)seq, (unsigned char)k);
-                seq[k] = '\0';
-                if (strncmp(seq, prefix, prefix_len) == 0) {
+                if (kmer_has_prefix(kmer, k, prefix_code, prefix_len)) {
+                    uint64_acgt(kmer, (unsigned char*)seq, (unsigned char)k);
+                    seq[k] = '\0';
                     add_start_kmer_candidate(list, seq, cov);
-                    continue;
+                    if (list->count >= Max_Index_Start_Kmers) {
+                        list->limited = 1;
+                        goto done;
+                    }
                 }
 
-                reverse_complement_dna(seq, k, rc);
-                if (strncmp(rc, prefix, prefix_len) == 0) {
-                    add_start_kmer_candidate(list, rc, cov);
+                uint64_t rc_kmer = comp_rev(kmer, (unsigned char)k);
+                if (rc_kmer != kmer && kmer_has_prefix(rc_kmer, k, prefix_code, prefix_len)) {
+                    uint64_acgt(rc_kmer, (unsigned char*)seq, (unsigned char)k);
+                    seq[k] = '\0';
+                    add_start_kmer_candidate(list, seq, cov);
+                    if (list->count >= Max_Index_Start_Kmers) {
+                        list->limited = 1;
+                        goto done;
+                    }
                 }
             }
         }
     }
 
-    free(rc);
+done:
     free(seq);
 }
 
@@ -1330,7 +1317,7 @@ static void collect_index_start_kmers(start_kmer_list_t *list, kc_c4x_t *h, int 
     int missing = k - prefix_len;
 
     list->count = 0;
-    list->best_coverage = 0;
+    list->max_coverage = 0;
     list->limited = 0;
 
     if (missing <= Max_Index_Enumerate_Bases) {
@@ -1391,7 +1378,7 @@ static void emit_help_json(void)
     fprintf(stdout, ",");
     json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
-    json_string(stdout, "index <nonnegativeInteger> [upstreamDepth] [downstreamDepth]");
+    json_string(stdout, "index <0123...> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
@@ -1632,13 +1619,19 @@ static void emit_index_start_json(kc_c4x_t *h, int k, uint64_t mask, const char 
     free(left_canonical);
 }
 
-static void emit_index_query_json(kc_c4x_t *h, int k, const char *index_token, uint64_t index, int upstream_depth, int downstream_depth)
+static void emit_index_query_json(kc_c4x_t *h, int k, const char *index_token, int upstream_depth, int downstream_depth)
 {
     uint64_t mask = (1ULL<<k*2) - 1;
     int decoded_len = 0;
-    char *decoded = index_to_dna(index, &decoded_len);
+    char err[160];
+    char *decoded = index_token_to_dna(index_token, &decoded_len, err, sizeof(err));
     int up_depth = clamp_tree_depth(upstream_depth);
     int down_depth = clamp_tree_depth(downstream_depth);
+
+    if (decoded == 0) {
+        emit_error_json(err);
+        return;
+    }
 
     fprintf(stdout, "{\"type\":\"index\",\"index\":");
     json_string(stdout, index_token);
@@ -1658,7 +1651,7 @@ static void emit_index_query_json(kc_c4x_t *h, int k, const char *index_token, u
     } else {
         start_kmer_list_t starts;
         collect_index_start_kmers(&starts, h, k, decoded, decoded_len, mask);
-        fprintf(stdout, ",\"startCount\":%d,\"reportedStarts\":%d,\"bestStartCoverage\":%d,\"startLimitReached\":%s,\"starts\":[", starts.count, starts.count, starts.best_coverage, starts.limited ? "true" : "false");
+        fprintf(stdout, ",\"startCount\":%d,\"reportedStarts\":%d,\"maxStartCoverage\":%d,\"startLimitReached\":%s,\"starts\":[", starts.count, starts.count, starts.max_coverage, starts.limited ? "true" : "false");
         for (int i = 0; i < starts.count; ++i) {
             if (i) fputc(',', stdout);
             emit_index_start_json(h, k, mask, starts.items[i].kmer, k, starts.items[i].kmer, starts.items[i].kmer, up_depth, down_depth);
@@ -1837,7 +1830,6 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         } else if (command_equals(cmd, "index")) {
             char *depth_arg = arg;
             char *index_token = arg;
-            uint64_t index = 0;
             int upstream_depth = 1;
             int downstream_depth = 1;
             while (*depth_arg && !isspace((unsigned char)*depth_arg)) ++depth_arg;
@@ -1845,14 +1837,12 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 *depth_arg++ = '\0';
                 depth_arg = trim_left(depth_arg);
             }
-            if (!parse_uint64_token(index_token, &index, err, sizeof(err))) {
-                emit_error_json(err);
-            } else if (!parse_nonnegative_int_token(&depth_arg, 1, &upstream_depth)) {
+            if (!parse_nonnegative_int_token(&depth_arg, 1, &upstream_depth)) {
                 emit_error_json("upstream depth must be a non-negative integer");
             } else if (!parse_nonnegative_int_token(&depth_arg, upstream_depth, &downstream_depth)) {
                 emit_error_json("downstream depth must be a non-negative integer");
             } else {
-                emit_index_query_json(h, k, index_token, index, upstream_depth, downstream_depth);
+                emit_index_query_json(h, k, index_token, upstream_depth, downstream_depth);
             }
         } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
