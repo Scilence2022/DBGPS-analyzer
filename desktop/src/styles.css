@@ -820,16 +820,123 @@ code {
   font-weight: 700;
 }
 
-.coverage-bars {
-  height: 170px;
-  display: flex;
-  align-items: end;
-  gap: 2px;
-  padding: 10px;
+.sequence-chart-panel {
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-strong);
+  margin-bottom: 14px;
+}
+
+.sequence-chart-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.sequence-chart-header strong {
+  display: block;
+  font-size: 13px;
+}
+
+.sequence-chart-header span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chart-toggle {
+  flex: 0 0 auto;
+  display: inline-grid;
+  grid-template-columns: repeat(2, 1fr);
   overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.chart-toggle button {
+  min-width: 72px;
+  height: 34px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.chart-toggle button.active {
+  background: var(--accent);
+  color: white;
+}
+
+.sequence-chart-frame {
+  display: grid;
+  grid-template-columns: 18px 54px minmax(0, 1fr);
+  grid-template-rows: 180px 26px;
+  gap: 6px 8px;
+  align-items: stretch;
+}
+
+.y-axis-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.x-axis-label {
+  grid-column: 3;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.y-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 0 0 1px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.x-axis {
+  grid-column: 3;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-plot {
+  position: relative;
+  min-width: 0;
+  height: 180px;
+  padding: 8px 10px;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background:
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px) 0 0 / 100% 50%,
+    var(--surface);
+  overflow: hidden;
+}
+
+.coverage-bars {
+  height: 100%;
+  display: flex;
+  align-items: end;
+  gap: 2px;
 }
 
 .coverage-bars span {
@@ -847,6 +954,31 @@ code {
 .coverage-bars span.zero {
   height: 4px;
   background: var(--red);
+}
+
+.coverage-line-chart {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.chart-grid-line {
+  stroke: color-mix(in srgb, var(--border) 72%, transparent);
+  stroke-width: 0.45;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-grid-line.baseline {
+  stroke: var(--border);
+}
+
+.coverage-line {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
 }
 
 .table-note {
