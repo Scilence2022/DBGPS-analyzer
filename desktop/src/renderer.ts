@@ -764,15 +764,21 @@ function circularNodeSize(coverage: number, maxCoverage: number) {
   return Math.round(30 + 38 * (1 - Math.exp(-coverage / scale)));
 }
 
-function renderTreeNodeCard(node: { kmer: string; coverage: number; base?: string; step?: number }, center = false, maxCoverage = node.coverage) {
+function renderTreeNodeCard(
+  node: { kmer: string; coverage: number; base?: string; step?: number },
+  center = false,
+  maxCoverage = node.coverage,
+  anchorDirection: "left" | "right" | null = null
+) {
   const meta = center ? "Query k-mer" : `Step ${formatNumber(node.step)} · ${escapeHtml(node.base || "")}`;
   const detail = center
     ? `Query k-mer: ${node.kmer}\nCoverage: ${formatNumber(node.coverage)}`
     : `Base: ${node.base || ""}\nStep: ${formatNumber(node.step)}\nk-mer: ${node.kmer}\nCoverage: ${formatNumber(node.coverage)}`;
+  const anchorClass = center && anchorDirection ? ` anchor-${anchorDirection}` : "";
   if (appSettings.kmerTreeMode === "bases") {
     const size = center ? 86 : circularNodeSize(node.coverage, maxCoverage);
     return `
-      <div class="tree-node-card compact ${center ? "center" : ""} ${coverageClass(node.coverage)}" style="--node-size:${size}px" title="${escapeHtml(detail)}">
+      <div class="tree-node-card compact ${center ? "center" : ""}${anchorClass} ${coverageClass(node.coverage)}" style="--node-size:${size}px" title="${escapeHtml(detail)}">
         ${center ? `<code>${escapeHtml(node.kmer)}</code>` : `<strong>${escapeHtml(node.base || "?")}</strong>`}
         <span>${formatNumber(node.coverage)}</span>
       </div>
@@ -780,7 +786,7 @@ function renderTreeNodeCard(node: { kmer: string; coverage: number; base?: strin
   }
 
   return `
-    <div class="tree-node-card ${center ? "center" : ""} ${coverageClass(node.coverage)}" title="${escapeHtml(detail)}">
+    <div class="tree-node-card ${center ? "center" : ""}${anchorClass} ${coverageClass(node.coverage)}" title="${escapeHtml(detail)}">
       <span>${meta}</span>
       <code>${escapeHtml(node.kmer)}</code>
       <strong class="coverage ${coverageClass(node.coverage)}">${formatNumber(node.coverage)}</strong>
@@ -835,9 +841,9 @@ function renderKmerTree(data: KmerResult) {
   const center = splitAnchors
     ? `
       <div class="tree-anchor-pair">
-        ${renderTreeNodeCard({ kmer: leftAnchor, coverage: data.leftCoverage ?? data.coverage }, true, maxCoverage)}
+        ${renderTreeNodeCard({ kmer: leftAnchor, coverage: data.leftCoverage ?? data.coverage }, true, maxCoverage, "left")}
         <span class="anchor-gap">...</span>
-        ${renderTreeNodeCard({ kmer: rightAnchor, coverage: data.rightCoverage ?? data.coverage }, true, maxCoverage)}
+        ${renderTreeNodeCard({ kmer: rightAnchor, coverage: data.rightCoverage ?? data.coverage }, true, maxCoverage, "right")}
       </div>
     `
     : renderTreeNodeCard({ kmer: leftAnchor, coverage: data.coverage }, true, maxCoverage);
