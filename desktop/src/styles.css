@@ -594,7 +594,10 @@ code {
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface-strong);
+  background:
+    linear-gradient(to right, color-mix(in srgb, var(--border) 28%, transparent) 1px, transparent 1px) 0 0 / 28px 28px,
+    linear-gradient(to bottom, color-mix(in srgb, var(--border) 20%, transparent) 1px, transparent 1px) 0 0 / 28px 28px,
+    var(--surface-strong);
   overflow: auto;
 }
 
@@ -654,40 +657,40 @@ code {
   gap: 10px;
 }
 
-.tree-children:not(:empty)::before {
+.tree-children.has-branches::before {
   content: "";
   position: absolute;
   top: 18px;
   bottom: 18px;
   width: 1px;
-  background: var(--border);
+  background: color-mix(in srgb, var(--accent) 36%, var(--border));
 }
 
-.tree-node-row.upstream > .tree-children:not(:empty)::before {
+.tree-node-row.upstream > .tree-children.has-branches::before {
   right: -4px;
 }
 
-.tree-node-row.downstream > .tree-children:not(:empty)::before {
+.tree-node-row.downstream > .tree-children.has-branches::before {
   left: -4px;
 }
 
 .tree-edge {
   position: relative;
-  width: 32px;
-  height: 1px;
-  flex: 0 0 32px;
-  background: var(--border);
+  width: 38px;
+  height: 2px;
+  flex: 0 0 38px;
+  background: color-mix(in srgb, var(--accent) 34%, var(--border));
 }
 
 .tree-edge::after {
   content: "";
   position: absolute;
-  top: -3px;
-  width: 7px;
-  height: 7px;
-  border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  background: var(--surface-strong);
+  top: -4px;
+  width: 9px;
+  height: 9px;
+  border-top: 2px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-right: 2px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: transparent;
 }
 
 .tree-node-row.upstream > .tree-edge::after {
@@ -710,6 +713,7 @@ code {
   border-left: 4px solid var(--green);
   border-radius: 8px;
   background: var(--surface);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--text) 8%, transparent);
 }
 
 .tree-node-card.low {
@@ -739,6 +743,7 @@ code {
   border-left-width: 2px;
   border-radius: 999px;
   background: var(--surface);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--text) 8%, transparent);
 }
 
 .tree-node-card.compact.center {
@@ -780,6 +785,53 @@ code {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.tree-children.terminal-action {
+  min-width: 38px;
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+}
+
+.tree-expand-button {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, var(--border));
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+  cursor: pointer;
+}
+
+.tree-expand-button:hover:not(:disabled) {
+  background: var(--accent);
+  color: white;
+  transform: translateY(-1px);
+}
+
+.tree-expand-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.tree-expand-button.loading svg {
+  animation: spin 0.9s linear infinite;
+}
+
+.tree-expand-button svg {
+  width: 17px;
+  height: 17px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .kmer-tree-panel.compact-mode .tree-side {
