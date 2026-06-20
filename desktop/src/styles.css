@@ -730,6 +730,11 @@ code {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+.tree-node-card.center.anchor-right {
+  border-left: 1px solid var(--border);
+  border-right: 4px solid var(--accent);
+}
+
 .tree-node-card.compact {
   width: var(--node-size);
   height: var(--node-size);
@@ -751,6 +756,11 @@ code {
   height: 86px;
   border-radius: 999px;
   padding: 0 14px;
+}
+
+.tree-node-card.compact.center.anchor-right {
+  border-left-color: var(--border);
+  border-right: 2px solid var(--accent);
 }
 
 .tree-node-card.compact strong {
