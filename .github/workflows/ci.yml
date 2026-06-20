@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  c-tools:
+    name: C tools (build + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zlib
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+
+      - name: Build (warnings as errors) and run unit + e2e tests
+        run: ./tests/run.sh
+
+      - name: Rebuild with AddressSanitizer and re-run e2e tests
+        # detect_leaks=0: this pass guards against memory-safety errors
+        # (out-of-bounds, use-after-free); a timeout keeps a hang from stalling CI.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          make clean
+          make asan=1
+          timeout 180 python3 tests/test_cli.py
+
+  desktop:
+    name: Desktop (typecheck + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      # We only typecheck/bundle here; no need to download the Electron binary.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        # --ignore-scripts skips Electron's binary-download postinstall; this job
+        # only type-checks and bundles, so the runtime binary is not needed.
+        run: npm ci --ignore-scripts
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build

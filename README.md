@@ -49,10 +49,12 @@ In DNA data storage, errors and bias in synthesis, PCR amplification, and sequen
 ### Building the Software
 Clone this repository and compile using the [Makefile](file:///Users/song/Github-Repos/DBGPS-analyzer/Makefile):
 ```bash
-git clone https://github.com/your-username/DBGPS-analyzer.git
+git clone https://github.com/Scilence2022/DBGPS-analyzer.git
 cd DBGPS-analyzer
 make
 ```
+
+The three tools share their k-mer / hash-table core through [`dbgps_core.h`](file:///Users/song/Github-Repos/DBGPS-analyzer/dbgps_core.h), so the nucleotide tables, invertible hash, k-mer encode/decode, and the saturating-count hash set are defined once.
 
 To compile individual tools:
 ```bash
@@ -154,13 +156,22 @@ The ChatBox can route diagnostics through these provider definitions:
 | Local | OpenAI-compatible chat completions | `http://localhost:11434/v1` |
 | Custom Endpoint | OpenAI-compatible chat completions | `http://localhost:8000/v1` |
 
-Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, API keys, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage.
+Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage. **API keys are stored separately, encrypted with the operating-system keychain via Electron `safeStorage`** (handled by the main process), and are never written to local app storage.
 
 ```bash
 cd desktop
 npm install
 npm run build
 npm run dev
+```
+
+To produce a distributable bundle (which packages the prebuilt analyzer binary as an app resource), build the analyzer at the repo root first, then run `electron-builder`:
+
+```bash
+make DBGPS-analyzer      # from the repo root
+cd desktop
+npm install
+npm run dist             # outputs to desktop/release/
 ```
 
 ---
@@ -178,7 +189,7 @@ DBGPS-links [options] <in.fa>
 | Option | Argument | Description | Default |
 |:---|:---|:---|:---|
 | `-k` | `INT` | k-mer size | `31` |
-| `-m` | `INT` | Maximum link occurrence threshold to evaluate | `1` |
+| `-m` | `INT` | Only count k-mers occurring in more than this many strands | `1` |
 
 > [!NOTE]
 > It is recommended to remove primers from the sequences before counting cross-links to prevent false positives from shared primer regions.
@@ -205,7 +216,22 @@ DBGPS-seq-filter [options] <in.fa>
 | `-k` | `INT` | k-mer size for entanglement analysis | `31` |
 | `-m` | `INT` | Maximum allowed cross-links per strand | `0` |
 | `-p` | `INT` | Length of primers to ignore at both ends | `18` |
-| `-s` | `None` | Output passed sequences (FASTA) instead of names of filtered ones | *(Enabled by default)* |
+| `-s` | `None` | Output the names of filtered (entangled) strands instead of the passed FASTA | *(Default: emit passed FASTA)* |
+
+---
+
+## Development & Testing
+
+The repository ships a test suite covering the shared k-mer core (C unit tests)
+and the three command-line tools end-to-end (Python tests driving the compiled
+binaries, including the interactive kernel protocol).
+
+```bash
+make test          # builds with -Wall -Wextra -Werror, runs unit + e2e tests
+./tests/run.sh     # same thing, invoked directly
+```
+
+Small deterministic FASTA fixtures live in [`tests/data/`](file:///Users/song/Github-Repos/DBGPS-analyzer/tests/data) and double as runnable examples. Continuous integration ([`.github/workflows/ci.yml`](file:///Users/song/Github-Repos/DBGPS-analyzer/.github/workflows/ci.yml)) builds the tools (warnings as errors), runs the suite, repeats the end-to-end tests under AddressSanitizer, and type-checks and bundles the desktop app on every push and pull request.
 
 ---
 

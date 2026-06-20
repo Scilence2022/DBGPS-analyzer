@@ -7,6 +7,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/types.h>
+#include <limits.h>
 
 #include "ketopt.h" // command-line argument parser
 #include "kthread.h" // multi-threading models: pipeline and multi-threaded for loop
@@ -15,11 +16,8 @@
 #include "kseq.h" // FASTA/Q parser
 KSEQ_INIT(gzFile, gzread)
 
-#include "khashl.h" // hash table
-#define KC_BITS 14
-#define KC_MAX ((1<<KC_BITS) - 1)
-#define kc_c4_eq(a, b) ((a)>>KC_BITS == (b)>>KC_BITS) // lower 10 bits for counts; higher bits for k-mer
-#define kc_c4_hash(a) ((a)>>KC_BITS)
+#define DBGPS_KC_BITS 14
+#include "dbgps_core.h" // shared k-mer / hash-table core
 
 #define Max_Path_Num 10000
 #define Max_Path_Len 300
@@ -29,11 +27,6 @@ KSEQ_INIT(gzFile, gzread)
 // Removed Max_Cov_Ratio define, now using a variable instead
 
 
-KHASHL_SET_INIT(, kc_c4_t, kc_c4, uint64_t, kc_c4_hash, kc_c4_eq)
-
-#define CALLOC(ptr, len) ((ptr) = (__typeof__(ptr))calloc((len), sizeof(*(ptr))))
-#define MALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc((len) * sizeof(*(ptr))))
-#define REALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), (len) * sizeof(*(ptr))))
 
 typedef struct {
     char base;
@@ -54,261 +47,6 @@ typedef struct {
 } start_kmer_list_t;
 
 static int clamp_tree_depth(int depth);
-
-const unsigned char seq_nt4_table[256] = { // translate ACGT to 0123
-        0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  3, 3, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  3, 3, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-        4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4
-};
-
-const unsigned char nt4_seq_table[4] = { // translate 0123 to ACGT
-        'A', 'C', 'G', 'T'};
-
-
-static inline uint64_t hash64(uint64_t key, uint64_t mask) // invertible integer hash function
-{
-    key = (~key + (key << 21)) & mask; // key = (key << 21) - key - 1;
-    key = key ^ key >> 24;
-    key = ((key + (key << 3)) + (key << 8)) & mask; // key * 265
-    key = key ^ key >> 14;
-    key = ((key + (key << 2)) + (key << 4)) & mask; // key * 21
-    key = key ^ key >> 28;
-    key = (key + (key << 31)) & mask;
-    return key;
-}
-
-// The inversion of hash64(). Modified from <https://naml.us/blog/tag/invertible>
-static inline uint64_t hash64i(uint64_t key, uint64_t mask) //
-{
-    uint64_t tmp;
-    // Invert key = key + (key << 31)
-    tmp = (key - (key << 31)); 	key = (key - (tmp << 31)) & mask;
-    // Invert key = key ^ (key >> 28)
-    tmp = key ^ key >> 28; 	key = key ^ tmp >> 28;
-    // Invert key *= 21
-    key = (key * 14933078535860113213ull) & mask;
-    // Invert key = key ^ (key >> 14)
-    tmp = key ^ key >> 14; 	tmp = key ^ tmp >> 14; 	tmp = key ^ tmp >> 14; 	key = key ^ tmp >> 14;
-    // Invert key *= 265
-    key = (key * 15244667743933553977ull) & mask;
-    // Invert key = key ^ (key >> 24)
-    tmp = key ^ key >> 24; 	key = key ^ tmp >> 24;
-    // Invert key = (~key) + (key << 21)
-    tmp = ~key; 	tmp = ~(key - (tmp << 21)); tmp = ~(key - (tmp << 21)); key = ~(key - (tmp << 21)) & mask;
-    return key;
-}
-
-
-unsigned char* uint64_acgt(uint64_t key, unsigned char* seq, unsigned char km_len){ //decode uint_64_t kmer  to actg
-    int p = km_len-1;
-    while (p >= 0){
-        int n = key % 4;
-        key = key >> 2;
-        *(seq + p) = nt4_seq_table[n];
-        p = p - 1;
-    }
-    return seq;
-}
-
-unsigned char* uint64_int8(uint64_t key, unsigned char* seq){
-    //decode uint_64_t kmer  to  char
-
-    uint64_t mask = (1ULL<<8)-1;
-    int i =0;
-    for(i =0; i< 8; i++){
-        *(seq+7-i) = key & mask;
-        mask = mask <<8;
-    }
-    return seq;
-}
-
-
-
-uint64_t comp_rev2(uint64_t x, unsigned char km_len){
-    uint64_t a, b=0ULL, mask = (1ULL<<km_len*2) - 1;
-
-    a = ~x; a = a & mask;
-    while((a & mask) > 0 ){
-        b = b<<2;
-        b = b + (a & 3ULL);
-        a = a>>2;
-    }
-//    b = ~b;
-    b = b & mask;
-    return b;
-}
-
-
-uint64_t comp_rev(uint64_t x, unsigned char km_len){
-//    if (c < 4) { // not an "N" base
-//        x[0] = (x[0] << 2 | c) & mask;                  // forward strand
-//        x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;
-//    uint64_t y=0;// mask = (1ULL << km_len * 2) - 1;
-    uint64_t y=0;
-    int i, c;
-    for(i=0;i<km_len;i++){
-        y = y << 2;
-        c = x & 3ULL;
-        y = y | (3-c);
-        x = x >> 2;
-    }
-    return y;
-}
-
-
-uint64_t min_hash_key(uint64_t x, unsigned char km_len){
-    uint64_t y = comp_rev(x, km_len);
-    return (x < y) ? x:y;
-}
-
-
-uint64_t actgkmer_uint64(unsigned char* seq, unsigned char km_len){
-//    Just for testing
-//// Function verified 20210708 Lifu Song
-    int i;
-    uint64_t x, mask = (1ULL<<km_len*2) - 1; //shift = (km_len - 1) * 2
-    for (i = 0, x = 0; i < km_len; ++i) {
-        //fprintf(stdout, "%c ", seq[i]);
-        int c = seq_nt4_table[(uint8_t)seq[i]];
-        //fprintf(stdout, "%d ", c);
-        if (c < 4) { // not an "N" base
-            x = (x << 2 | c) & mask;                  // forward strand
-//            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;  // reverse strand
-        } else x = 0; // if there is an "N", restart
-    }
-
-    //fprintf(stdout, "y %ld\n", x);
-    return x;
-}
-
-
-uint64_t actgkmer_hashkey(unsigned char* seq, unsigned char km_len){
-//// Function verified 20210708 Lifu Song
-    int i;
-    uint64_t x[2], y,  shift = (km_len - 1) * 2, mask = (1ULL<<km_len*2) - 1;
-    for (i = 0, x[0] = x[1] = 0; i < km_len; ++i) {
-        //fprintf(stdout, "%c ", seq[i]);
-        int c = seq_nt4_table[(uint8_t)seq[i]];
-        //fprintf(stdout, "%d ", c);
-        if (c < 4) { // not an "N" base
-            x[0] = (x[0] << 2 | c) & mask;                  // forward strand
-            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;  // reverse strand
-        } else x[0] = x[1] = 0; // if there is an "N", restart
-    }
-    y = x[0] < x[1]? x[0] : x[1];
-    //fprintf(stdout, "y %ld\n", y);
-    return y;
-}
-
-unsigned long uint8_actg(unsigned char bts){
-    unsigned int i=0;
-    unsigned long four_base_seq=0;
-
-    for(i =0 ; i < 4; ++i){
-        int m = bts & 3;
-        bts = bts >>2;
-        four_base_seq =four_base_seq >>8;
-        four_base_seq = four_base_seq + ((unsigned long)nt4_seq_table[m]<< 24);
-    }
-    return four_base_seq;
-}
-
-
-unsigned char actg_uint8(unsigned long actg_seq){
-    unsigned int i=0;
-    unsigned char uint8_value=0;
-
-    for(i =0 ; i < 4; ++i){
-        unsigned int m = actg_seq & 255;
-        actg_seq = actg_seq >> 8;
-        uint8_value = uint8_value >> 2;
-        uint8_value = uint8_value + ((unsigned char)seq_nt4_table[m]<<6);
-    }
-    return uint8_value;
-}
-
-void actg_intseq(unsigned char* actg_seq, unsigned char* int_seq, int8_t actg_seq_len){
-
-    int p = 0;
-    unsigned long n, n1, n2, n3, n4;
-    while(p < actg_seq_len-3){
-        n1 = actg_seq[p];
-        n2 = actg_seq[p+1];
-        n3 = actg_seq[p+2];
-        n4 = actg_seq[p+3];
-        n = (n1<<24) + (n2<<16) + (n3<<8) + n4;
-        int_seq[p>>2] = actg_uint8(n) ;
-        p = p + 4;
-    }
-    int_seq[p + 1] = '\0';
-}
-
-
-void intseq_actg(unsigned char* int_seq, unsigned char* actg_seq, int8_t int_seq_len){
-//// int seq to DNA seq
-//// Function not tested yet
-//// one char(byte) to four bases
-    int p = 0;
-    unsigned long n, mask;
-
-    unsigned char n1, n2, n3, n4;
-    while(p < int_seq_len){
-        mask= (1<<8) - 1;
-        n = uint8_actg(int_seq[p]) ;
-        n4 = (n & mask);
-        mask = mask <<8;
-        n3 = (n & mask)>>8;
-        mask = mask <<8;
-        n2 = (n & mask)>>16;
-        mask = mask <<8;
-        n1 = (n & mask)>>24;
-
-        actg_seq[p<<2] = n1;
-        actg_seq[(p<<2) + 1] = n2;
-        actg_seq[(p<<2) + 2] = n3;
-        actg_seq[(p<<2) + 3] = n4;
-        p = p + 1;
-    }
-}
-
-typedef struct {
-    int p; // suffix length; at least 8
-    kc_c4_t **h; // 1<<p hash tables
-} kc_c4x_t;
-
-static kc_c4x_t *c4x_init(int p)
-{
-    int i;
-    kc_c4x_t *h;
-    CALLOC(h, 1);
-    MALLOC(h->h, 1<<p);
-    h->p = p;
-    for (i = 0; i < 1<<p; ++i)
-        h->h[i] = kc_c4_init();
-    return h;
-}
-
-static void c4x_destroy(kc_c4x_t *h)
-{
-    if (h == 0) return;
-    for (int i = 0; i < 1<<h->p; ++i) {
-        kc_c4_destroy(h->h[i]);
-    }
-    free(h->h);
-    free(h);
-}
 
 typedef struct {
     int n, m;
@@ -360,6 +98,7 @@ typedef struct { // data structure for each step in kt_pipeline()
 
 static void worker_for(void *data, long i, int tid) // callback for kt_for()
 {
+    (void)tid;
     stepdat_t *s = (stepdat_t*)data;
     buf_c4_t *b = &s->buf[i];
     kc_c4_t *h = s->p->h->h[i];
@@ -455,6 +194,7 @@ static kc_c4x_t *count_file(const char *fn, int k, int p, int block_size, int n_
 
 static kc_c4x_t *count_file2(const char *fn, void *hh, int k, int p, int block_size, int n_thread, int read_len)
 {
+    (void)p;
     pldat_t pl;
     gzFile fp;
     if ((fp = gzopen(fn, "r")) == 0) return 0;
@@ -560,403 +300,148 @@ void free_ratio_range(ratio_range_t *range) {
     free(range);
 }
 
-// Modify the evaluation_t structure to include skip_ratios
-typedef struct { // data structure for file evaluation
-    kc_c4x_t *h;
-    int cov_cut;
-    double max_cov_ratio; // Added to store the max coverage ratio
-    int skip_ratios;      // Number of initial ratios to skip
-    double kn, kd, sm;
-    int strand_num, exist_strand_num;
-    int lose_km_num, exist_km_num;
-    int noise_km_num;
-    ratio_range_t *ratio_range; // Added for ratio range tracking
+// Per-strand and per-k-mer statistics gathered in a single pass over the strand
+// file, so the ratio x coverage grid can be evaluated without re-reading the
+// file or re-scanning the sequencing hash for every cell.
+typedef struct {
+    int strand_num;          // every record (incl. too-short); Sm denominator
+    int strand_cap;
+    int *min_cov;            // per strand; INT_MIN when the strand has no k-mers
+    double *max_ratio;       // per strand maximum adjacent coverage ratio
+    long long target_total;  // number of distinct target k-mers
+    long long *target_hist;  // [0..KC_MAX]: distinct target k-mers by sequencing coverage
+    long long *seq_hist;     // [0..KC_MAX]: sequencing k-mers by coverage
+} eval_cache_t;
 
-} evaluation_t;
-
-unsigned short kmer_cov(uint64_t kmer, uint64_t mask, kc_c4x_t *h){
-
-    int j, x, cov=0;
-    uint64_t hash_key = hash64(kmer, mask);
-    j = hash_key & ((1<<KC_BITS) - 1);
-    if(kh_size(h->h[j]) < 1){return 0;}
-
-    hash_key = hash_key >> KC_BITS<< KC_BITS;
-
-    x = kc_c4_get(h->h[j], hash_key);
-    //if(x == 0){if(kh_size(h->h[j]) < 1){return 0;}} //To avoid of segment fault
-    if(kh_exist(h->h[j], x)){
-        cov = kh_key(h->h[j], x) & KC_MAX;
-    }
-    return cov;
+static void free_eval_cache(eval_cache_t *c) {
+    free(c->min_cov);
+    free(c->max_ratio);
+    free(c->target_hist);
+    free(c->seq_hist);
 }
 
-
-static inline void add_kmer(uint64_t y, uint64_t mask, kc_c4x_t *h) //add k-mer to hash set
+// Build the evaluation cache in one pass: per-strand min coverage and max
+// adjacent ratio, the distinct-target-k-mer coverage histogram, the sequencing
+// coverage histogram, and (once) the optional cov_details / cov_ratios /
+// ratio_range outputs. Returns 0 on success, -1 if $fn cannot be opened.
+static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t *h,
+                            int skip_ratios, FILE *cov_details_fp, FILE *cov_ratios_fp,
+                            ratio_range_t *ratio_range)
 {
-    int p = h->p;
-    uint64_t y_hash = hash64(y, mask);
-    int pre = y_hash & ((1<<p) - 1);
+    gzFile fp;
+    if ((fp = gzopen(fn, "r")) == 0) return -1;
+    kseq_t *ks = kseq_init(fp);
+    uint64_t mask = (1ULL << k * 2) - 1;
 
-    khint_t k;
-//        fprintf(stdout, "work for j %d\t", i);
-    int absent;
-    k = kc_c4_put(h->h[pre], y_hash>>p<<KC_BITS, &absent);
-    ++kh_key(h->h[pre], k);
-    //if ((kh_key(h[pre], k)&KC_MAX) < KC_MAX) ++kh_key(h[pre], k);
+    cache->strand_num = 0;
+    cache->strand_cap = 0;
+    cache->min_cov = NULL;
+    cache->max_ratio = NULL;
+    cache->target_total = 0;
+    CALLOC(cache->target_hist, KC_MAX + 1);
+    CALLOC(cache->seq_hist, KC_MAX + 1);
 
-}
-
-int insert_kms(uint64_t *kms, uint64_t y, int km_num) // insert a k-mer $y to a linear buffer
-{
-    int i;
-    for(i=0; i< km_num; i++){
-       if(y == *(kms + i)){
-            return km_num;
-       }
-    }
-    *(kms + km_num) = y;
-    return km_num + 1;
-}
-
-int kms_max_cov(uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t *h){
-    int i, max_cov=0;
-    //fprintf(stdout, "func kms_max_cov\n");
-    for(i=0; i<km_num; i++){
-            //printf("");
-            //fprintf(stdout, "uint64: %"PRIu64, *(kms+i));
-            //fprintf(stdout, "\n");
-            int cov = kmer_cov(*(kms+i), mask, h);
-            if(cov > max_cov){max_cov=cov;}
-    }
-    //printf("km_num: %d\n", km_num);
-    //printf("max cov: %d\n", max_cov);
-    return max_cov;
-}
-
-int kms_min_cov(uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t *h){
-    int i, min_cov=100;
-    //fprintf(stdout, "func kms_max_cov\n");
-    for(i=0; i<km_num; i++){
-            //printf("");
-            //fprintf(stdout, "uint64: %"PRIu64, *(kms+i));
-            //fprintf(stdout, "\n");
-            int cov = kmer_cov(*(kms+i), mask, h);
-            //fprintf(stderr, "cov: %d\n", cov);
-            if(cov < min_cov){min_cov=cov;}
-    }
-    //printf("km_num: %d\n", km_num);
-    //printf("max cov: %d\n", max_cov);
-    return min_cov;
-}
-
-int seq_kmers(uint64_t *kms, int k, int len, const char *seq) // insert k-mers in $seq to linear buffer $buf
-{
-    int i, l, km_num=0;
-    uint64_t x[2], mask = (1ULL<<k*2) - 1, shift = (k - 1) * 2;
-    for (i = l = 0, x[0] = x[1] = 0; i < len; ++i) {
-        int c = seq_nt4_table[(uint8_t)seq[i]];
-        if (c < 4) { // not an "N" base
-            x[0] = (x[0] << 2 | c) & mask;                  // forward strand
-            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;  // reverse strand
-            if (++l >= k) { // we find a k-mer
-                uint64_t y = x[0] < x[1]? x[0] : x[1];
-                km_num = insert_kms(kms, y, km_num);
-                //c4x_insert_buf(buf, p, hash64(y, mask));
-            }
-        } else l = 0, x[0] = x[1] = 0; // if there is an "N", restart
-    }
-    return km_num;
-}
-
-// Add a function to output k-mer coverages for a sequence
-void output_kmer_coverages(FILE *fp, char *seq_name, uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t *h) {
-    fprintf(fp, "%s\t", seq_name);
-    for (int i = 0; i < km_num; i++) {
-        int cov = kmer_cov(*(kms+i), mask, h);
-        fprintf(fp, "%d ", cov);
-    }
-    fprintf(fp, "\n");
-}
-
-// Modify the output_coverage_ratios function to return the ratios
-double* output_coverage_ratios(FILE *fp, char *seq_name, uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t *h, int *ratio_count) {
-    fprintf(fp, "%s\t", seq_name);
-    
-    if (km_num < 2) {
-        fprintf(fp, "\n");
-        *ratio_count = 0;
-        return NULL;
-    }
-    
-    int *coverages;
-    MALLOC(coverages, km_num);
-    
-    // First get all coverage values
-    for (int i = 0; i < km_num; i++) {
-        coverages[i] = kmer_cov(*(kms+i), mask, h);
-    }
-    
-    // Allocate memory for ratios
-    double *ratios;
-    *ratio_count = km_num - 1; // Number of ratios is km_num - 1
-    MALLOC(ratios, *ratio_count);
-    
-    // Then calculate and output ratios
-    for (int i = 0; i < *ratio_count; i++) {
-        int a = coverages[i];
-        int b = coverages[i+1];
-        
-        // Always larger number / smaller number
-        if (a >= b && b > 0) {
-            ratios[i] = (double)a / b;
-        } else if (b > a && a > 0) {
-            ratios[i] = (double)b / a;
-        } else if (a == 0 && b == 0) {
-            ratios[i] = 1.0; // Both zero, ratio is 1
-        } else {
-            ratios[i] = 0.0; // One is zero, can't calculate ratio
-        }
-        
-        fprintf(fp, "%.3f ", ratios[i]);
-    }
-    
-    fprintf(fp, "\n");
-    free(coverages);
-    
-    return ratios;
-}
-
-// Update the function prototype for kms_max_ratio to include skip_ratios parameter
-double kms_max_ratio(uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t *h, int skip_ratios);
-
-// Modify the kms_max_ratio function to skip initial ratio values
-double kms_max_ratio(uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t *h, int skip_ratios) {
-    if (km_num < 2) return 0.0;
-    
-    double max_ratio = 0.0; // Start with a very low initial value
-    int prev_cov = kmer_cov(kms[0], mask, h);
-    int ratios_counted = 0;
-    
-    for (int i = 1; i < km_num; i++) {
-        int curr_cov = kmer_cov(kms[i], mask, h);
-        
-        // Return 0.0 if either coverage is zero
-        if (prev_cov == 0 || curr_cov == 0) {
-            prev_cov = curr_cov;
-            return 0.0;
-        }
-        
-        // Calculate ratio (always larger / smaller)
-        double ratio;
-        if (prev_cov >= curr_cov) {
-            ratio = (double)prev_cov / curr_cov;
-        } else {
-            ratio = (double)curr_cov / prev_cov;
-        }
-        
-        // Skip the first skip_ratios valid ratios
-        ratios_counted++;
-        if (ratios_counted <= skip_ratios) {
-            prev_cov = curr_cov;
-            continue;
-        }
-        
-        // Update maximum ratio if this one is larger
-        if (ratio > max_ratio) {
-            max_ratio = ratio;
-        }
-        
-        prev_cov = curr_cov;
-    }
-    
-    return max_ratio;
-}
-
-// Update the eva_pipeline function to fix the k-mer counting issue
-static void eva_pipeline(void *data, evaluation_t *eva, FILE *cov_details_fp, FILE *cov_ratios_fp, kc_c4x_t *global_kmer_tracker) {
-    pldat_t *p = (pldat_t*)data;
-    uint64_t mask = (1ULL<<p->k*2) - 1;
-    
-    int ret;
-    // Reuse coverage array to avoid repeated allocations
+    kc_c4x_t *tracker = c4x_init(KC_BITS); // global k-mer dedup, built once
     int *coverages = NULL;
     int coverages_cap = 0;
 
-    while ((ret = kseq_read(p->ks)) >= 0) {// Reading seqs
-        eva->strand_num++;
+    while (kseq_read(ks) >= 0) {
+        int idx = cache->strand_num++;
+        if (idx >= cache->strand_cap) {
+            cache->strand_cap = cache->strand_cap ? cache->strand_cap * 2 : 256;
+            REALLOC(cache->min_cov, cache->strand_cap);
+            REALLOC(cache->max_ratio, cache->strand_cap);
+        }
+        cache->min_cov[idx] = INT_MIN; // never counts as recovered unless set below
+        cache->max_ratio[idx] = 0.0;
+
+        int l = ks->seq.l;
+        if (l < k) continue;
+
         uint64_t *kms;
-        int l = p->ks->seq.l, km_num = 0, strand_kms_min_cov=0;
-        double strand_max_ratio = 0.0;
-        
-        if (l < p->k) continue;
-        MALLOC(kms, l-p->k + 1); //
-        km_num = seq_kmers(kms, p->k, l, p->ks->seq.s);
-        
-        // Ensure coverage array is large enough
-        if (km_num > coverages_cap) {
-            coverages_cap = km_num * 2;
-            REALLOC(coverages, coverages_cap);
-        }
-        
-        // Cache all k-mer coverages in one pass to avoid repeated lookups
-        for (int i = 0; i < km_num; i++) {
-            coverages[i] = kmer_cov(kms[i], mask, eva->h);
-        }
-        
-        // Calculate min coverage from cached values
-        strand_kms_min_cov = coverages[0];
-        for (int i = 1; i < km_num; i++) {
-            if (coverages[i] < strand_kms_min_cov) {
-                strand_kms_min_cov = coverages[i];
-            }
-        }
-        
-        // Calculate max ratio from cached values
+        MALLOC(kms, l - k + 1);
+        int km_num = seq_kmers(kms, k, l, ks->seq.s);
+        if (km_num == 0) { free(kms); continue; }
+
+        if (km_num > coverages_cap) { coverages_cap = km_num * 2; REALLOC(coverages, coverages_cap); }
+        for (int i = 0; i < km_num; i++) coverages[i] = kmer_cov(kms[i], mask, h);
+
+        int min_cov = coverages[0];
+        for (int i = 1; i < km_num; i++)
+            if (coverages[i] < min_cov) min_cov = coverages[i];
+
+        double max_ratio = 0.0;
         if (km_num >= 2) {
             int ratios_counted = 0;
-            strand_max_ratio = 0.0;
             for (int i = 1; i < km_num; i++) {
-                // Return 0.0 if either coverage is zero
-                if (coverages[i-1] == 0 || coverages[i] == 0) {
-                    strand_max_ratio = 0.0;
-                    break;
-                }
-                
-                // Calculate ratio (always larger / smaller)
-                double ratio = (coverages[i-1] >= coverages[i]) ? 
-                    (double)coverages[i-1] / coverages[i] : 
-                    (double)coverages[i] / coverages[i-1];
-                
-                // Skip the first skip_ratios valid ratios
-                ratios_counted++;
-                if (ratios_counted <= eva->skip_ratios) {
-                    continue;
-                }
-                
-                // Update maximum ratio if this one is larger
-                if (ratio > strand_max_ratio) {
-                    strand_max_ratio = ratio;
-                }
+                if (coverages[i - 1] == 0 || coverages[i] == 0) { max_ratio = 0.0; break; }
+                double r = (coverages[i - 1] >= coverages[i])
+                    ? (double)coverages[i - 1] / coverages[i]
+                    : (double)coverages[i] / coverages[i - 1];
+                if (++ratios_counted <= skip_ratios) continue;
+                if (r > max_ratio) max_ratio = r;
             }
         }
+        cache->min_cov[idx] = min_cov;
+        cache->max_ratio[idx] = max_ratio;
 
-        // Output coverage details if file pointer is provided
         if (cov_details_fp != NULL) {
-            fprintf(cov_details_fp, "%s\t", p->ks->name.s);
-            for (int i = 0; i < km_num; i++) {
-                fprintf(cov_details_fp, "%d ", coverages[i]);
-            }
+            fprintf(cov_details_fp, "%s\t", ks->name.s);
+            for (int i = 0; i < km_num; i++) fprintf(cov_details_fp, "%d ", coverages[i]);
             fprintf(cov_details_fp, "\n");
         }
-        
-        // Output coverage ratios if file pointer is provided
+
         if (cov_ratios_fp != NULL && km_num >= 2) {
-            fprintf(cov_ratios_fp, "%s\t", p->ks->name.s);
-            
-            // Allocate memory for ratios
+            fprintf(cov_ratios_fp, "%s\t", ks->name.s);
             double *ratios;
             int ratio_count = km_num - 1;
             MALLOC(ratios, ratio_count);
-            
-            // Calculate and output ratios
             for (int i = 0; i < ratio_count; i++) {
-                int a = coverages[i];
-                int b = coverages[i+1];
-                
-                // Always larger number / smaller number
-                if (a >= b && b > 0) {
-                    ratios[i] = (double)a / b;
-                } else if (b > a && a > 0) {
-                    ratios[i] = (double)b / a;
-                } else if (a == 0 && b == 0) {
-                    ratios[i] = 1.0; // Both zero, ratio is 1
-                } else {
-                    ratios[i] = 0.0; // One is zero, can't calculate ratio
-                }
-                
+                int a = coverages[i], b = coverages[i + 1];
+                if (a >= b && b > 0) ratios[i] = (double)a / b;
+                else if (b > a && a > 0) ratios[i] = (double)b / a;
+                else if (a == 0 && b == 0) ratios[i] = 1.0;
+                else ratios[i] = 0.0;
                 fprintf(cov_ratios_fp, "%.3f ", ratios[i]);
             }
             fprintf(cov_ratios_fp, "\n");
-            
-            // Update ratio range if we have valid ratios
-            if (ratios && ratio_count > 0 && eva->ratio_range) {
-                update_ratio_range(eva->ratio_range, ratios, ratio_count);
-            }
+            if (ratio_count > 0 && ratio_range) update_ratio_range(ratio_range, ratios, ratio_count);
             free(ratios);
         }
 
-        // Modified condition: Check both coverage and ratio for path existence
-        // A path exists if minimum coverage is above cov_cut AND:
-        // - If max_cov_ratio is 0, no ratio limitation is applied
-        // - If max_cov_ratio > 0, the maximum ratio must be below max_cov_ratio
-        if (strand_kms_min_cov > eva->cov_cut && (eva->max_cov_ratio <= 1.0 || (strand_max_ratio > 1.0 && strand_max_ratio <= eva->max_cov_ratio))) {
-            eva->exist_strand_num++;
-        }
-        
-        // Track k-mers using cached coverages
-        for(int j=0;j<km_num;j++){
-            // Use global_kmer_tracker to ensure each k-mer is only counted once across all sequences
-            if(kmer_cov(kms[j], mask, global_kmer_tracker) < 1) {//New k-mer found globally
-                add_kmer(kms[j], mask, global_kmer_tracker);
-                if(coverages[j] > eva->cov_cut){
-                    eva->exist_km_num++;
-                }else{
-                    eva->lose_km_num++;
-                }
+        for (int j = 0; j < km_num; j++) {
+            if (kmer_cov(kms[j], mask, tracker) < 1) { // new distinct target k-mer
+                add_kmer(kms[j], mask, tracker);
+                int c = coverages[j];
+                if (c > KC_MAX) c = KC_MAX;
+                cache->target_hist[c]++;
+                cache->target_total++;
             }
         }
-        
         free(kms);
     }
-    
+
     free(coverages);
-}
-
-// Modify the evaluate_seq_file function to support coverage details output
-static evaluation_t *evaluate_seq_file(evaluation_t *eva, const char *fn, int k, int p, int block_size, int n_thread, FILE *cov_details_fp, FILE *cov_ratios_fp, kc_c4x_t *global_kmer_tracker)
-{
-    pldat_t pl;
-
-    gzFile fp; 
-    if ((fp = gzopen(fn, "r")) == 0) return 0;
-    pl.ks = kseq_init(fp);
-    pl.k = k;
-    pl.n_thread = n_thread; //multiple threads is not supported yet.
-    pl.h = c4x_init(p);
-    pl.block_len = block_size;
-
-    eva_pipeline(&pl, eva, cov_details_fp, cov_ratios_fp, global_kmer_tracker);
-    kseq_destroy(pl.ks);
+    c4x_destroy(tracker);
+    kseq_destroy(ks);
     gzclose(fp);
-    return eva;
-}
 
-void print_uint64_kmer(uint64_t km, int km_len){
-    fprintf(stdout, "uint64: %"PRIu64, km);
-   fprintf(stdout, " rev: %"PRIu64, comp_rev(km, km_len));
-   fprintf(stdout, " minHash: %"PRIu64, min_hash_key(km,km_len));
-    unsigned char seq[33];
-    seq[32] = '\0';
-    uint64_acgt(km, seq, km_len);
-    fprintf(stdout, "\tkm: %s\n", seq);
-
-}
-
-void print_kmer_seq(unsigned char *seq, int k){ //Debugging function
-    int i=0;
-    for(i=0;i<k;i++){
-            printf("%c", *(seq + i));
+    for (int j = 0; j < 1 << h->p; ++j) { // sequencing-hash coverage histogram
+        kc_c4_t *g = h->h[j];
+        for (khint_t kk = 0; kk < kh_end(g); ++kk)
+            if (kh_exist(g, kk)) {
+                int c = kh_key(g, kk) & KC_MAX;
+                if (c >= 1) cache->seq_hist[c]++;
+            }
     }
+    return 0;
 }
 
-void print_cov(unsigned char* seq, int k, kc_c4x_t *h){ //Debugging function
-    uint64_t mask = (1ULL<<k*2) - 1;
-    int test_cov=0;
-    test_cov = kmer_cov( actgkmer_hashkey(seq, k), mask, h);
-    print_kmer_seq(seq, k);
-    printf("\t");
-    printf("cov: %d\n", test_cov);
+// suffix[idx] = sum_{c=idx}^{KC_MAX} hist[c]; idx is clamped into [0, KC_MAX+1].
+static long long suffix_at(const long long *suffix, long idx) {
+    if (idx < 0) idx = 0;
+    if (idx > KC_MAX + 1) idx = KC_MAX + 1;
+    return suffix[idx];
 }
 
 int kc_c4x_t_size(kc_c4x_t *h, int p){
@@ -964,26 +449,6 @@ int kc_c4x_t_size(kc_c4x_t *h, int p){
     for(i = 0; i < 1<<p; ++i) {
         total_size = total_size + kh_size(h->h[i]);
     }
-    return total_size;
-}
-
-int kc_c4x_t_kmers(kc_c4x_t *h, int p, int cov){
-    int j, total_size = 0;
-    if(cov < 1){return kc_c4x_t_size(h,p);}
-    
-    for (j=0; j < 1<<p; ++j){
-        kc_c4_t *g = h->h[j];
-        khint_t kk;
-        for (kk = 0; kk < kh_end(g); ++kk)
-            if (kh_exist(g, kk)){
-                int c = kh_key(g, kk) & KC_MAX;
-                //c = c < 255? c : 255;
-                if (c > cov){ // delete kmers
-                   total_size++;
-                }
-            }
-    }
-    
     return total_size;
 }
 
@@ -2000,7 +1465,7 @@ int main(int argc, char *argv[])
     if ((interactive && argc - o.ind < 1) || (!interactive && argc - o.ind < 2)) {
         fprintf(stderr, "\n************************************************************************\n");
         fprintf(stderr, "**                                                                    **\n");
-        fprintf(stderr, "**                   Sm Kn Kd Caculator for DBGPS                     **\n");
+        fprintf(stderr, "**                   Sm Kn Kd Calculator for DBGPS                    **\n");
         fprintf(stderr, "**     Version 20260123  Author: Lifu Song lifu.song@outlook.com      **\n");
         //fprintf(stderr, "**  DBGPS - De Bruijn Graph based inner decoder for DNA data storage  **\n");
         fprintf(stderr, "**                                                                    **\n");
@@ -2099,101 +1564,77 @@ int main(int argc, char *argv[])
         free(filename);
     }
 
-    evaluation_t eva;
-    eva.h = h;
-    eva.max_cov_ratio = max_cov_ratio;
-    eva.skip_ratios = skip_ratios;
-    
-    // Initialize ratio range tracker
-    if (output_prefix != NULL) {
-        eva.ratio_range = init_ratio_range();
-    } else {
-        eva.ratio_range = NULL;
-    }
+    ratio_range_t *ratio_range = (output_prefix != NULL) ? init_ratio_range() : NULL;
 
     fprintf(stderr, "Estimating Sm Kn Kd values ...\n");
-    
+
+    // One pass over the strand file collects everything the grid needs.
+    eval_cache_t cache;
+    if (build_eval_cache(&cache, argv[o.ind], k, h, skip_ratios,
+                         cov_details_fp, cov_ratios_fp, ratio_range) != 0) {
+        fprintf(stderr, "Error: could not open strand file %s\n", argv[o.ind]);
+        return 1;
+    }
+
+    // suffix[c] = number of k-mers with coverage >= c (target and sequencing).
+    long long *tg_suffix, *seq_suffix;
+    CALLOC(tg_suffix, KC_MAX + 2);
+    CALLOC(seq_suffix, KC_MAX + 2);
+    for (int c = KC_MAX; c >= 0; --c) {
+        tg_suffix[c] = tg_suffix[c + 1] + cache.target_hist[c];
+        seq_suffix[c] = seq_suffix[c + 1] + cache.seq_hist[c];
+    }
+
     // If max_R is not specified or less than max_cov_ratio, only use max_cov_ratio
     if (max_R <= 0 || max_R < max_cov_ratio) {
         max_R = max_cov_ratio;
     }
-    
-    // Output header line to both stdout and file
+
     fprintf(stdout, "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn\n");
     if (smkdkn_fp != NULL) {
         fprintf(smkdkn_fp, "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn\n");
     }
 
-    // Iterate through different coverage ratio values
-    double ratio;
-    for (ratio = max_cov_ratio; ratio <= max_R + 0.001; ratio += step_size) { // Add small epsilon to include max_R
-        // For each ratio, iterate through different coverage cutoffs
-        int cov;
-        for (cov = min_cov_cut; cov <= max_cov_cut; cov++) {
-            eva.strand_num = 0;
-            eva.exist_strand_num = 0;
-            eva.noise_km_num = 0;
-            eva.lose_km_num = 0;
-            eva.exist_km_num = 0;
-            eva.cov_cut = cov;
-            eva.max_cov_ratio = ratio; // Set current ratio
-            
-            fprintf(stdout, "%.2f\t%d\t", ratio, cov);
+    // Iterate over coverage ratio values and coverage cutoffs, reading from the
+    // precomputed cache (no disk re-read, no hash re-scan).
+    for (double ratio = max_cov_ratio; ratio <= max_R + 0.001; ratio += step_size) {
+        for (int cov = min_cov_cut; cov <= max_cov_cut; cov++) {
+            int exist_strand_num = 0;
+            for (int snum = 0; snum < cache.strand_num; snum++) {
+                if (cache.min_cov[snum] == INT_MIN) continue; // strand had no k-mers
+                if (cache.min_cov[snum] > cov &&
+                    (ratio <= 1.0 || cache.max_ratio[snum] <= ratio))
+                    exist_strand_num++;
+            }
+
+            long long exist_km = suffix_at(tg_suffix, (long)cov + 1);
+            long long lose_km = cache.target_total - exist_km;
+            long long noise_km = suffix_at(seq_suffix, (long)cov + 1) - exist_km;
+
+            double sm = (double)exist_strand_num / cache.strand_num;
+            double kd = (double)lose_km / (lose_km + exist_km);
+            double kn = (double)noise_km / exist_km;
+
+            fprintf(stdout, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\t%f\n",
+                    ratio, cov, cache.strand_num, exist_strand_num,
+                    noise_km, exist_km, lose_km, sm, kd, kn);
             if (smkdkn_fp != NULL) {
-                fprintf(smkdkn_fp, "%.2f\t%d\t", ratio, cov);
+                fprintf(smkdkn_fp, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\t%f\n",
+                        ratio, cov, cache.strand_num, exist_strand_num,
+                        noise_km, exist_km, lose_km, sm, kd, kn);
             }
-            
-            // Create a fresh global k-mer tracker for this evaluation run
-            kc_c4x_t *global_kmer_tracker = c4x_init(p);
-            
-            evaluate_seq_file(&eva, argv[o.ind], k, p, block_size, n_thread, 
-                             (cov == min_cov_cut && ratio == max_cov_ratio) ? cov_details_fp : NULL, 
-                             (cov == min_cov_cut && ratio == max_cov_ratio) ? cov_ratios_fp : NULL,
-                             global_kmer_tracker);
-            
-            // Clean up the global k-mer tracker
-            for(int tracker_i = 0; tracker_i < 1<<p; ++tracker_i) {
-                kc_c4_destroy(global_kmer_tracker->h[tracker_i]);
-            }
-            free(global_kmer_tracker->h); 
-            free(global_kmer_tracker);
-            
-            fprintf(stdout, "%d\t", eva.strand_num);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%d\t", eva.strand_num);
-            
-            fprintf(stdout, "%d\t", eva.exist_strand_num);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%d\t", eva.exist_strand_num);
-            
-            eva.noise_km_num = kc_c4x_t_kmers(h, p, cov) - eva.exist_km_num;
-            eva.sm = (double)eva.exist_strand_num / eva.strand_num;
-            eva.kd = (double)eva.lose_km_num / (eva.lose_km_num + eva.exist_km_num);
-            eva.kn = (double)eva.noise_km_num / eva.exist_km_num;
-            
-            fprintf(stdout, "%d\t", eva.noise_km_num);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%d\t", eva.noise_km_num);
-            
-            fprintf(stdout, "%d\t", eva.exist_km_num);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%d\t", eva.exist_km_num);
-            
-            fprintf(stdout, "%d\t", eva.lose_km_num);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%d\t", eva.lose_km_num);
-            
-            fprintf(stdout, "%f\t", eva.sm);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%f\t", eva.sm);
-            
-            fprintf(stdout, "%f\t", eva.kd);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%f\t", eva.kd);
-            
-            fprintf(stdout, "%f\n", eva.kn);
-            if (smkdkn_fp != NULL) fprintf(smkdkn_fp, "%f\n", eva.kn);
         }
     }
 
-    // Write ratio ranges to file and close files
-    if (eva.ratio_range && ratio_ranges_fp) {
-        write_ratio_range(ratio_ranges_fp, eva.ratio_range);
-        free_ratio_range(eva.ratio_range);
+    free(tg_suffix);
+    free(seq_suffix);
+
+    // Write ratio ranges to file
+    if (ratio_range && ratio_ranges_fp) {
+        write_ratio_range(ratio_ranges_fp, ratio_range);
     }
+    if (ratio_range) free_ratio_range(ratio_range);
+    free_eval_cache(&cache);
 
     // Close files if they were opened
     if (cov_details_fp != NULL) {

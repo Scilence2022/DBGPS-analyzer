@@ -51,6 +51,9 @@ const api = {
   aiDiagnose: (request: AiRequest) => ipcRenderer.invoke("ai:diagnose", request) as Promise<{ content: string; provider: string; model: string }>,
   refreshProviderModels: (request: ProviderRefreshRequest) =>
     ipcRenderer.invoke("ai:refreshModels", request) as Promise<{ models: string[]; provider: string; source: string }>,
+  loadSecrets: () => ipcRenderer.invoke("secrets:load") as Promise<Record<string, string>>,
+  saveSecrets: (map: Record<string, string>) =>
+    ipcRenderer.invoke("secrets:save", map) as Promise<{ ok: boolean; encrypted: boolean }>,
   onAnalyzerEvent: (callback: (payload: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("analyzer:event", listener);

@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json && esbuild src/renderer.ts --bundle --platform=browser --format=iife --outfile=dist/renderer.js && node scripts/copy-static.mjs",
     "dev": "npm run build && electron .",
     "start": "electron .",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "dist": "npm run build && electron-builder"
   },
   "dependencies": {
     "lucide": "^0.468.0"
@@ -16,7 +17,24 @@
   "devDependencies": {
     "@types/node": "^20.17.10",
     "electron": "^40.10.4",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.28.1",
     "typescript": "^5.7.2"
+  },
+  "build": {
+    "appId": "org.dbgps.analyzer",
+    "productName": "DBGPS Analyzer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../DBGPS-analyzer",
+        "to": "DBGPS-analyzer"
+      }
+    ]
   }
 }
