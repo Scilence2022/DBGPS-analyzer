@@ -179,9 +179,12 @@ type AppSettings = {
   appearance: "light" | "dark" | "system";
   kmerTreeMode: "cards" | "bases";
   sequenceChartType: "bar" | "line";
+  primerFront: number;
+  primerBack: number;
 };
 
 const SETTINGS_STORAGE_KEY = "dbgps-settings-v3";
+const DEFAULT_PRIMER = 18;
 
 const PROVIDERS: ProviderCatalogItem[] = [
   {
@@ -420,8 +423,16 @@ function createDefaultSettings(): AppSettings {
     maxTokens: 900,
     appearance: "system",
     kmerTreeMode: "cards",
-    sequenceChartType: "bar"
+    sequenceChartType: "bar",
+    primerFront: DEFAULT_PRIMER,
+    primerBack: DEFAULT_PRIMER
   };
+}
+
+function normalizePrimer(value: unknown, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(100000, Math.max(0, Math.trunc(parsed)));
 }
 
 function mergeSettings(input: unknown): AppSettings {
@@ -459,7 +470,9 @@ function mergeSettings(input: unknown): AppSettings {
     maxTokens: Number.isFinite(Number(stored.maxTokens)) ? Number(stored.maxTokens) : defaults.maxTokens,
     appearance,
     kmerTreeMode,
-    sequenceChartType
+    sequenceChartType,
+    primerFront: normalizePrimer(stored.primerFront, defaults.primerFront),
+    primerBack: normalizePrimer(stored.primerBack, defaults.primerBack)
   };
 }
 
@@ -1233,9 +1246,8 @@ function renderSequenceTable(data: SequenceResult) {
   `;
 }
 
-function renderSequenceResult(data: SequenceResult) {
-  elements.resultView.className = "result-view";
-  elements.resultView.innerHTML = `
+function sequenceResultHtml(data: SequenceResult) {
+  return `
     <div class="result-grid">
       <div class="metric ${data.complete ? "metric-ok" : "metric-alert"}">
         <span>Path</span>
@@ -1257,6 +1269,11 @@ function renderSequenceResult(data: SequenceResult) {
     ${renderSequenceCoverageChart(data)}
     ${renderSequenceTable(data)}
   `;
+}
+
+function renderSequenceResult(data: SequenceResult) {
+  elements.resultView.className = "result-view";
+  elements.resultView.innerHTML = sequenceResultHtml(data);
 }
 
 function renderResult(result: AnalyzerResult) {
@@ -1559,7 +1576,7 @@ window.dbgps.onAnalyzerEvent((event) => {
 // ===========================================================================
 // Multi-tool workbench: Cross-links, Seq-Filter, and the combined Report view.
 // ===========================================================================
-type ViewName = "interactive" | "links" | "filter" | "report";
+type ViewName = "interactive" | "batch" | "links" | "filter" | "report";
 type LinksResult = Awaited<ReturnType<DbgpsApi["runLinks"]>>;
 type FilterResult = Awaited<ReturnType<DbgpsApi["runFilter"]>>;
 type ReportResult = Awaited<ReturnType<DbgpsApi["runReport"]>>;
@@ -1568,6 +1585,15 @@ type Verdict = { level: "ok" | "warn" | "bad"; text: string };
 
 const ui = {
   viewTabs: Array.from(document.querySelectorAll<HTMLButtonElement>(".view-tab")),
+  batchSelectButton: $("batchSelectButton") as HTMLButtonElement,
+  batchFile: $("batchFile"),
+  batchPrimerFront: $("batchPrimerFront") as HTMLInputElement,
+  batchPrimerBack: $("batchPrimerBack") as HTMLInputElement,
+  batchRunButton: $("batchRunButton") as HTMLButtonElement,
+  batchSaveButton: $("batchSaveButton") as HTMLButtonElement,
+  batchProgress: $("batchProgress"),
+  batchResult: $("batchResult"),
+  batchDetail: $("batchDetail"),
   linksSelectButton: $("linksSelectButton") as HTMLButtonElement,
   linksFile: $("linksFile"),
   linksK: $("linksK") as HTMLInputElement,
@@ -1607,6 +1633,20 @@ let reportRefFile = "";
 let reportNgsFiles: string[] = [];
 let latestReport: ReportResult | null = null;
 let reportNarrative = "";
+
+type BatchRow = {
+  index: number;
+  name: string;
+  rawLength: number;
+  analyzedLength: number;
+  status: "ok" | "skipped" | "error";
+  message?: string;
+  result?: SequenceResult;
+};
+let batchFile = "";
+let batchRows: BatchRow[] = [];
+let batchRunning = false;
+let batchDetailIndex: number | null = null;
 
 function errMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -2028,7 +2068,227 @@ async function exportReport(format: "html" | "md") {
   }
 }
 
+// ---- Batch QC view: per-strand analysis of a reference file ----
+function syncBatchPrimerInputs() {
+  ui.batchPrimerFront.value = String(appSettings.primerFront);
+  ui.batchPrimerBack.value = String(appSettings.primerBack);
+}
+
+async function selectBatchFile() {
+  const file = await pickOneFile();
+  if (file) {
+    batchFile = file;
+    renderPathChip(ui.batchFile, [file], "No reference selected");
+  }
+}
+
+function batchCoverageClass(row: BatchRow) {
+  if (row.status !== "ok" || !row.result) return "warn";
+  return row.result.complete ? "ok" : "bad";
+}
+
+function renderBatchTable() {
+  const analyzed = batchRows.filter((r) => r.status === "ok" && r.result);
+  const complete = analyzed.filter((r) => r.result!.complete).length;
+  const broken = analyzed.length - complete;
+  const skipped = batchRows.filter((r) => r.status !== "ok").length;
+  ui.batchSaveButton.disabled = analyzed.length === 0;
+
+  const summary = `
+    <div class="report-metrics">
+      <div class="metric-card"><span>Strands</span><strong>${formatNumber(batchRows.length)}</strong></div>
+      <div class="metric-card"><span>Complete path</span><strong>${formatNumber(complete)}</strong></div>
+      <div class="metric-card"><span>Broken path</span><strong>${formatNumber(broken)}</strong></div>
+      <div class="metric-card"><span>Skipped</span><strong>${formatNumber(skipped)}</strong></div>
+    </div>`;
+
+  if (batchRows.length === 0) {
+    ui.batchResult.classList.remove("empty-state");
+    ui.batchResult.innerHTML = summary + `<p class="muted">No records parsed from the reference file.</p>`;
+    return;
+  }
+
+  const head = ["#", "Name", "Len", "Used", "Observed", "Path", "Min", "Mean", "Max"];
+  const body = batchRows.map((row) => {
+    if (row.status !== "ok" || !row.result) {
+      return `<tr class="batch-row ${row.status}" data-batch-index="${row.index}">
+        <td>${formatNumber(row.index + 1)}</td>
+        <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
+        <td>${formatNumber(row.rawLength)}</td>
+        <td>${formatNumber(row.analyzedLength)}</td>
+        <td colspan="4" class="batch-note">${escapeHtml(row.message || row.status)}</td>
+        <td><span class="coverage zero">${escapeHtml(row.status)}</span></td>
+      </tr>`;
+    }
+    const r = row.result;
+    return `<tr class="batch-row clickable ${batchCoverageClass(row)}" data-batch-index="${row.index}">
+      <td>${formatNumber(row.index + 1)}</td>
+      <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
+      <td>${formatNumber(row.rawLength)}</td>
+      <td>${formatNumber(row.analyzedLength)}</td>
+      <td>${formatNumber(r.observed)} / ${formatNumber(r.kmerCount)}</td>
+      <td><span class="path-pill ${r.complete ? "ok" : "bad"}">${r.complete ? "complete" : "broken"}</span></td>
+      <td><span class="coverage ${coverageClass(r.minCoverage)}">${formatNumber(r.minCoverage)}</span></td>
+      <td>${formatNumber(Math.round(r.meanCoverage))}</td>
+      <td>${formatNumber(r.maxCoverage)}</td>
+    </tr>`;
+  }).join("");
+
+  ui.batchResult.classList.remove("empty-state");
+  ui.batchResult.innerHTML = summary +
+    `<p class="muted">Click a strand to inspect its coverage profile and path completeness.</p>` +
+    `<div class="table-wrap"><table class="data-table batch-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function showBatchDetail(index: number) {
+  const row = batchRows.find((r) => r.index === index);
+  if (!row || row.status !== "ok" || !row.result) {
+    ui.batchDetail.innerHTML = "";
+    batchDetailIndex = null;
+    return;
+  }
+  batchDetailIndex = index;
+  latestResult = row.result;
+  ui.batchDetail.innerHTML =
+    `<div class="batch-detail-head"><h3>${escapeHtml(row.name)}</h3><span class="muted">${formatNumber(row.analyzedLength)} bp analyzed (of ${formatNumber(row.rawLength)} bp)</span></div>` +
+    sequenceResultHtml(row.result);
+  renderIcons();
+  ui.batchDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function runBatchAnalysis() {
+  if (batchRunning) return;
+  if (!batchFile) {
+    await selectBatchFile();
+    if (!batchFile) return;
+  }
+  if (!analyzerReady) {
+    ui.batchResult.classList.remove("empty-state");
+    ui.batchResult.innerHTML = `<div class="error-card">Start the kernel in the Interactive tab first (it loads the sequencing k-mer table used to score each strand).</div>`;
+    return;
+  }
+
+  const front = normalizePrimer(ui.batchPrimerFront.value, appSettings.primerFront);
+  const back = normalizePrimer(ui.batchPrimerBack.value, appSettings.primerBack);
+  appSettings.primerFront = front;
+  appSettings.primerBack = back;
+  saveSettings();
+
+  batchRunning = true;
+  batchRows = [];
+  batchDetailIndex = null;
+  ui.batchDetail.innerHTML = "";
+  ui.batchRunButton.disabled = true;
+  ui.batchSaveButton.disabled = true;
+  ui.batchResult.classList.remove("empty-state");
+  ui.batchResult.innerHTML = `<div class="tool-loading">Parsing reference file…</div>`;
+
+  let records: Array<{ name: string; seq: string }> = [];
+  try {
+    records = await window.dbgps.parseSequences(batchFile);
+  } catch (error) {
+    ui.batchResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+    batchRunning = false;
+    ui.batchRunButton.disabled = false;
+    return;
+  }
+
+  const k = Number(elements.kInput.value) || 31;
+  ui.batchProgress.textContent = `0 / ${records.length}`;
+
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i];
+    const raw = rec.seq.replace(/\s+/g, "");
+    const name = rec.name || `seq${i + 1}`;
+    const trimmed = back > 0 ? raw.slice(front, Math.max(front, raw.length - back)) : raw.slice(front);
+    const row: BatchRow = { index: i, name, rawLength: raw.length, analyzedLength: trimmed.length, status: "ok" };
+
+    if (trimmed.length < k) {
+      row.status = "skipped";
+      row.message = `shorter than k=${k} after primer trim`;
+    } else {
+      try {
+        const result = (await window.dbgps.queryAnalyzer(`sequence ${trimmed}`)) as AnalyzerResult;
+        if (result.type === "sequence") {
+          row.result = result;
+        } else {
+          row.status = "error";
+          row.message = result.type === "error" ? result.message : `unexpected ${result.type} response`;
+        }
+      } catch (error) {
+        row.status = "error";
+        row.message = errMessage(error);
+      }
+    }
+    batchRows.push(row);
+    ui.batchProgress.textContent = `${i + 1} / ${records.length}`;
+    if ((i + 1) % 25 === 0 || i === records.length - 1) renderBatchTable();
+  }
+
+  renderBatchTable();
+  renderIcons();
+  ui.batchProgress.textContent = `${records.length} / ${records.length} done`;
+  batchRunning = false;
+  ui.batchRunButton.disabled = false;
+  appendLog(`Batch QC analyzed ${records.length} reference strands from ${compactPath(batchFile)}.`);
+}
+
+function buildBatchCsv() {
+  const header = ["index", "name", "raw_length", "analyzed_length", "status", "observed_kmers", "total_kmers", "path_complete", "min_cov", "mean_cov", "max_cov", "max_adjacent_ratio"];
+  const lines = [header.join(",")];
+  for (const row of batchRows) {
+    const r = row.result;
+    const cell = (v: unknown) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    lines.push([
+      row.index + 1, row.name, row.rawLength, row.analyzedLength, row.status,
+      r ? r.observed : "", r ? r.kmerCount : "", r ? (r.complete ? "yes" : "no") : "",
+      r ? r.minCoverage : "", r ? r.meanCoverage : "", r ? r.maxCoverage : "",
+      r ? r.maxAdjacentRatio : ""
+    ].map(cell).join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+async function saveBatchCsv() {
+  if (!batchRows.some((r) => r.result)) return;
+  try {
+    const res = await window.dbgps.saveFile({ defaultName: "batch-qc.csv", content: buildBatchCsv() });
+    if (res.saved) appendLog(`Saved Batch QC table to ${res.path}`);
+  } catch (error) {
+    appendLog(`Save failed: ${errMessage(error)}`);
+  }
+}
+
 ui.viewTabs.forEach((tab) => tab.addEventListener("click", () => setView((tab.dataset.view as ViewName) || "interactive")));
+ui.batchSelectButton.addEventListener("click", selectBatchFile);
+ui.batchRunButton.addEventListener("click", runBatchAnalysis);
+ui.batchSaveButton.addEventListener("click", saveBatchCsv);
+ui.batchResult.addEventListener("click", (event) => {
+  const tr = (event.target as HTMLElement).closest<HTMLElement>(".batch-row.clickable");
+  if (tr?.dataset.batchIndex) showBatchDetail(Number(tr.dataset.batchIndex));
+});
+ui.batchDetail.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-chart]");
+  const chartType = button?.dataset.sequenceChart;
+  if ((chartType === "bar" || chartType === "line") && batchDetailIndex != null) {
+    appSettings.sequenceChartType = chartType;
+    saveSettings();
+    showBatchDetail(batchDetailIndex);
+  }
+});
+ui.batchPrimerFront.addEventListener("change", () => {
+  appSettings.primerFront = normalizePrimer(ui.batchPrimerFront.value, DEFAULT_PRIMER);
+  syncBatchPrimerInputs();
+  saveSettings();
+});
+ui.batchPrimerBack.addEventListener("change", () => {
+  appSettings.primerBack = normalizePrimer(ui.batchPrimerBack.value, DEFAULT_PRIMER);
+  syncBatchPrimerInputs();
+  saveSettings();
+});
 ui.linksSelectButton.addEventListener("click", selectLinksFile);
 ui.linksRunButton.addEventListener("click", runLinksTool);
 ui.filterSelectButton.addEventListener("click", selectFilterFile);
@@ -2043,6 +2303,7 @@ ui.reportExportMdButton.addEventListener("click", () => exportReport("md"));
 
 loadSettings();
 renderSettings();
+syncBatchPrimerInputs();
 updateQueryModeControls();
 renderFileList();
 renderIcons();

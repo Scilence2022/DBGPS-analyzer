@@ -39,6 +39,7 @@
 
       <nav class="view-nav" aria-label="Workbench views">
         <button class="view-tab active" data-view="interactive"><i data-lucide="activity"></i><span>Interactive</span></button>
+        <button class="view-tab" data-view="batch"><i data-lucide="layers"></i><span>Batch QC</span></button>
         <button class="view-tab" data-view="links"><i data-lucide="link"></i><span>Cross-links</span></button>
         <button class="view-tab" data-view="filter"><i data-lucide="filter"></i><span>Seq-Filter</span></button>
         <button class="view-tab" data-view="report"><i data-lucide="clipboard-list"></i><span>Report</span></button>
@@ -143,6 +144,52 @@
             </div>
             <pre id="logView"></pre>
           </section>
+          </div>
+
+          <div id="view-batch" class="view">
+            <section class="config-band tool-band batch-config">
+              <div class="file-picker">
+                <button id="batchSelectButton" class="primary-button">
+                  <i data-lucide="folder-open"></i>
+                  <span>Reference sequences</span>
+                </button>
+                <div id="batchFile" class="file-list">No reference selected</div>
+              </div>
+              <div class="config-grid batch-grid">
+                <label>
+                  <span>Front primer (bp)</span>
+                  <input id="batchPrimerFront" type="number" min="0" value="18" />
+                </label>
+                <label>
+                  <span>Back primer (bp)</span>
+                  <input id="batchPrimerBack" type="number" min="0" value="18" />
+                </label>
+                <button id="batchRunButton" class="primary-button">
+                  <i data-lucide="play"></i>
+                  <span>Analyze all</span>
+                </button>
+                <button id="batchSaveButton" class="ghost-button" disabled>
+                  <i data-lucide="download"></i>
+                  <span>Save CSV</span>
+                </button>
+              </div>
+              <p class="batch-hint muted">
+                Accepts FASTA or tab-delimited (<code>Head-Index&#9;DNA</code>) files. Each reference
+                strand is scored against the loaded sequencing k-mer table. Start the kernel in the
+                <strong>Interactive</strong> tab first; front/back primer regions are trimmed before analysis.
+              </p>
+            </section>
+            <section class="result-band">
+              <div class="section-title">
+                <div class="section-title-main">
+                  <i data-lucide="layers"></i>
+                  <h2>Per-strand quality scan</h2>
+                </div>
+                <div id="batchProgress" class="batch-progress"></div>
+              </div>
+              <div id="batchResult" class="result-view empty-state">Select a reference file and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
+              <div id="batchDetail" class="batch-detail"></div>
+            </section>
           </div>
 
           <div id="view-links" class="view">

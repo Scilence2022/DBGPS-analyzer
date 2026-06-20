@@ -95,6 +95,8 @@ const api = {
   loadSecrets: () => ipcRenderer.invoke("secrets:load") as Promise<Record<string, string>>,
   saveSecrets: (map: Record<string, string>) =>
     ipcRenderer.invoke("secrets:save", map) as Promise<{ ok: boolean; encrypted: boolean }>,
+  parseSequences: (file: string) =>
+    ipcRenderer.invoke("sequence:parse", file) as Promise<Array<{ name: string; seq: string }>>,
   runLinks: (request: LinksRequest) => ipcRenderer.invoke("links:run", request) as Promise<LinksResult>,
   runFilter: (request: FilterRequest) => ipcRenderer.invoke("filter:run", request) as Promise<FilterResult>,
   runAnalyzerBatch: (request: AnalyzerBatchRequest) =>

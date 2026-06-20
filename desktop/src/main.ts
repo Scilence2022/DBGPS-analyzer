@@ -1,8 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 type AnalyzerConfig = {
@@ -765,16 +766,110 @@ function runTool(binPath: string, args: string[], timeoutMs = 600000): Promise<T
   });
 }
 
-// Count FASTA records (">"-prefixed lines), transparently handling gzip.
-function countFastaRecords(file: string): number {
+// --------------------------------------------------------------------------- #
+// Sequence file parsing. Two input formats are supported across the app:
+//   1. FASTA (">name\nACGT...") / FASTQ ("@name\n...").
+//   2. Tab-delimited "Head-Index<TAB>DNA" tables, one record per line. An
+//      optional header row (whose DNA column is not a DNA string) is skipped.
+// The CLI tools read FASTA/FASTQ via kseq, so tab-delimited reference inputs are
+// transparently converted to a temporary FASTA before a tool is invoked.
+// --------------------------------------------------------------------------- #
+type SeqRecord = { name: string; seq: string };
+
+const DNA_LINE_RE = /^[ACGTNacgtn]+$/;
+
+function readSeqFileText(file: string): string {
   const raw = readFileSync(file);
   const data = file.endsWith(".gz") ? gunzipSync(raw) : raw;
-  const text = data.toString("latin1");
-  let count = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === ">" && (i === 0 || text[i - 1] === "\n")) count++;
+  return data.toString("latin1");
+}
+
+// First non-empty line starts with ">" — a FASTA file we can read here.
+function startsWithFasta(text: string): boolean {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    return trimmed.startsWith(">");
   }
-  return count;
+  return true;
+}
+
+// First non-empty line starts with ">" or "@" — a file the CLI tools read
+// directly (FASTA or FASTQ); it must not be treated as tab-delimited.
+function isCliReadable(text: string): boolean {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    return trimmed.startsWith(">") || trimmed.startsWith("@");
+  }
+  return true;
+}
+
+function parseFastaText(text: string): SeqRecord[] {
+  const records: SeqRecord[] = [];
+  let name = "";
+  let seq: string[] = [];
+  const flush = () => {
+    if (name) records.push({ name, seq: seq.join("") });
+    seq = [];
+  };
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line.startsWith(">")) {
+      flush();
+      name = line.slice(1).trim().split(/\s+/)[0] || `seq${records.length + 1}`;
+    } else if (name) {
+      seq.push(line.trim());
+    }
+  }
+  flush();
+  return records;
+}
+
+function parseTabDelimitedText(text: string): SeqRecord[] {
+  const records: SeqRecord[] = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.replace(/\r$/, "").trim();
+    if (!line) continue;
+    const cols = line.split("\t").map((c) => c.trim());
+    // The DNA column is the last column that looks like a DNA string; the first
+    // column is the record name. Header rows have no DNA column and are skipped.
+    let dnaIdx = -1;
+    for (let i = cols.length - 1; i >= 0; i--) {
+      if (cols[i] && DNA_LINE_RE.test(cols[i])) { dnaIdx = i; break; }
+    }
+    if (dnaIdx < 0) continue;
+    const rawName = cols[0] && dnaIdx !== 0 ? cols[0] : `seq${records.length + 1}`;
+    records.push({ name: rawName.replace(/\s+/g, "_"), seq: cols[dnaIdx].toUpperCase() });
+  }
+  return records;
+}
+
+function parseSequenceRecords(file: string): SeqRecord[] {
+  const text = readSeqFileText(file);
+  return startsWithFasta(text) ? parseFastaText(text) : parseTabDelimitedText(text);
+}
+
+// Count records, transparently handling FASTA, FASTQ-less tab-delimited, and gzip.
+function countRecords(file: string): number {
+  return parseSequenceRecords(file).length;
+}
+
+// Convert a tab-delimited reference file to a temporary FASTA so the FASTA/FASTQ
+// CLI tools can consume it. FASTA/FASTQ inputs pass through unchanged.
+type NormalizedInput = { path: string; cleanup: () => void };
+
+function normalizeToFasta(file: string): NormalizedInput {
+  const text = readSeqFileText(file);
+  if (isCliReadable(text)) return { path: file, cleanup: () => {} };
+  const records = parseTabDelimitedText(text);
+  if (records.length === 0) throw new Error(`No sequences found in ${path.basename(file)}.`);
+  const fasta = records.map((r) => `>${r.name}\n${r.seq}`).join("\n") + "\n";
+  const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const safeBase = path.basename(file).replace(/[^\w.-]/g, "_");
+  const out = path.join(tmpdir(), `dbgps-${safeBase}-${stamp}.fa`);
+  writeFileSync(out, fasta, "utf8");
+  return { path: out, cleanup: () => { try { unlinkSync(out); } catch { /* best effort */ } } };
 }
 
 type LinksRequest = { file: string; k?: number; m?: number };
@@ -783,10 +878,16 @@ async function runLinks(req: LinksRequest) {
   await ensureBuilt("DBGPS-links");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const m = toPositiveInt(req.m, 1, 0, 1 << 20);
-  const args = ["-k", String(k), "-m", String(m), req.file];
-  const result = await runTool(linksPath, args);
-  const match = result.stdout.match(/Total cross links\s+(\d+)/i);
-  return { ...result, file: req.file, k, m, crossLinks: match ? Number(match[1]) : null };
+  const norm = normalizeToFasta(req.file);
+  try {
+    const args = ["-k", String(k), "-m", String(m), norm.path];
+    const result = await runTool(linksPath, args);
+    const match = result.stdout.match(/Total cross links\s+(\d+)/i);
+    const command = result.command.replace(norm.path, req.file);
+    return { ...result, command, file: req.file, k, m, crossLinks: match ? Number(match[1]) : null };
+  } finally {
+    norm.cleanup();
+  }
 }
 
 type FilterRequest = { file: string; k?: number; m?: number; primerLen?: number; listFiltered?: boolean };
@@ -797,17 +898,23 @@ async function runFilter(req: FilterRequest) {
   const m = toPositiveInt(req.m, 0, 0, 1 << 20);
   const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
   const listFiltered = Boolean(req.listFiltered);
-  const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
-  if (listFiltered) args.push("-s");
-  args.push(req.file);
-  const result = await runTool(filterPath, args);
-  const passedCount = (result.stdout.match(/^>/gm) || []).length;
-  // In default mode the filtered strands are marked with " * " on stderr; in -s
-  // mode each filtered strand name is one stdout line.
-  const filteredCount = listFiltered
-    ? result.stdout.split("\n").filter((line) => line.trim().length > 0).length
-    : (result.stderr.match(/\*/g) || []).length;
-  return { ...result, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount };
+  const norm = normalizeToFasta(req.file);
+  try {
+    const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
+    if (listFiltered) args.push("-s");
+    args.push(norm.path);
+    const result = await runTool(filterPath, args);
+    const passedCount = (result.stdout.match(/^>/gm) || []).length;
+    // In default mode the filtered strands are marked with " * " on stderr; in -s
+    // mode each filtered strand name is one stdout line.
+    const filteredCount = listFiltered
+      ? result.stdout.split("\n").filter((line) => line.trim().length > 0).length
+      : (result.stderr.match(/\*/g) || []).length;
+    const command = result.command.replace(norm.path, req.file);
+    return { ...result, command, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount };
+  } finally {
+    norm.cleanup();
+  }
 }
 
 type SmKdKnRow = {
@@ -850,9 +957,15 @@ async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (req.maxR != null && Number.isFinite(Number(req.maxR))) args.push("-R", String(Number(req.maxR)));
   if (req.step != null && Number.isFinite(Number(req.step))) args.push("-I", String(Number(req.step)));
   if (req.skip != null) args.push("-s", String(toPositiveInt(req.skip, 0, 0, 1 << 20)));
-  args.push(req.strandsFile, ...ngsFiles);
-  const result = await runTool(analyzerPath, args);
-  return { ...result, k, rows: parseSmKdKn(result.stdout) };
+  const norm = normalizeToFasta(req.strandsFile);
+  try {
+    args.push(norm.path, ...ngsFiles);
+    const result = await runTool(analyzerPath, args);
+    const command = result.command.replace(norm.path, req.strandsFile);
+    return { ...result, command, k, rows: parseSmKdKn(result.stdout) };
+  } finally {
+    norm.cleanup();
+  }
 }
 
 type ReportRequest = {
@@ -865,7 +978,7 @@ async function runReport(req: ReportRequest) {
   const k = toPositiveInt(req.k, 31, 1, 31);
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
   const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
-  const totalStrands = countFastaRecords(req.referenceFile);
+  const totalStrands = countRecords(req.referenceFile);
 
   // The three tools are independent processes; run them concurrently.
   const [links, filter, analyzer] = await Promise.all([
@@ -922,7 +1035,7 @@ app.whenReady().then(() => {
     const options: OpenDialogOptions = {
       properties: ["openFile", "multiSelections"],
       filters: [
-        { name: "FASTA/FASTQ", extensions: ["fa", "fasta", "fq", "fastq", "gz"] },
+        { name: "Sequences", extensions: ["fa", "fasta", "fq", "fastq", "txt", "tsv", "gz"] },
         { name: "All files", extensions: ["*"] }
       ]
     };
@@ -962,6 +1075,11 @@ app.whenReady().then(() => {
 
   ipcMain.handle("secrets:load", async () => loadSecrets());
   ipcMain.handle("secrets:save", async (_event, map: Record<string, string>) => saveSecrets(map));
+
+  ipcMain.handle("sequence:parse", async (_event, file: string) => {
+    if (!file || typeof file !== "string") throw new Error("No sequence file provided.");
+    return parseSequenceRecords(file);
+  });
 
   ipcMain.handle("links:run", async (_event, request: LinksRequest) => runLinks(request));
   ipcMain.handle("filter:run", async (_event, request: FilterRequest) => runFilter(request));
