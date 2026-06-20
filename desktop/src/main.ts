@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type Ope
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import path from "node:path";
 
 type AnalyzerConfig = {
@@ -75,6 +76,8 @@ let session: AnalyzerSession | null = null;
 // on demand with `make`.
 const repoRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
 const analyzerPath = path.join(repoRoot, "DBGPS-analyzer");
+const linksPath = path.join(repoRoot, "DBGPS-links");
+const filterPath = path.join(repoRoot, "DBGPS-seq-filter");
 
 const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
   openai: {
@@ -233,9 +236,9 @@ function toPositiveInt(value: unknown, fallback: number, min: number, max: numbe
   return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
-function runMake(): Promise<string> {
+function runMake(target = "DBGPS-analyzer"): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("make", ["DBGPS-analyzer"], { cwd: repoRoot });
+    const child = spawn("make", [target], { cwd: repoRoot });
     let output = "";
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -247,20 +250,27 @@ function runMake(): Promise<string> {
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(output);
-      else reject(new Error(output || `make DBGPS-analyzer failed with code ${code}`));
+      else reject(new Error(output || `make ${target} failed with code ${code}`));
     });
   });
 }
 
-async function ensureAnalyzerBuilt(force = false) {
+// Ensure a tool binary exists. In a packaged app it must already be bundled; in
+// dev it is built on demand with `make <binName>`.
+async function ensureBuilt(binName: string, force = false) {
+  const target = path.join(repoRoot, binName);
   if (app.isPackaged) {
-    if (!existsSync(analyzerPath)) {
-      throw new Error(`Bundled analyzer binary not found at ${analyzerPath}.`);
-    }
+    if (!existsSync(target)) throw new Error(`Bundled ${binName} not found at ${target}.`);
     return "";
   }
-  if (!force && existsSync(analyzerPath)) return "";
-  return runMake();
+  if (!force && existsSync(target)) return "";
+  return runMake(binName);
+}
+
+const TOOL_BINARIES = ["DBGPS-analyzer", "DBGPS-links", "DBGPS-seq-filter"];
+
+async function ensureAnalyzerBuilt(force = false) {
+  return ensureBuilt("DBGPS-analyzer", force);
 }
 
 // --------------------------------------------------------------------------- #
@@ -730,6 +740,165 @@ async function aiDiagnose(request: AiRequest) {
   return { provider: settings.provider, model: settings.model, content };
 }
 
+// --------------------------------------------------------------------------- #
+// One-shot CLI tool runners: DBGPS-links, DBGPS-seq-filter, batch DBGPS-analyzer,
+// and a combined diagnostics report that runs all three.
+// --------------------------------------------------------------------------- #
+type ToolRunResult = { code: number | null; stdout: string; stderr: string; command: string };
+
+function runTool(binPath: string, args: string[], timeoutMs = 600000): Promise<ToolRunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binPath, args, { cwd: repoRoot });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${path.basename(binPath)} timed out after ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr, command: `${path.basename(binPath)} ${args.join(" ")}` });
+    });
+  });
+}
+
+// Count FASTA records (">"-prefixed lines), transparently handling gzip.
+function countFastaRecords(file: string): number {
+  const raw = readFileSync(file);
+  const data = file.endsWith(".gz") ? gunzipSync(raw) : raw;
+  const text = data.toString("latin1");
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === ">" && (i === 0 || text[i - 1] === "\n")) count++;
+  }
+  return count;
+}
+
+type LinksRequest = { file: string; k?: number; m?: number };
+async function runLinks(req: LinksRequest) {
+  if (!req || !req.file) throw new Error("Select a FASTA file for cross-link analysis.");
+  await ensureBuilt("DBGPS-links");
+  const k = toPositiveInt(req.k, 31, 1, 31);
+  const m = toPositiveInt(req.m, 1, 0, 1 << 20);
+  const args = ["-k", String(k), "-m", String(m), req.file];
+  const result = await runTool(linksPath, args);
+  const match = result.stdout.match(/Total cross links\s+(\d+)/i);
+  return { ...result, file: req.file, k, m, crossLinks: match ? Number(match[1]) : null };
+}
+
+type FilterRequest = { file: string; k?: number; m?: number; primerLen?: number; listFiltered?: boolean };
+async function runFilter(req: FilterRequest) {
+  if (!req || !req.file) throw new Error("Select a FASTA file to filter.");
+  await ensureBuilt("DBGPS-seq-filter");
+  const k = toPositiveInt(req.k, 31, 1, 31);
+  const m = toPositiveInt(req.m, 0, 0, 1 << 20);
+  const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
+  const listFiltered = Boolean(req.listFiltered);
+  const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
+  if (listFiltered) args.push("-s");
+  args.push(req.file);
+  const result = await runTool(filterPath, args);
+  const passedCount = (result.stdout.match(/^>/gm) || []).length;
+  // In default mode the filtered strands are marked with " * " on stderr; in -s
+  // mode each filtered strand name is one stdout line.
+  const filteredCount = listFiltered
+    ? result.stdout.split("\n").filter((line) => line.trim().length > 0).length
+    : (result.stderr.match(/\*/g) || []).length;
+  return { ...result, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount };
+}
+
+type SmKdKnRow = {
+  ratio: number; coverage: number; total: number; paths: number; noise: number;
+  exist: number; lost: number; sm: number; kd: number; kn: number;
+};
+
+function parseSmKdKn(stdout: string): SmKdKnRow[] {
+  const rows: SmKdKnRow[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.includes("\t") || line.startsWith("Ratio")) continue;
+    const f = line.split("\t");
+    if (f.length < 10 || !/^[-\d.]/.test(f[0])) continue;
+    rows.push({
+      ratio: Number(f[0]), coverage: Number(f[1]), total: Number(f[2]), paths: Number(f[3]),
+      noise: Number(f[4]), exist: Number(f[5]), lost: Number(f[6]),
+      sm: Number(f[7]), kd: Number(f[8]), kn: Number(f[9])
+    });
+  }
+  return rows;
+}
+
+type AnalyzerBatchRequest = {
+  strandsFile: string; ngsFiles: string[];
+  k?: number; threads?: number; readLength?: number;
+  minCov?: number; maxCov?: number; ratio?: number; maxR?: number; step?: number; skip?: number;
+};
+async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
+  if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
+  const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
+  if (ngsFiles.length === 0) throw new Error("Select at least one NGS reads file.");
+  await ensureBuilt("DBGPS-analyzer");
+  const k = toPositiveInt(req.k, 31, 1, 31);
+  const threads = toPositiveInt(req.threads, 3, 1, 64);
+  const readLength = toPositiveInt(req.readLength, 200, k, 100000);
+  const args = ["-k", String(k), "-t", String(threads), "-L", String(readLength)];
+  if (req.minCov != null) args.push("-c", String(toPositiveInt(req.minCov, 0, 0, 1 << 20)));
+  if (req.maxCov != null) args.push("-C", String(toPositiveInt(req.maxCov, 0, 0, 1 << 20)));
+  if (req.ratio != null && Number.isFinite(Number(req.ratio))) args.push("-r", String(Number(req.ratio)));
+  if (req.maxR != null && Number.isFinite(Number(req.maxR))) args.push("-R", String(Number(req.maxR)));
+  if (req.step != null && Number.isFinite(Number(req.step))) args.push("-I", String(Number(req.step)));
+  if (req.skip != null) args.push("-s", String(toPositiveInt(req.skip, 0, 0, 1 << 20)));
+  args.push(req.strandsFile, ...ngsFiles);
+  const result = await runTool(analyzerPath, args);
+  return { ...result, k, rows: parseSmKdKn(result.stdout) };
+}
+
+type ReportRequest = {
+  referenceFile: string; ngsFiles?: string[];
+  k?: number; threads?: number; readLength?: number;
+  primerLen?: number; linksM?: number; filterM?: number;
+};
+async function runReport(req: ReportRequest) {
+  if (!req || !req.referenceFile) throw new Error("Select a reference strand FASTA file.");
+  const k = toPositiveInt(req.k, 31, 1, 31);
+  const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
+  const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
+  const totalStrands = countFastaRecords(req.referenceFile);
+
+  // The three tools are independent processes; run them concurrently.
+  const [links, filter, analyzer] = await Promise.all([
+    runLinks({ file: req.referenceFile, k, m: req.linksM ?? 1 }),
+    runFilter({ file: req.referenceFile, k, m: req.filterM ?? 0, primerLen, listFiltered: true }),
+    ngsFiles.length
+      ? runAnalyzerBatch({ strandsFile: req.referenceFile, ngsFiles, k, threads: req.threads, readLength: req.readLength })
+      : Promise.resolve(null)
+  ]);
+
+  const entangledNames = filter.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const headline = analyzer && analyzer.rows.length ? analyzer.rows[0] : null;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    referenceFile: req.referenceFile,
+    ngsFiles,
+    k,
+    primerLen,
+    totalStrands,
+    crossLinks: links.crossLinks,
+    linksM: links.m,
+    linksCommand: links.command,
+    entangled: entangledNames.length,
+    passed: Math.max(0, totalStrands - entangledNames.length),
+    entangledNames: entangledNames.slice(0, 1000),
+    entangledTruncated: entangledNames.length > 1000,
+    filterM: filter.m,
+    filterCommand: filter.command,
+    analyzer: analyzer ? { rows: analyzer.rows, headline, command: analyzer.command } : null
+  };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1360,
@@ -764,8 +933,11 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("analyzer:build", async () => {
-    const log = await ensureAnalyzerBuilt(true);
-    return { ok: true, log };
+    const logs: string[] = [];
+    for (const bin of TOOL_BINARIES) {
+      logs.push(await ensureBuilt(bin, true));
+    }
+    return { ok: true, log: logs.filter(Boolean).join("\n") || "All DBGPS tools are up to date." };
   });
 
   ipcMain.handle("analyzer:start", async (_event, config: AnalyzerConfig) => {
@@ -790,6 +962,21 @@ app.whenReady().then(() => {
 
   ipcMain.handle("secrets:load", async () => loadSecrets());
   ipcMain.handle("secrets:save", async (_event, map: Record<string, string>) => saveSecrets(map));
+
+  ipcMain.handle("links:run", async (_event, request: LinksRequest) => runLinks(request));
+  ipcMain.handle("filter:run", async (_event, request: FilterRequest) => runFilter(request));
+  ipcMain.handle("analyzer:runBatch", async (_event, request: AnalyzerBatchRequest) => runAnalyzerBatch(request));
+  ipcMain.handle("report:run", async (_event, request: ReportRequest) => runReport(request));
+
+  ipcMain.handle("file:save", async (_event, request: { defaultName?: string; content?: string }) => {
+    const options = { defaultPath: request?.defaultName || "dbgps-report.html" };
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, options)
+      : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return { saved: false };
+    writeFileSync(result.filePath, String(request?.content ?? ""), "utf8");
+    return { saved: true, path: result.filePath };
+  });
 
   createWindow();
 });

@@ -1556,9 +1556,495 @@ window.dbgps.onAnalyzerEvent((event) => {
   }
 });
 
+// ===========================================================================
+// Multi-tool workbench: Cross-links, Seq-Filter, and the combined Report view.
+// ===========================================================================
+type ViewName = "interactive" | "links" | "filter" | "report";
+type LinksResult = Awaited<ReturnType<DbgpsApi["runLinks"]>>;
+type FilterResult = Awaited<ReturnType<DbgpsApi["runFilter"]>>;
+type ReportResult = Awaited<ReturnType<DbgpsApi["runReport"]>>;
+type SmKdKnRow = NonNullable<ReportResult["analyzer"]>["rows"][number];
+type Verdict = { level: "ok" | "warn" | "bad"; text: string };
+
+const ui = {
+  viewTabs: Array.from(document.querySelectorAll<HTMLButtonElement>(".view-tab")),
+  linksSelectButton: $("linksSelectButton") as HTMLButtonElement,
+  linksFile: $("linksFile"),
+  linksK: $("linksK") as HTMLInputElement,
+  linksM: $("linksM") as HTMLInputElement,
+  linksRunButton: $("linksRunButton") as HTMLButtonElement,
+  linksResult: $("linksResult"),
+  filterSelectButton: $("filterSelectButton") as HTMLButtonElement,
+  filterFile: $("filterFile"),
+  filterK: $("filterK") as HTMLInputElement,
+  filterM: $("filterM") as HTMLInputElement,
+  filterPrimer: $("filterPrimer") as HTMLInputElement,
+  filterListFiltered: $("filterListFiltered") as HTMLInputElement,
+  filterRunButton: $("filterRunButton") as HTMLButtonElement,
+  filterSaveButton: $("filterSaveButton") as HTMLButtonElement,
+  filterResult: $("filterResult"),
+  reportRefButton: $("reportRefButton") as HTMLButtonElement,
+  reportRefFile: $("reportRefFile"),
+  reportNgsButton: $("reportNgsButton") as HTMLButtonElement,
+  reportNgsFiles: $("reportNgsFiles"),
+  reportK: $("reportK") as HTMLInputElement,
+  reportThreads: $("reportThreads") as HTMLInputElement,
+  reportReadLength: $("reportReadLength") as HTMLInputElement,
+  reportPrimer: $("reportPrimer") as HTMLInputElement,
+  reportLinksM: $("reportLinksM") as HTMLInputElement,
+  reportFilterM: $("reportFilterM") as HTMLInputElement,
+  reportRunButton: $("reportRunButton") as HTMLButtonElement,
+  reportAiButton: $("reportAiButton") as HTMLButtonElement,
+  reportExportHtmlButton: $("reportExportHtmlButton") as HTMLButtonElement,
+  reportExportMdButton: $("reportExportMdButton") as HTMLButtonElement,
+  reportResult: $("reportResult")
+};
+
+let linksFile = "";
+let filterFile = "";
+let filterOutput = "";
+let reportRefFile = "";
+let reportNgsFiles: string[] = [];
+let latestReport: ReportResult | null = null;
+let reportNarrative = "";
+
+function errMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+function truncateText(value: string, max: number) {
+  return value.length > max ? `${value.slice(0, max)}\n… (truncated)` : value;
+}
+function fmtFloat(value: number) {
+  return Number.isFinite(value) ? value.toFixed(4) : "n/a";
+}
+function fmtPct(value: number) {
+  return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "n/a";
+}
+
+function setView(view: ViewName) {
+  document.body.dataset.view = view;
+  document.querySelectorAll<HTMLElement>(".view").forEach((el) => {
+    el.classList.toggle("active", el.id === `view-${view}`);
+  });
+  ui.viewTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
+  renderIcons();
+}
+
+function renderPathChip(target: HTMLElement, files: string[], empty: string) {
+  if (!files.length) {
+    target.textContent = empty;
+    return;
+  }
+  target.innerHTML = files
+    .map((file) => `<span title="${escapeHtml(file)}">${escapeHtml(compactPath(file))}</span>`)
+    .join("");
+}
+
+async function pickOneFile(): Promise<string> {
+  const files = await window.dbgps.selectFiles();
+  return files[0] || "";
+}
+
+// ---- Cross-links view ----
+async function selectLinksFile() {
+  const file = await pickOneFile();
+  if (file) {
+    linksFile = file;
+    renderPathChip(ui.linksFile, [file], "No file selected");
+  }
+}
+
+async function runLinksTool() {
+  if (!linksFile) {
+    await selectLinksFile();
+    if (!linksFile) return;
+  }
+  ui.linksRunButton.disabled = true;
+  ui.linksResult.classList.remove("empty-state");
+  ui.linksResult.innerHTML = `<div class="tool-loading">Counting cross-links…</div>`;
+  try {
+    const result = await window.dbgps.runLinks({
+      file: linksFile,
+      k: Number(ui.linksK.value),
+      m: Number(ui.linksM.value)
+    });
+    renderLinksResult(result);
+  } catch (error) {
+    ui.linksResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+  } finally {
+    ui.linksRunButton.disabled = false;
+    renderIcons();
+  }
+}
+
+function renderLinksResult(result: LinksResult) {
+  const cl = result.crossLinks;
+  const note = cl === 0
+    ? "No cross-links detected — strands appear well separated at this k."
+    : "Cross-links are k-mers shared by different strands (potential entanglement). Remove primers before counting to avoid false positives.";
+  ui.linksResult.classList.remove("empty-state");
+  ui.linksResult.innerHTML = `
+    <div class="report-metrics">
+      <div class="metric-card"><span>Total cross-links</span><strong>${cl == null ? "-" : formatNumber(cl)}</strong></div>
+      <div class="metric-card"><span>k-mer</span><strong>${formatNumber(result.k)}</strong></div>
+      <div class="metric-card"><span>min shared strands</span><strong>${formatNumber(result.m)}</strong></div>
+    </div>
+    <p class="muted">${note}</p>
+    <details><summary>Command &amp; log</summary><pre class="tool-log">${escapeHtml(result.command)}\n\n${escapeHtml(truncateText(result.stderr || result.stdout, 8000))}</pre></details>
+  `;
+}
+
+// ---- Seq-Filter view ----
+async function selectFilterFile() {
+  const file = await pickOneFile();
+  if (file) {
+    filterFile = file;
+    renderPathChip(ui.filterFile, [file], "No file selected");
+  }
+}
+
+async function runFilterTool() {
+  if (!filterFile) {
+    await selectFilterFile();
+    if (!filterFile) return;
+  }
+  ui.filterRunButton.disabled = true;
+  ui.filterResult.classList.remove("empty-state");
+  ui.filterResult.innerHTML = `<div class="tool-loading">Filtering…</div>`;
+  try {
+    const result = await window.dbgps.runFilter({
+      file: filterFile,
+      k: Number(ui.filterK.value),
+      m: Number(ui.filterM.value),
+      primerLen: Number(ui.filterPrimer.value),
+      listFiltered: ui.filterListFiltered.checked
+    });
+    renderFilterResult(result);
+  } catch (error) {
+    filterOutput = "";
+    ui.filterSaveButton.disabled = true;
+    ui.filterResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+  } finally {
+    ui.filterRunButton.disabled = false;
+    renderIcons();
+  }
+}
+
+function renderFilterResult(result: FilterResult) {
+  filterOutput = result.stdout;
+  ui.filterSaveButton.disabled = !filterOutput.trim();
+  const headline = result.listFiltered
+    ? `<div class="metric-card"><span>Filtered (entangled)</span><strong>${formatNumber(result.filteredCount)}</strong></div>`
+    : `<div class="metric-card"><span>Passed</span><strong>${formatNumber(result.passedCount)}</strong></div>`;
+  const note = result.listFiltered
+    ? "Listing names of entangled strands that exceed the cross-link threshold."
+    : "Emitting strands that passed the entanglement filter as FASTA.";
+  ui.filterResult.classList.remove("empty-state");
+  ui.filterResult.innerHTML = `
+    <div class="report-metrics">
+      ${headline}
+      <div class="metric-card"><span>k-mer</span><strong>${formatNumber(result.k)}</strong></div>
+      <div class="metric-card"><span>max cross-links</span><strong>${formatNumber(result.m)}</strong></div>
+      <div class="metric-card"><span>primer length</span><strong>${formatNumber(result.primerLen)}</strong></div>
+    </div>
+    <p class="muted">${note}</p>
+    <details open><summary>Output (${result.listFiltered ? "filtered names" : "passed FASTA"})</summary><pre class="tool-log">${escapeHtml(truncateText(result.stdout, 20000)) || "(empty)"}</pre></details>
+    <details><summary>Command &amp; log</summary><pre class="tool-log">${escapeHtml(result.command)}\n\n${escapeHtml(truncateText(result.stderr, 8000))}</pre></details>
+  `;
+}
+
+async function saveFilterOutput() {
+  if (!filterOutput.trim()) return;
+  const name = ui.filterListFiltered.checked ? "filtered-names.txt" : "passed.fa";
+  try {
+    const res = await window.dbgps.saveFile({ defaultName: name, content: filterOutput });
+    if (res.saved) appendLog(`Saved filter output to ${res.path}`);
+  } catch (error) {
+    appendLog(`Save failed: ${errMessage(error)}`);
+  }
+}
+
+// ---- Report view ----
+async function selectReportRef() {
+  const file = await pickOneFile();
+  if (file) {
+    reportRefFile = file;
+    renderPathChip(ui.reportRefFile, [file], "No reference selected");
+  }
+}
+
+async function selectReportNgs() {
+  const files = await window.dbgps.selectFiles();
+  reportNgsFiles = files;
+  renderPathChip(ui.reportNgsFiles, files, "No reads selected");
+}
+
+async function generateReport() {
+  if (!reportRefFile) {
+    await selectReportRef();
+    if (!reportRefFile) return;
+  }
+  ui.reportRunButton.disabled = true;
+  reportNarrative = "";
+  ui.reportResult.classList.remove("empty-state");
+  ui.reportResult.innerHTML = `<div class="tool-loading">Running DBGPS-analyzer, DBGPS-links, and DBGPS-seq-filter…</div>`;
+  try {
+    const result = await window.dbgps.runReport({
+      referenceFile: reportRefFile,
+      ngsFiles: reportNgsFiles,
+      k: Number(ui.reportK.value),
+      threads: Number(ui.reportThreads.value),
+      readLength: Number(ui.reportReadLength.value),
+      primerLen: Number(ui.reportPrimer.value),
+      linksM: Number(ui.reportLinksM.value),
+      filterM: Number(ui.reportFilterM.value)
+    });
+    renderReport(result);
+  } catch (error) {
+    latestReport = null;
+    ui.reportAiButton.disabled = true;
+    ui.reportExportHtmlButton.disabled = true;
+    ui.reportExportMdButton.disabled = true;
+    ui.reportResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+  } finally {
+    ui.reportRunButton.disabled = false;
+    renderIcons();
+  }
+}
+
+function reportVerdicts(report: ReportResult): Verdict[] {
+  const verdicts: Verdict[] = [];
+  const total = report.totalStrands || 0;
+  const entFrac = total ? report.entangled / total : 0;
+  if (report.entangled === 0) {
+    verdicts.push({ level: "ok", text: `No entangled strands among ${formatNumber(total)} references at k=${report.k}.` });
+  } else {
+    verdicts.push({
+      level: entFrac > 0.1 ? "bad" : "warn",
+      text: `${formatNumber(report.entangled)} of ${formatNumber(total)} strands (${fmtPct(entFrac)}) are entangled (share k-mers above the filter threshold).`
+    });
+  }
+  if (report.crossLinks != null) {
+    verdicts.push({
+      level: report.crossLinks === 0 ? "ok" : "warn",
+      text: `${formatNumber(report.crossLinks)} cross-links between reference strands at k=${report.k}.`
+    });
+  }
+  const h = report.analyzer?.headline;
+  if (h) {
+    verdicts.push({
+      level: h.sm >= 0.95 ? "ok" : h.sm >= 0.8 ? "warn" : "bad",
+      text: `Strand recovery Sm = ${fmtPct(h.sm)} (${formatNumber(h.paths)}/${formatNumber(h.total)} strands fully covered).`
+    });
+    verdicts.push({
+      level: h.kd <= 0.05 ? "ok" : h.kd <= 0.2 ? "warn" : "bad",
+      text: `k-mer dropout Kd = ${fmtPct(h.kd)}.`
+    });
+    if (Number.isFinite(h.kn)) {
+      verdicts.push({
+        level: h.kn <= 0.5 ? "ok" : h.kn <= 2 ? "warn" : "bad",
+        text: `k-mer noise Kn = ${fmtFloat(h.kn)}.`
+      });
+    }
+  } else {
+    verdicts.push({ level: "warn", text: "No NGS reads provided — Sm/Kd/Kn (coverage, dropout, noise) were not computed." });
+  }
+  return verdicts;
+}
+
+function smkdknTable(rows: SmKdKnRow[]) {
+  if (!rows.length) return `<p class="muted">No analyzer rows.</p>`;
+  const head = ["Ratio", "Cov", "Total", "Paths", "Noise", "Exist", "Lost", "Sm", "Kd", "Kn"];
+  const body = rows.map((r) => {
+    const cells = [
+      r.ratio.toFixed(2), r.coverage, r.total, r.paths, r.noise, r.exist, r.lost,
+      fmtFloat(r.sm), fmtFloat(r.kd), Number.isFinite(r.kn) ? fmtFloat(r.kn) : "nan"
+    ];
+    return `<tr>${cells.map((c) => `<td>${escapeHtml(String(c))}</td>`).join("")}</tr>`;
+  }).join("");
+  return `<table class="data-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function verdictIcon(level: Verdict["level"]) {
+  return level === "ok" ? "check-circle" : level === "warn" ? "alert-triangle" : "x-circle";
+}
+
+function renderReport(report: ReportResult) {
+  latestReport = report;
+  ui.reportResult.classList.remove("empty-state");
+  ui.reportAiButton.disabled = false;
+  ui.reportExportHtmlButton.disabled = false;
+  ui.reportExportMdButton.disabled = false;
+  const h = report.analyzer?.headline || null;
+  const verdicts = reportVerdicts(report);
+  const narrative = reportNarrative
+    ? `<div class="narrative-body">${escapeHtml(reportNarrative).replace(/\n/g, "<br/>")}</div>`
+    : `<p class="muted">Click "Interpret with AI" for a narrative diagnosis using the active provider.</p>`;
+  ui.reportResult.innerHTML = `
+    <div class="report">
+      <div class="report-head">
+        <h3>DBGPS diagnostics report</h3>
+        <p class="muted">${escapeHtml(new Date(report.generatedAt).toLocaleString())} · k=${formatNumber(report.k)} · ${escapeHtml(compactPath(report.referenceFile))}</p>
+      </div>
+      <div class="report-metrics">
+        <div class="metric-card"><span>Reference strands</span><strong>${formatNumber(report.totalStrands)}</strong></div>
+        <div class="metric-card"><span>Entangled</span><strong>${formatNumber(report.entangled)}</strong></div>
+        <div class="metric-card"><span>Cross-links</span><strong>${report.crossLinks == null ? "-" : formatNumber(report.crossLinks)}</strong></div>
+        ${h ? `<div class="metric-card"><span>Recovery Sm</span><strong>${fmtPct(h.sm)}</strong></div>
+        <div class="metric-card"><span>Dropout Kd</span><strong>${fmtPct(h.kd)}</strong></div>
+        <div class="metric-card"><span>Noise Kn</span><strong>${Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"}</strong></div>` : ""}
+      </div>
+      <div class="report-section">
+        <h4>Verdicts</h4>
+        <ul class="verdict-list">${verdicts.map((v) => `<li class="verdict ${v.level}"><i data-lucide="${verdictIcon(v.level)}"></i><span>${escapeHtml(v.text)}</span></li>`).join("")}</ul>
+      </div>
+      ${report.analyzer
+        ? `<div class="report-section"><h4>Coverage metrics — DBGPS-analyzer</h4>${smkdknTable(report.analyzer.rows)}</div>`
+        : `<div class="report-section"><h4>Coverage metrics — DBGPS-analyzer</h4><p class="muted">No NGS reads provided; Sm/Kd/Kn not computed.</p></div>`}
+      <div class="report-section">
+        <h4>Entanglement — DBGPS-seq-filter (m=${formatNumber(report.filterM)}, p=${formatNumber(report.primerLen)})</h4>
+        <p>${formatNumber(report.passed)} passed · ${formatNumber(report.entangled)} entangled${report.entangledTruncated ? " (list truncated to 1000)" : ""}</p>
+        ${report.entangledNames.length ? `<details><summary>Entangled strand names (${formatNumber(report.entangledNames.length)})</summary><pre class="tool-log">${escapeHtml(report.entangledNames.join("\n"))}</pre></details>` : ""}
+      </div>
+      <div class="report-section">
+        <h4>Cross-links — DBGPS-links (m=${formatNumber(report.linksM)})</h4>
+        <p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} k-mers shared across reference strands.</p>
+      </div>
+      <div class="report-section narrative">
+        <h4>AI interpretation</h4>
+        ${narrative}
+      </div>
+      <details><summary>Commands</summary><pre class="tool-log">${escapeHtml([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean).join("\n"))}</pre></details>
+    </div>`;
+  renderIcons();
+}
+
+async function interpretReport() {
+  if (!latestReport) return;
+  ui.reportAiButton.disabled = true;
+  reportNarrative = "Generating AI interpretation…";
+  renderReport(latestReport);
+  try {
+    const instruction =
+      "You are given a DBGPS DNA data-storage diagnostics report (JSON) combining strand recovery (Sm), " +
+      "k-mer dropout (Kd), k-mer noise (Kn), cross-link counts, and entanglement filtering across a set of " +
+      "reference strands. Write a concise interpretation: overall data quality, the most likely failure modes " +
+      "(dropout, noise, entanglement/chimeras), and concrete recommendations (coverage cutoffs, primer removal, " +
+      "resynthesis, deeper sequencing).";
+    const result = await window.dbgps.aiDiagnose({
+      messages: [{ role: "user", content: instruction }],
+      context: latestReport,
+      settings: currentAiSettings()
+    });
+    reportNarrative = result.content;
+  } catch (error) {
+    reportNarrative = `AI interpretation failed: ${errMessage(error)}`;
+  } finally {
+    ui.reportAiButton.disabled = false;
+    if (latestReport) renderReport(latestReport);
+  }
+}
+
+function buildReportMarkdown(report: ReportResult, narrative: string) {
+  const lines: string[] = [];
+  lines.push("# DBGPS Diagnostics Report", "");
+  lines.push(`- Generated: ${report.generatedAt}`);
+  lines.push(`- Reference: ${report.referenceFile}`);
+  lines.push(`- NGS reads: ${report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)"}`);
+  lines.push(`- k-mer: ${report.k} · primer length: ${report.primerLen}`, "");
+  lines.push("## Summary", "", "| Metric | Value |", "| --- | --- |");
+  lines.push(`| Reference strands | ${report.totalStrands} |`);
+  lines.push(`| Entangled strands | ${report.entangled} |`);
+  lines.push(`| Passed strands | ${report.passed} |`);
+  lines.push(`| Cross-links | ${report.crossLinks == null ? "n/a" : report.crossLinks} |`);
+  const h = report.analyzer?.headline;
+  if (h) {
+    lines.push(`| Strand recovery Sm | ${fmtPct(h.sm)} |`);
+    lines.push(`| k-mer dropout Kd | ${fmtPct(h.kd)} |`);
+    lines.push(`| k-mer noise Kn | ${Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"} |`);
+  }
+  lines.push("", "## Verdicts", "");
+  for (const v of reportVerdicts(report)) lines.push(`- **${v.level.toUpperCase()}** — ${v.text}`);
+  if (report.analyzer) {
+    lines.push("", "## Coverage metrics (DBGPS-analyzer)", "");
+    lines.push("| Ratio | Cov | Total | Paths | Noise | Exist | Lost | Sm | Kd | Kn |");
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const r of report.analyzer.rows) {
+      lines.push(`| ${r.ratio.toFixed(2)} | ${r.coverage} | ${r.total} | ${r.paths} | ${r.noise} | ${r.exist} | ${r.lost} | ${fmtFloat(r.sm)} | ${fmtFloat(r.kd)} | ${Number.isFinite(r.kn) ? fmtFloat(r.kn) : "nan"} |`);
+    }
+  }
+  if (report.entangledNames.length) {
+    lines.push("", `## Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})`, "", "```", ...report.entangledNames, "```");
+  }
+  if (narrative) lines.push("", "## AI interpretation", "", narrative);
+  lines.push("", "## Commands", "", "```", report.linksCommand, report.filterCommand, ...(report.analyzer ? [report.analyzer.command] : []), "```", "");
+  return lines.join("\n");
+}
+
+function buildReportHtml(report: ReportResult, narrative: string) {
+  const h = report.analyzer?.headline || null;
+  const verdicts = reportVerdicts(report)
+    .map((v) => `<li class="v-${v.level}">${escapeHtml(v.text)}</li>`)
+    .join("");
+  const analyzerTable = report.analyzer
+    ? `<table><thead><tr>${["Ratio", "Cov", "Total", "Paths", "Noise", "Exist", "Lost", "Sm", "Kd", "Kn"].map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>${report.analyzer.rows.map((r) => `<tr>${[r.ratio.toFixed(2), r.coverage, r.total, r.paths, r.noise, r.exist, r.lost, fmtFloat(r.sm), fmtFloat(r.kd), Number.isFinite(r.kn) ? fmtFloat(r.kn) : "nan"].map((c) => `<td>${escapeHtml(String(c))}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+    : `<p class="muted">No NGS reads provided; Sm/Kd/Kn not computed.</p>`;
+  const summaryRows = [
+    ["Reference strands", formatNumber(report.totalStrands)],
+    ["Entangled strands", formatNumber(report.entangled)],
+    ["Passed strands", formatNumber(report.passed)],
+    ["Cross-links", report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)],
+    ...(h ? [["Strand recovery Sm", fmtPct(h.sm)], ["k-mer dropout Kd", fmtPct(h.kd)], ["k-mer noise Kn", Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"]] : [])
+  ].map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`).join("");
+  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}";
+  const narrativeHtml = narrative ? `<h2>AI interpretation</h2><div>${escapeHtml(narrative).replace(/\n/g, "<br/>")}</div>` : "";
+  const entangledHtml = report.entangledNames.length
+    ? `<h2>Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})</h2><pre>${escapeHtml(report.entangledNames.join("\n"))}</pre>`
+    : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>DBGPS Diagnostics Report</title><style>${css}</style></head><body>` +
+    `<h1>DBGPS Diagnostics Report</h1>` +
+    `<p class="muted">Generated ${escapeHtml(new Date(report.generatedAt).toLocaleString())} · k=${escapeHtml(String(report.k))} · primer ${escapeHtml(String(report.primerLen))}</p>` +
+    `<p class="muted">Reference: ${escapeHtml(report.referenceFile)}<br/>NGS reads: ${escapeHtml(report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)")}</p>` +
+    `<h2>Summary</h2><table>${summaryRows}</table>` +
+    `<h2>Verdicts</h2><ul>${verdicts}</ul>` +
+    `<h2>Coverage metrics (DBGPS-analyzer)</h2>${analyzerTable}` +
+    `<h2>Cross-links (DBGPS-links, m=${escapeHtml(String(report.linksM))})</h2><p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} k-mers shared across reference strands.</p>` +
+    entangledHtml +
+    narrativeHtml +
+    `<h2>Commands</h2><pre>${escapeHtml([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean).join("\n"))}</pre>` +
+    `</body></html>`;
+}
+
+async function exportReport(format: "html" | "md") {
+  if (!latestReport) return;
+  const content = format === "html" ? buildReportHtml(latestReport, reportNarrative) : buildReportMarkdown(latestReport, reportNarrative);
+  const stamp = latestReport.generatedAt.replace(/[:.]/g, "-");
+  const name = `dbgps-report-${stamp}.${format === "html" ? "html" : "md"}`;
+  try {
+    const res = await window.dbgps.saveFile({ defaultName: name, content });
+    if (res.saved) appendLog(`Report exported to ${res.path}`);
+  } catch (error) {
+    appendLog(`Export failed: ${errMessage(error)}`);
+  }
+}
+
+ui.viewTabs.forEach((tab) => tab.addEventListener("click", () => setView((tab.dataset.view as ViewName) || "interactive")));
+ui.linksSelectButton.addEventListener("click", selectLinksFile);
+ui.linksRunButton.addEventListener("click", runLinksTool);
+ui.filterSelectButton.addEventListener("click", selectFilterFile);
+ui.filterRunButton.addEventListener("click", runFilterTool);
+ui.filterSaveButton.addEventListener("click", saveFilterOutput);
+ui.reportRefButton.addEventListener("click", selectReportRef);
+ui.reportNgsButton.addEventListener("click", selectReportNgs);
+ui.reportRunButton.addEventListener("click", generateReport);
+ui.reportAiButton.addEventListener("click", interpretReport);
+ui.reportExportHtmlButton.addEventListener("click", () => exportReport("html"));
+ui.reportExportMdButton.addEventListener("click", () => exportReport("md"));
+
 loadSettings();
 renderSettings();
 updateQueryModeControls();
 renderFileList();
 renderIcons();
+setView("interactive");
 void loadSecrets();

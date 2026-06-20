@@ -37,8 +37,16 @@
         </div>
       </header>
 
+      <nav class="view-nav" aria-label="Workbench views">
+        <button class="view-tab active" data-view="interactive"><i data-lucide="activity"></i><span>Interactive</span></button>
+        <button class="view-tab" data-view="links"><i data-lucide="link"></i><span>Cross-links</span></button>
+        <button class="view-tab" data-view="filter"><i data-lucide="filter"></i><span>Seq-Filter</span></button>
+        <button class="view-tab" data-view="report"><i data-lucide="clipboard-list"></i><span>Report</span></button>
+      </nav>
+
       <main class="layout">
         <section class="workspace">
+          <div id="view-interactive" class="view active">
           <section class="config-band">
             <div class="file-picker">
               <button id="selectFilesButton" class="primary-button">
@@ -135,6 +143,145 @@
             </div>
             <pre id="logView"></pre>
           </section>
+          </div>
+
+          <div id="view-links" class="view">
+            <section class="config-band tool-band">
+              <div class="file-picker">
+                <button id="linksSelectButton" class="primary-button">
+                  <i data-lucide="folder-open"></i>
+                  <span>Select FASTA</span>
+                </button>
+                <div id="linksFile" class="file-list">No file selected</div>
+              </div>
+              <div class="config-grid">
+                <label>
+                  <span>k-mer</span>
+                  <input id="linksK" type="number" min="1" max="31" value="31" />
+                </label>
+                <label>
+                  <span>Min shared strands (m)</span>
+                  <input id="linksM" type="number" min="0" value="1" />
+                </label>
+                <button id="linksRunButton" class="primary-button">
+                  <i data-lucide="play"></i>
+                  <span>Count cross-links</span>
+                </button>
+              </div>
+            </section>
+            <section class="result-band">
+              <div class="section-title">
+                <div class="section-title-main">
+                  <i data-lucide="link"></i>
+                  <h2>Cross-link analysis</h2>
+                </div>
+              </div>
+              <div id="linksResult" class="result-view empty-state">Select a FASTA file and run to count k-mers shared across strands. Remove primers first to avoid false positives.</div>
+            </section>
+          </div>
+
+          <div id="view-filter" class="view">
+            <section class="config-band tool-band">
+              <div class="file-picker">
+                <button id="filterSelectButton" class="primary-button">
+                  <i data-lucide="folder-open"></i>
+                  <span>Select FASTA</span>
+                </button>
+                <div id="filterFile" class="file-list">No file selected</div>
+              </div>
+              <div class="config-grid">
+                <label>
+                  <span>k-mer</span>
+                  <input id="filterK" type="number" min="1" max="31" value="31" />
+                </label>
+                <label>
+                  <span>Max cross-links (m)</span>
+                  <input id="filterM" type="number" min="0" value="0" />
+                </label>
+                <label>
+                  <span>Primer length (p)</span>
+                  <input id="filterPrimer" type="number" min="0" value="18" />
+                </label>
+                <label class="checkbox-label">
+                  <input id="filterListFiltered" type="checkbox" />
+                  <span>List filtered names</span>
+                </label>
+                <button id="filterRunButton" class="primary-button">
+                  <i data-lucide="play"></i>
+                  <span>Run filter</span>
+                </button>
+              </div>
+            </section>
+            <section class="result-band">
+              <div class="section-title">
+                <div class="section-title-main">
+                  <i data-lucide="filter"></i>
+                  <h2>Entanglement filter</h2>
+                </div>
+                <button id="filterSaveButton" class="icon-button" disabled>
+                  <i data-lucide="download"></i>
+                  <span>Save output</span>
+                </button>
+              </div>
+              <div id="filterResult" class="result-view empty-state">Screen out entangled strands. Default emits passed strands as FASTA; toggle "List filtered names" to emit the names of removed strands instead.</div>
+            </section>
+          </div>
+
+          <div id="view-report" class="view">
+            <section class="config-band tool-band report-config">
+              <div class="report-files">
+                <div class="file-picker">
+                  <button id="reportRefButton" class="primary-button">
+                    <i data-lucide="folder-open"></i>
+                    <span>Reference strands</span>
+                  </button>
+                  <div id="reportRefFile" class="file-list">No reference selected</div>
+                </div>
+                <div class="file-picker">
+                  <button id="reportNgsButton" class="ghost-button">
+                    <i data-lucide="folder-open"></i>
+                    <span>NGS reads (optional)</span>
+                  </button>
+                  <div id="reportNgsFiles" class="file-list">No reads selected</div>
+                </div>
+              </div>
+              <div class="config-grid report-grid">
+                <label><span>k-mer</span><input id="reportK" type="number" min="1" max="31" value="31" /></label>
+                <label><span>Threads</span><input id="reportThreads" type="number" min="1" max="64" value="3" /></label>
+                <label><span>Read length</span><input id="reportReadLength" type="number" min="1" value="200" /></label>
+                <label><span>Primer length</span><input id="reportPrimer" type="number" min="0" value="18" /></label>
+                <label><span>Links m</span><input id="reportLinksM" type="number" min="0" value="1" /></label>
+                <label><span>Filter m</span><input id="reportFilterM" type="number" min="0" value="0" /></label>
+                <button id="reportRunButton" class="primary-button">
+                  <i data-lucide="file-text"></i>
+                  <span>Generate report</span>
+                </button>
+              </div>
+            </section>
+            <section class="result-band">
+              <div class="section-title">
+                <div class="section-title-main">
+                  <i data-lucide="clipboard-list"></i>
+                  <h2>Comprehensive report</h2>
+                </div>
+                <div class="report-actions">
+                  <button id="reportAiButton" class="icon-button" disabled>
+                    <i data-lucide="sparkles"></i>
+                    <span>Interpret with AI</span>
+                  </button>
+                  <button id="reportExportHtmlButton" class="icon-button" disabled>
+                    <i data-lucide="file-code"></i>
+                    <span>Export HTML</span>
+                  </button>
+                  <button id="reportExportMdButton" class="icon-button" disabled>
+                    <i data-lucide="file-down"></i>
+                    <span>Export MD</span>
+                  </button>
+                </div>
+              </div>
+              <div id="reportResult" class="result-view empty-state">Select a reference strand FASTA (and optional NGS reads), then generate a combined report across DBGPS-analyzer, DBGPS-links, and DBGPS-seq-filter.</div>
+            </section>
+          </div>
         </section>
 
         <aside class="chat-panel">
