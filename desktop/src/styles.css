@@ -1555,3 +1555,220 @@ td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* ===== Multi-tool workbench: view tabs, tools, and report ===== */
+.view-nav {
+  display: flex;
+  gap: 6px;
+  padding: 12px 18px 0;
+}
+
+.view-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 15px;
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.view-tab:hover {
+  color: var(--text);
+}
+
+.view-tab.active {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+  border-bottom-color: var(--surface);
+}
+
+.view-tab svg {
+  width: 16px;
+  height: 16px;
+}
+
+.view {
+  display: none;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.view.active {
+  display: flex;
+}
+
+/* Chat panel is only relevant to the interactive kernel view. */
+body:not([data-view="interactive"]) .chat-panel {
+  display: none;
+}
+body:not([data-view="interactive"]) .layout {
+  grid-template-columns: 1fr;
+}
+
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 13px;
+  background: var(--surface-strong);
+  white-space: nowrap;
+}
+.ghost-button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.checkbox-label {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+}
+.checkbox-label input {
+  width: auto;
+  min-height: 0;
+}
+
+.report-config {
+  grid-template-columns: 1fr;
+  gap: 14px;
+  align-items: stretch;
+}
+.report-files {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+.report-grid {
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+.report-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.report-grid input {
+  width: 96px;
+}
+
+/* Result helpers shared by tools and report */
+.tool-loading {
+  color: var(--muted);
+  padding: 12px 4px;
+}
+.error-card {
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+.muted {
+  color: var(--muted);
+}
+.tool-log {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  margin: 6px 0;
+}
+
+.report-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.metric-card span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.metric-card strong {
+  font-size: 20px;
+}
+
+.report-section {
+  margin-top: 18px;
+}
+.report-section h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.report-head h3 {
+  margin: 0;
+}
+.report-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.verdict-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+.verdict svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin-top: 2px;
+}
+.verdict.ok svg { color: var(--green); }
+.verdict.warn svg { color: var(--amber); }
+.verdict.bad svg { color: var(--red); }
+
+.data-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.data-table th,
+.data-table td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+.data-table th {
+  background: var(--surface-strong);
+}
+
+.narrative-body {
+  line-height: 1.55;
+}

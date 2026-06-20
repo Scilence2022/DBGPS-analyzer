@@ -128,7 +128,16 @@ Supported commands:
 
 ### Electron Desktop App
 
-The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It provides file selection, kernel start/stop, k-mer and sequence path query views, multi-step upstream/downstream k-mer tree visualization, a Settings workspace, dark/light/system appearance modes, and a real AI ChatBox wired through the Electron main process.
+The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It is organized into four top-level views (plus a Settings workspace), all wired to the C tools through the Electron main process:
+
+| View | Purpose |
+|:---|:---|
+| **Interactive** | Start/stop the `DBGPS-analyzer` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees; chat with the AI diagnostician. |
+| **Cross-links** | Run `DBGPS-links` on a FASTA and report the total number of k-mers shared across strands (entanglement), with k and minimum-shared-strands controls. |
+| **Seq-Filter** | Run `DBGPS-seq-filter` to screen entangled strands; choose k, max cross-links, primer length, and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
+| **Report** | Generate a **comprehensive diagnostics report** over a reference strand set: run all three tools (and `DBGPS-analyzer` batch metrics when NGS reads are supplied), with headline metrics, rule-based verdicts, the Sm/Kd/Kn table, cross-link and entanglement summaries, an optional AI interpretation, and one-click export to HTML or Markdown. |
+
+The combined report runs the three tools concurrently. `DBGPS-links` and `DBGPS-seq-filter` analyze the reference strands (k-mer entanglement of the designed library); `DBGPS-analyzer` additionally computes strand recovery (Sm), k-mer dropout (Kd), and k-mer noise (Kn) when NGS reads are provided.
 
 The Settings workspace is organized into four tabs:
 
