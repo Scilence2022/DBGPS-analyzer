@@ -69,7 +69,10 @@ type IndexResult = {
   type: "index";
   index: string;
   decoded: string;
+  encodedLength?: number;
+  targetLength?: number;
   decodedLength: number;
+  padded?: boolean;
   k: number;
   completed: boolean;
   truncated: boolean;
@@ -332,9 +335,12 @@ const elements = {
   queryButton: $("queryButton") as HTMLButtonElement,
   queryOptions: $("queryOptions"),
   queryInput: $("queryInput") as HTMLTextAreaElement,
+  indexBaseLengthOption: $("indexBaseLengthOption"),
+  indexBaseLengthInput: $("indexBaseLengthInput") as HTMLInputElement,
   upstreamDepthInput: $("upstreamDepthInput") as HTMLInputElement,
   downstreamDepthInput: $("downstreamDepthInput") as HTMLInputElement,
   resultView: $("resultView"),
+  diagnosticsSettingsButton: $("diagnosticsSettingsButton") as HTMLButtonElement,
   logView: $("logView"),
   distinctKmers: $("distinctKmers"),
   totalCoverage: $("totalCoverage"),
@@ -647,6 +653,10 @@ function selectSettingsTab(tab: string) {
     appearance: {
       title: "Appearance",
       subtitle: "Choose the desktop style used across the analyzer."
+    },
+    diagnostics: {
+      title: "Diagnostics",
+      subtitle: "Tune result visualization and graph display behavior."
     }
   };
   const active = titles[tab] ? tab : "providers";
@@ -951,15 +961,15 @@ function renderIndexResult(data: IndexResult) {
       <div class="focus-kmer">
         <span>Index</span>
         <code>${escapeHtml(data.index)}</code>
-        <small>${data.completed ? "auto-completed to k-mer" : data.truncated ? "end-anchored" : "exact k-mer length"}</small>
+        <small>${data.padded ? "padded with A" : data.completed ? "auto-completed to k-mer" : data.truncated ? "end-anchored" : "exact k-mer length"}</small>
       </div>
       <div class="metric">
         <span>Decoded DNA</span>
         <strong><code>${escapeHtml(data.decoded)}</code></strong>
       </div>
       <div class="metric">
-        <span>Decoded / k</span>
-        <strong>${formatNumber(data.decodedLength)} / ${formatNumber(data.k)}</strong>
+        <span>Encoded / target / k</span>
+        <strong>${formatNumber(data.encodedLength ?? data.decodedLength)} / ${formatNumber(data.targetLength ?? data.decodedLength)} / ${formatNumber(data.k)}</strong>
       </div>
       <div class="metric ${data.startCount > 0 ? "metric-ok" : "metric-alert"}">
         <span>Starts</span>
@@ -1212,8 +1222,16 @@ function depthInputValue(input: HTMLInputElement) {
   return Math.min(6, Math.max(0, Math.trunc(parsed)));
 }
 
+function indexBaseLengthValue() {
+  const parsed = Number(elements.indexBaseLengthInput.value);
+  const fallback = Number(elements.kInput.value) || 31;
+  if (!Number.isFinite(parsed)) return Math.min(300, Math.max(1, Math.trunc(fallback)));
+  return Math.min(300, Math.max(1, Math.trunc(parsed)));
+}
+
 function updateQueryModeControls() {
   elements.queryOptions.classList.toggle("hidden", queryMode === "sequence");
+  elements.indexBaseLengthOption.classList.toggle("hidden", queryMode !== "index");
   if (queryMode === "kmer") {
     elements.queryInput.placeholder = "Enter a k-mer or longer A/C/G/T sequence";
   } else if (queryMode === "index") {
@@ -1230,7 +1248,7 @@ function buildQueryCommand() {
     return `kmer ${input} ${depthInputValue(elements.upstreamDepthInput)} ${depthInputValue(elements.downstreamDepthInput)}`;
   }
   if (queryMode === "index") {
-    return `index ${input} ${depthInputValue(elements.upstreamDepthInput)} ${depthInputValue(elements.downstreamDepthInput)}`;
+    return `index ${input} ${indexBaseLengthValue()} ${depthInputValue(elements.upstreamDepthInput)} ${depthInputValue(elements.downstreamDepthInput)}`;
   }
   return `sequence ${input}`;
 }
@@ -1299,6 +1317,7 @@ elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
 elements.stopButton.addEventListener("click", stopAnalyzer);
 elements.queryButton.addEventListener("click", runQuery);
+elements.diagnosticsSettingsButton.addEventListener("click", () => openSettings("diagnostics"));
 elements.resultView.addEventListener("click", (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-chart]");
   const chartType = button?.dataset.sequenceChart;

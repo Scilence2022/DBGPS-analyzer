@@ -1108,6 +1108,32 @@ static int parse_nonnegative_int_token(char **arg, int fallback, int *out)
     return 1;
 }
 
+static int parse_positive_int_token(char **arg, int fallback, int *out)
+{
+    char *s;
+    char *end;
+    long value;
+
+    if (arg == 0 || *arg == 0 || **arg == '\0') {
+        *out = fallback;
+        return 1;
+    }
+
+    s = trim_left(*arg);
+    if (*s == '\0') {
+        *arg = s;
+        *out = fallback;
+        return 1;
+    }
+
+    value = strtol(s, &end, 10);
+    if (end == s || value < 1 || value > Max_Path_Len) return 0;
+
+    *out = (int)value;
+    *arg = trim_left(end);
+    return 1;
+}
+
 static char *normalize_dna_arg(const char *arg, int *out_len, char *err, size_t err_len)
 {
     int n = 0;
@@ -1244,6 +1270,22 @@ static char *index_token_to_dna(const char *token, int *out_len, char *err, size
     free(reversed);
     free(digits);
     return seq;
+}
+
+static char *left_pad_dna_with_a(char *seq, int *len, int target_len)
+{
+    int pad_len;
+    char *padded;
+
+    if (target_len <= *len) return seq;
+
+    pad_len = target_len - *len;
+    MALLOC(padded, target_len + 1);
+    memset(padded, 'A', pad_len);
+    memcpy(padded + pad_len, seq, *len + 1);
+    free(seq);
+    *len = target_len;
+    return padded;
 }
 
 static void clear_start_kmer_list(start_kmer_list_t *list)
@@ -1429,7 +1471,7 @@ static void emit_help_json(void)
     fprintf(stdout, ",");
     json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
-    json_string(stdout, "index <decimalInteger> [upstreamDepth] [downstreamDepth]");
+    json_string(stdout, "index <decimalInteger> <baseLength> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
@@ -1670,10 +1712,12 @@ static void emit_index_start_json(kc_c4x_t *h, int k, uint64_t mask, const char 
     free(left_canonical);
 }
 
-static void emit_index_query_json(kc_c4x_t *h, int k, const char *index_token, int upstream_depth, int downstream_depth)
+static void emit_index_query_json(kc_c4x_t *h, int k, const char *index_token, int base_length, int upstream_depth, int downstream_depth)
 {
     uint64_t mask = (1ULL<<k*2) - 1;
     int decoded_len = 0;
+    int encoded_len = 0;
+    int padded = 0;
     char err[160];
     char *decoded = index_token_to_dna(index_token, &decoded_len, err, sizeof(err));
     int up_depth = clamp_tree_depth(upstream_depth);
@@ -1684,11 +1728,17 @@ static void emit_index_query_json(kc_c4x_t *h, int k, const char *index_token, i
         return;
     }
 
+    encoded_len = decoded_len;
+    if (decoded_len < base_length) {
+        decoded = left_pad_dna_with_a(decoded, &decoded_len, base_length);
+        padded = 1;
+    }
+
     fprintf(stdout, "{\"type\":\"index\",\"index\":");
     json_string(stdout, index_token);
     fprintf(stdout, ",\"decoded\":");
     json_string(stdout, decoded);
-    fprintf(stdout, ",\"decodedLength\":%d,\"k\":%d,\"completed\":%s,\"truncated\":%s", decoded_len, k, decoded_len < k ? "true" : "false", decoded_len > k ? "true" : "false");
+    fprintf(stdout, ",\"encodedLength\":%d,\"targetLength\":%d,\"decodedLength\":%d,\"padded\":%s,\"k\":%d,\"completed\":%s,\"truncated\":%s", encoded_len, base_length, decoded_len, padded ? "true" : "false", k, decoded_len < k ? "true" : "false", decoded_len > k ? "true" : "false");
     fprintf(stdout, ",\"upstreamDepth\":%d,\"downstreamDepth\":%d,\"maxStartKmers\":%d", up_depth, down_depth, Max_Index_Start_Kmers);
 
     if (decoded_len >= k) {
@@ -1881,6 +1931,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         } else if (command_equals(cmd, "index")) {
             char *depth_arg = arg;
             char *index_token = arg;
+            int base_length = k;
             int upstream_depth = 1;
             int downstream_depth = 1;
             while (*depth_arg && !isspace((unsigned char)*depth_arg)) ++depth_arg;
@@ -1888,12 +1939,14 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 *depth_arg++ = '\0';
                 depth_arg = trim_left(depth_arg);
             }
-            if (!parse_nonnegative_int_token(&depth_arg, 1, &upstream_depth)) {
+            if (!parse_positive_int_token(&depth_arg, k, &base_length)) {
+                emit_error_json("index base length must be a positive integer no greater than 300");
+            } else if (!parse_nonnegative_int_token(&depth_arg, 1, &upstream_depth)) {
                 emit_error_json("upstream depth must be a non-negative integer");
             } else if (!parse_nonnegative_int_token(&depth_arg, upstream_depth, &downstream_depth)) {
                 emit_error_json("downstream depth must be a non-negative integer");
             } else {
-                emit_index_query_json(h, k, index_token, upstream_depth, downstream_depth);
+                emit_index_query_json(h, k, index_token, base_length, upstream_depth, downstream_depth);
             }
         } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
