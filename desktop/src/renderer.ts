@@ -174,6 +174,7 @@ type AppSettings = {
   maxTokens: number;
   appearance: "light" | "dark" | "system";
   kmerTreeMode: "cards" | "bases";
+  sequenceChartType: "bar" | "line";
 };
 
 const SETTINGS_STORAGE_KEY = "dbgps-settings-v3";
@@ -411,7 +412,8 @@ function createDefaultSettings(): AppSettings {
     temperature: 0.2,
     maxTokens: 900,
     appearance: "system",
-    kmerTreeMode: "cards"
+    kmerTreeMode: "cards",
+    sequenceChartType: "bar"
   };
 }
 
@@ -441,6 +443,7 @@ function mergeSettings(input: unknown): AppSettings {
     : firstEnabledProvider(providers) || defaults.activeProvider;
   const appearance = stored.appearance === "light" || stored.appearance === "dark" || stored.appearance === "system" ? stored.appearance : "system";
   const kmerTreeMode = stored.kmerTreeMode === "bases" || stored.kmerTreeMode === "cards" ? stored.kmerTreeMode : "cards";
+  const sequenceChartType = stored.sequenceChartType === "line" || stored.sequenceChartType === "bar" ? stored.sequenceChartType : "bar";
 
   return {
     activeProvider,
@@ -448,7 +451,8 @@ function mergeSettings(input: unknown): AppSettings {
     temperature: Number.isFinite(Number(stored.temperature)) ? Number(stored.temperature) : defaults.temperature,
     maxTokens: Number.isFinite(Number(stored.maxTokens)) ? Number(stored.maxTokens) : defaults.maxTokens,
     appearance,
-    kmerTreeMode
+    kmerTreeMode,
+    sequenceChartType
   };
 }
 
@@ -467,6 +471,7 @@ function saveSettings() {
 function rerenderLatestResult() {
   if (latestResult?.type === "kmer") renderKmerResult(latestResult);
   else if (latestResult?.type === "index") renderIndexResult(latestResult);
+  else if (latestResult?.type === "sequence") renderSequenceResult(latestResult);
 }
 
 function commitSettings() {
@@ -969,19 +974,100 @@ function renderIndexResult(data: IndexResult) {
   `;
 }
 
-function renderCoverageBars(data: SequenceResult) {
-  const maxCoverage = Math.max(1, ...data.coverages.map((item) => item.coverage));
-  const shown = data.coverages.slice(0, 180);
+function renderSequenceChartControls() {
+  const options: Array<{ type: "bar" | "line"; label: string }> = [
+    { type: "bar", label: "Bars" },
+    { type: "line", label: "Line" }
+  ];
   return `
-    <div class="coverage-bars" aria-label="k-mer coverage">
-      ${shown
+    <div class="sequence-chart-header">
+      <div>
+        <strong>Coverage by k-mer position</strong>
+        <span>Coordinates show ordered k-mer position and coverage.</span>
+      </div>
+      <div class="chart-toggle" role="tablist" aria-label="Sequence path chart type">
+        ${options
+          .map(
+            (option) => `
+              <button type="button" class="${appSettings.sequenceChartType === option.type ? "active" : ""}" data-sequence-chart="${option.type}" role="tab" aria-selected="${appSettings.sequenceChartType === option.type}">
+                ${escapeHtml(option.label)}
+              </button>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function chartAxisLabels(data: SequenceCoverage[]) {
+  if (data.length === 0) return { first: 0, mid: 0, last: 0 };
+  const first = data[0].position;
+  const mid = data[Math.floor((data.length - 1) / 2)].position;
+  const last = data[data.length - 1].position;
+  return { first, mid, last };
+}
+
+function renderCoverageBarPlot(data: SequenceCoverage[], maxCoverage: number) {
+  return `
+    <div class="coverage-bars" aria-label="k-mer coverage bars">
+      ${data
         .map((item) => {
           const height = Math.max(4, Math.round((item.coverage / maxCoverage) * 100));
           return `<span class="${coverageClass(item.coverage)}" style="--h:${height}%" title="${escapeHtml(item.position)} ${escapeHtml(item.kmer)} cov=${escapeHtml(item.coverage)}"></span>`;
         })
         .join("")}
     </div>
-    ${data.coverages.length > shown.length ? `<p class="table-note">Showing the first ${shown.length} of ${data.coverages.length} k-mers.</p>` : ""}
+  `;
+}
+
+function renderCoverageLinePlot(data: SequenceCoverage[], maxCoverage: number) {
+  const points = data
+    .map((item, index) => {
+      const x = data.length > 1 ? (index / (data.length - 1)) * 100 : 50;
+      const y = 100 - (item.coverage / maxCoverage) * 100;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  return `
+    <svg class="coverage-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="k-mer coverage line chart">
+      <line x1="0" y1="0" x2="100" y2="0" class="chart-grid-line"></line>
+      <line x1="0" y1="50" x2="100" y2="50" class="chart-grid-line"></line>
+      <line x1="0" y1="100" x2="100" y2="100" class="chart-grid-line baseline"></line>
+      <polyline points="${points}" class="coverage-line"></polyline>
+    </svg>
+  `;
+}
+
+function renderSequenceCoverageChart(data: SequenceResult) {
+  const shown = data.coverages.slice(0, 180);
+  const maxCoverage = Math.max(1, ...shown.map((item) => item.coverage));
+  const halfCoverage = Math.round(maxCoverage / 2);
+  const xLabels = chartAxisLabels(shown);
+  const plot = appSettings.sequenceChartType === "line"
+    ? renderCoverageLinePlot(shown, maxCoverage)
+    : renderCoverageBarPlot(shown, maxCoverage);
+
+  return `
+    <section class="sequence-chart-panel">
+      ${renderSequenceChartControls()}
+      <div class="sequence-chart-frame">
+        <div class="y-axis-label">Coverage</div>
+        <div class="y-axis">
+          <span>${formatNumber(maxCoverage)}</span>
+          <span>${formatNumber(halfCoverage)}</span>
+          <span>0</span>
+        </div>
+        <div class="chart-plot">${plot}</div>
+        <div class="x-axis-label">Position</div>
+        <div class="x-axis">
+          <span>${formatNumber(xLabels.first)}</span>
+          <span>${formatNumber(xLabels.mid)}</span>
+          <span>${formatNumber(xLabels.last)}</span>
+        </div>
+      </div>
+      ${data.coverages.length > shown.length ? `<p class="table-note">Showing the first ${shown.length} of ${data.coverages.length} k-mers.</p>` : ""}
+    </section>
   `;
 }
 
@@ -1038,7 +1124,7 @@ function renderSequenceResult(data: SequenceResult) {
         <strong>${Number(data.maxAdjacentRatio).toFixed(3)}</strong>
       </div>
     </div>
-    ${renderCoverageBars(data)}
+    ${renderSequenceCoverageChart(data)}
     ${renderSequenceTable(data)}
   `;
 }
@@ -1213,6 +1299,15 @@ elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
 elements.stopButton.addEventListener("click", stopAnalyzer);
 elements.queryButton.addEventListener("click", runQuery);
+elements.resultView.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-chart]");
+  const chartType = button?.dataset.sequenceChart;
+  if (chartType === "bar" || chartType === "line") {
+    appSettings.sequenceChartType = chartType;
+    saveSettings();
+    if (latestResult?.type === "sequence") renderSequenceResult(latestResult);
+  }
+});
 elements.sendChatButton.addEventListener("click", sendChat);
 elements.settingsButton.addEventListener("click", () => openSettings("providers"));
 elements.saveSettingsButton.addEventListener("click", commitSettings);
