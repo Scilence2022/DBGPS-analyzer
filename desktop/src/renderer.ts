@@ -1598,6 +1598,7 @@ const ui = {
   linksFile: $("linksFile"),
   linksK: $("linksK") as HTMLInputElement,
   linksM: $("linksM") as HTMLInputElement,
+  linksPrimer: $("linksPrimer") as HTMLInputElement,
   linksRunButton: $("linksRunButton") as HTMLButtonElement,
   linksResult: $("linksResult"),
   filterSelectButton: $("filterSelectButton") as HTMLButtonElement,
@@ -1706,7 +1707,8 @@ async function runLinksTool() {
     const result = await window.dbgps.runLinks({
       file: linksFile,
       k: Number(ui.linksK.value),
-      m: Number(ui.linksM.value)
+      m: Number(ui.linksM.value),
+      primerLen: Number(ui.linksPrimer.value)
     });
     renderLinksResult(result);
   } catch (error) {
@@ -1719,9 +1721,10 @@ async function runLinksTool() {
 
 function renderLinksResult(result: LinksResult) {
   const cl = result.crossLinks;
+  const primerNote = result.primerLen > 0 ? ` (primers trimmed: ${result.primerLen} bp each end)` : "";
   const note = cl === 0
-    ? "No cross-links detected — strands appear well separated at this k."
-    : "Cross-links are k-mers shared by different strands (potential entanglement). Remove primers before counting to avoid false positives.";
+    ? `No cross-links detected — strands appear well separated at this k${primerNote}.`
+    : `Cross-links are k-mers shared by different strands (potential entanglement)${primerNote}.`;
   ui.linksResult.classList.remove("empty-state");
   ui.linksResult.innerHTML = `
     <div class="report-metrics">

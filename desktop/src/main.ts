@@ -859,12 +859,16 @@ function countRecords(file: string): number {
 // CLI tools can consume it. FASTA/FASTQ inputs pass through unchanged.
 type NormalizedInput = { path: string; cleanup: () => void };
 
-function normalizeToFasta(file: string): NormalizedInput {
+function normalizeToFasta(file: string, primerFront = 0, primerBack = 0): NormalizedInput {
   const text = readSeqFileText(file);
-  if (isCliReadable(text)) return { path: file, cleanup: () => {} };
-  const records = parseTabDelimitedText(text);
+  const needsTrim = primerFront > 0 || primerBack > 0;
+  if (isCliReadable(text) && !needsTrim) return { path: file, cleanup: () => {} };
+  const records = isCliReadable(text) ? parseFastaText(text) : parseTabDelimitedText(text);
   if (records.length === 0) throw new Error(`No sequences found in ${path.basename(file)}.`);
-  const fasta = records.map((r) => `>${r.name}\n${r.seq}`).join("\n") + "\n";
+  const fasta = records.map((r) => {
+    const seq = needsTrim ? r.seq.slice(primerFront, primerBack > 0 ? r.seq.length - primerBack : undefined) : r.seq;
+    return `>${r.name}\n${seq}`;
+  }).join("\n") + "\n";
   const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const safeBase = path.basename(file).replace(/[^\w.-]/g, "_");
   const out = path.join(tmpdir(), `dbgps-${safeBase}-${stamp}.fa`);
@@ -872,19 +876,20 @@ function normalizeToFasta(file: string): NormalizedInput {
   return { path: out, cleanup: () => { try { unlinkSync(out); } catch { /* best effort */ } } };
 }
 
-type LinksRequest = { file: string; k?: number; m?: number };
+type LinksRequest = { file: string; k?: number; m?: number; primerLen?: number };
 async function runLinks(req: LinksRequest) {
-  if (!req || !req.file) throw new Error("Select a FASTA file for cross-link analysis.");
+  if (!req || !req.file) throw new Error("Select a reference file for cross-link analysis.");
   await ensureBuilt("DBGPS-links");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const m = toPositiveInt(req.m, 1, 0, 1 << 20);
-  const norm = normalizeToFasta(req.file);
+  const primerLen = toPositiveInt(req.primerLen, 0, 0, 100000);
+  const norm = normalizeToFasta(req.file, primerLen, primerLen);
   try {
     const args = ["-k", String(k), "-m", String(m), norm.path];
     const result = await runTool(linksPath, args);
     const match = result.stdout.match(/Total cross links\s+(\d+)/i);
     const command = result.command.replace(norm.path, req.file);
-    return { ...result, command, file: req.file, k, m, crossLinks: match ? Number(match[1]) : null };
+    return { ...result, command, file: req.file, k, m, primerLen, crossLinks: match ? Number(match[1]) : null };
   } finally {
     norm.cleanup();
   }
@@ -1035,7 +1040,7 @@ app.whenReady().then(() => {
     const options: OpenDialogOptions = {
       properties: ["openFile", "multiSelections"],
       filters: [
-        { name: "Sequences", extensions: ["fa", "fasta", "fq", "fastq", "txt", "tsv", "gz"] },
+        { name: "Sequences", extensions: ["fa", "fasta", "fq", "fastq", "txt", "tsv", "tab", "gz"] },
         { name: "All files", extensions: ["*"] }
       ]
     };
