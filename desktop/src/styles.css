@@ -955,6 +955,19 @@ code {
   align-items: stretch;
 }
 
+.sequence-chart-frame.dual-axis {
+  grid-template-columns: 18px 54px minmax(0, 1fr) 54px 18px;
+}
+
+.y-axis.right {
+  align-items: flex-start;
+}
+
+.y-axis-label.right {
+  transform: rotate(0deg);
+  color: var(--amber);
+}
+
 .y-axis-label {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
@@ -1054,6 +1067,24 @@ code {
   stroke-width: 2;
   stroke-linejoin: round;
   stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.ratio-overlay {
+  position: absolute;
+  inset: 8px 10px;
+  width: auto;
+  height: auto;
+  pointer-events: none;
+}
+
+.ratio-line {
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  stroke-dasharray: 3 2;
   vector-effect: non-scaling-stroke;
 }
 
