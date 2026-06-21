@@ -1126,7 +1126,7 @@ function renderSequenceChartControls() {
     <div class="sequence-chart-header">
       <div>
         <strong>Coverage by k-mer position</strong>
-        <span>Coordinates show ordered k-mer position and coverage.</span>
+        <span>Bars/line: coverage (left axis). Orange line: adjacent fold-change, larger/smaller (right axis).</span>
       </div>
       <div class="chart-toggle" role="tablist" aria-label="Sequence path chart type">
         ${options
@@ -1182,6 +1182,29 @@ function renderCoverageLinePlot(data: SequenceCoverage[], maxCoverage: number) {
   `;
 }
 
+function formatRatio(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  return `${value.toFixed(value >= 10 ? 0 : 1)}×`;
+}
+
+function renderRatioOverlay(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
+  if (ratios.length === 0 || count < 2) return "";
+  // Each ratio is the fold-change across the edge between two adjacent k-mers,
+  // so plot it at the midpoint between their coverage positions.
+  const points = ratios
+    .map((item, index) => {
+      const x = ((index + 0.5) / (count - 1)) * 100;
+      const y = 100 - (item.ratio / maxRatio) * 100;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  return `
+    <svg class="ratio-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="adjacent coverage fold-change">
+      <polyline points="${points}" class="ratio-line"></polyline>
+    </svg>
+  `;
+}
+
 function renderSequenceCoverageChart(data: SequenceResult) {
   const shown = data.coverages.slice(0, 180);
   const maxCoverage = Math.max(1, ...shown.map((item) => item.coverage));
@@ -1191,17 +1214,32 @@ function renderSequenceCoverageChart(data: SequenceResult) {
     ? renderCoverageLinePlot(shown, maxCoverage)
     : renderCoverageBarPlot(shown, maxCoverage);
 
+  const shownRatios = (data.ratios ?? []).slice(0, Math.max(0, shown.length - 1));
+  const hasRatios = shownRatios.length > 0;
+  const maxRatio = Math.max(1, ...shownRatios.map((item) => item.ratio));
+  const overlay = renderRatioOverlay(shownRatios, shown.length, maxRatio);
+
   return `
     <section class="sequence-chart-panel">
       ${renderSequenceChartControls()}
-      <div class="sequence-chart-frame">
+      <div class="sequence-chart-frame${hasRatios ? " dual-axis" : ""}">
         <div class="y-axis-label">Coverage</div>
         <div class="y-axis">
           <span>${formatNumber(maxCoverage)}</span>
           <span>${formatNumber(halfCoverage)}</span>
           <span>0</span>
         </div>
-        <div class="chart-plot">${plot}</div>
+        <div class="chart-plot">${plot}${overlay}</div>
+        ${
+          hasRatios
+            ? `<div class="y-axis right">
+          <span>${formatRatio(maxRatio)}</span>
+          <span>${formatRatio(maxRatio / 2)}</span>
+          <span>0</span>
+        </div>
+        <div class="y-axis-label right">Fold change</div>`
+            : ""
+        }
         <div class="x-axis-label">Position</div>
         <div class="x-axis">
           <span>${formatNumber(xLabels.first)}</span>
