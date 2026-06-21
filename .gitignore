@@ -1,4 +1,6 @@
 .DS_Store
+__pycache__/
+*.pyc
 DBGPS-analyzer
 DBGPS-links
 DBGPS-seq-filter
@@ -7,3 +9,4 @@ tests/unit_core
 desktop/dist/
 desktop/node_modules/
 desktop/release/
+analysis/nextpolish_vs_progenfixer/outputs/

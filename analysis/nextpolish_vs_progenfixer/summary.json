@@ -1,0 +1,75 @@
+{
+  "fasta": [
+    {
+      "tool": "NextPolish",
+      "path": "/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/nextpolish/work/genome.nextpolish.fasta",
+      "contigs": 1,
+      "length_bp": 4625147,
+      "length_delta_bp": 1,
+      "sha256": "34867f306df88538baa7f4134da7778880665d379e9a13d1b7da28d62eeb4d7c",
+      "matches": 4620815,
+      "substitutions": 4032,
+      "deletions": 299,
+      "insertions": 300,
+      "edit_distance": 4631,
+      "variant_blocks": 4458
+    },
+    {
+      "tool": "ProGenFixer",
+      "path": "/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter2.fasta",
+      "contigs": 1,
+      "length_bp": 4625361,
+      "length_delta_bp": 215,
+      "sha256": "81d749a1997c79e43d309428da75246c7176f22dbddf4d2edcbe3774fc398e76",
+      "matches": 4620327,
+      "substitutions": 3975,
+      "deletions": 844,
+      "insertions": 1059,
+      "edit_distance": 5878,
+      "variant_blocks": 4397
+    }
+  ],
+  "pairwise": {
+    "tool": "ProGenFixer_vs_NextPolish",
+    "path": "/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter2.fasta",
+    "contigs": 1,
+    "length_bp": 4625361,
+    "length_delta_bp": 214,
+    "sha256": "81d749a1997c79e43d309428da75246c7176f22dbddf4d2edcbe3774fc398e76",
+    "matches": 4624514,
+    "substitutions": 75,
+    "deletions": 558,
+    "insertions": 772,
+    "edit_distance": 1405,
+    "variant_blocks": 89
+  },
+  "progenfixer_vcf": [
+    {
+      "iteration": 1,
+      "path": "/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter1.vcf",
+      "records": 4261,
+      "SUB": 3837,
+      "INS": 203,
+      "DEL": 221,
+      "OTHER": 0
+    },
+    {
+      "iteration": 2,
+      "path": "/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter2.vcf",
+      "records": 24,
+      "SUB": 2,
+      "INS": 0,
+      "DEL": 22,
+      "OTHER": 0
+    },
+    {
+      "iteration": 3,
+      "path": "/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter3.vcf",
+      "records": 0,
+      "SUB": 0,
+      "INS": 0,
+      "DEL": 0,
+      "OTHER": 0
+    }
+  ]
+}

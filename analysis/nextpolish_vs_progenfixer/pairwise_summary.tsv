@@ -1,0 +1,2 @@
+tool	contigs	length_bp	length_delta_bp	edit_distance	substitutions	insertions	deletions	variant_blocks	sha256	path
+ProGenFixer_vs_NextPolish	1	4625361	214	1405	75	772	558	89	81d749a1997c79e43d309428da75246c7176f22dbddf4d2edcbe3774fc398e76	/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter2.fasta

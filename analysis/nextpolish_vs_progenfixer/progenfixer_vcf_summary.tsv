@@ -1,0 +1,4 @@
+iteration	records	SUB	INS	DEL	OTHER	path
+1	4261	3837	203	221	0	/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter1.vcf
+2	24	2	0	22	0	/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter2.vcf
+3	0	0	0	0	0	/Users/song/Github-Repos/DBGPS-analyzer/analysis/nextpolish_vs_progenfixer/outputs/progenfixer/progenfixer.iter3.vcf
