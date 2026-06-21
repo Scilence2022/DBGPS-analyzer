@@ -88,6 +88,8 @@ const api = {
   buildAnalyzer: () => ipcRenderer.invoke("analyzer:build") as Promise<{ ok: boolean; log: string }>,
   startAnalyzer: (config: AnalyzerConfig) => ipcRenderer.invoke("analyzer:start", config) as Promise<unknown>,
   queryAnalyzer: (command: string) => ipcRenderer.invoke("analyzer:query", command) as Promise<unknown>,
+  queryAnalyzerBatch: (commands: string[]) =>
+    ipcRenderer.invoke("analyzer:queryBatch", commands) as Promise<unknown[]>,
   stopAnalyzer: () => ipcRenderer.invoke("analyzer:stop") as Promise<{ ok: boolean }>,
   aiDiagnose: (request: AiRequest) => ipcRenderer.invoke("ai:diagnose", request) as Promise<{ content: string; provider: string; model: string }>,
   refreshProviderModels: (request: ProviderRefreshRequest) =>

@@ -426,7 +426,7 @@ class AnalyzerSession {
     });
   }
 
-  query(command: string) {
+  query(command: string, timeoutMs = 60000) {
     if (!this.child || !this.ready || this.child.killed) {
       throw new Error("Analyzer is not running.");
     }
@@ -440,7 +440,7 @@ class AnalyzerSession {
         timer: setTimeout(() => {
           this.pending = this.pending.filter((item) => item !== pending);
           reject(new Error("Analyzer query timed out."));
-        }, 60000)
+        }, timeoutMs)
       };
       this.pending.push(pending);
       this.child?.stdin.write(`${normalized}\n`, (error) => {
@@ -450,6 +450,21 @@ class AnalyzerSession {
         reject(error);
       });
     });
+  }
+
+  // Pump a whole chunk of commands into the kernel in one shot and collect the
+  // responses in order. The kernel reads stdin lines sequentially and emits one
+  // JSON line per command, so the FIFO `pending` queue matches them up. This
+  // collapses N renderer<->main IPC round-trips into one for batch scoring.
+  queryBatch(commands: string[]) {
+    if (!this.child || !this.ready || this.child.killed) {
+      throw new Error("Analyzer is not running.");
+    }
+    const normalized = commands.map((c) => c.trim()).filter((c) => c.length > 0);
+    // Scale the timeout with the chunk size; the kernel scores each strand in
+    // microseconds, so this is a generous upper bound, not an expected wait.
+    const timeoutMs = Math.max(60000, normalized.length * 50);
+    return Promise.all(normalized.map((command) => this.query(command, timeoutMs)));
   }
 
   stop() {
@@ -1067,6 +1082,25 @@ app.whenReady().then(() => {
   ipcMain.handle("analyzer:query", async (_event, command: string) => {
     if (!session) throw new Error("Analyzer is not running.");
     return session.query(command);
+  });
+
+  // Batch scoring for the Batch QC view. Returns one payload per command, with
+  // the heavy per-k-mer `coverages`/`ratios` arrays stripped — the table only
+  // needs the summary scalars, and the drill-down re-queries a single strand on
+  // demand. This keeps the IPC payload (and renderer memory) bounded even for
+  // hundreds of thousands of strands.
+  ipcMain.handle("analyzer:queryBatch", async (_event, commands: string[]) => {
+    if (!session) throw new Error("Analyzer is not running.");
+    const payloads = await session.queryBatch(Array.isArray(commands) ? commands : []);
+    return payloads.map((payload) => {
+      if (payload && typeof payload === "object" && (payload as { type?: string }).type === "sequence") {
+        const { coverages, ratios, ...summary } = payload as Record<string, unknown>;
+        void coverages;
+        void ratios;
+        return summary;
+      }
+      return payload;
+    });
   });
 
   ipcMain.handle("analyzer:stop", async () => {
