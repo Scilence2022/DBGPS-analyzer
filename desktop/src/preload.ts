@@ -42,10 +42,10 @@ type AiRequest = {
   settings: AiSettings;
 };
 
-type LinksRequest = { file: string; k?: number; m?: number };
+type LinksRequest = { file: string; k?: number; m?: number; primerLen?: number };
 type LinksResult = {
   command: string; stdout: string; stderr: string; code: number | null;
-  file: string; k: number; m: number; crossLinks: number | null;
+  file: string; k: number; m: number; primerLen: number; crossLinks: number | null;
 };
 
 type FilterRequest = { file: string; k?: number; m?: number; primerLen?: number; listFiltered?: boolean };

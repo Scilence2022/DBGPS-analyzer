@@ -197,7 +197,7 @@
               <div class="file-picker">
                 <button id="linksSelectButton" class="primary-button">
                   <i data-lucide="folder-open"></i>
-                  <span>Select FASTA</span>
+                  <span>Select Reference</span>
                 </button>
                 <div id="linksFile" class="file-list">No file selected</div>
               </div>
@@ -209,6 +209,10 @@
                 <label>
                   <span>Min shared strands (m)</span>
                   <input id="linksM" type="number" min="0" value="1" />
+                </label>
+                <label>
+                  <span>Primer length (bp)</span>
+                  <input id="linksPrimer" type="number" min="0" value="18" />
                 </label>
                 <button id="linksRunButton" class="primary-button">
                   <i data-lucide="play"></i>
@@ -223,7 +227,7 @@
                   <h2>Cross-link analysis</h2>
                 </div>
               </div>
-              <div id="linksResult" class="result-view empty-state">Select a FASTA file and run to count k-mers shared across strands. Remove primers first to avoid false positives.</div>
+              <div id="linksResult" class="result-view empty-state">Select a reference file (FASTA or tab-delimited) and run to count k-mers shared across strands. Set the primer length to trim primer regions before counting.</div>
             </section>
           </div>
 
@@ -232,7 +236,7 @@
               <div class="file-picker">
                 <button id="filterSelectButton" class="primary-button">
                   <i data-lucide="folder-open"></i>
-                  <span>Select FASTA</span>
+                  <span>Select Reference</span>
                 </button>
                 <div id="filterFile" class="file-list">No file selected</div>
               </div>
