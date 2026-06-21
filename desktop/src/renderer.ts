@@ -179,6 +179,7 @@ type AppSettings = {
   appearance: "light" | "dark" | "system";
   kmerTreeMode: "cards" | "bases";
   sequenceChartType: "bar" | "line";
+  sequenceChartSeries: "coverage" | "ratio" | "both";
   primerFront: number;
   primerBack: number;
 };
@@ -424,6 +425,7 @@ function createDefaultSettings(): AppSettings {
     appearance: "system",
     kmerTreeMode: "cards",
     sequenceChartType: "bar",
+    sequenceChartSeries: "both",
     primerFront: DEFAULT_PRIMER,
     primerBack: DEFAULT_PRIMER
   };
@@ -462,6 +464,10 @@ function mergeSettings(input: unknown): AppSettings {
   const appearance = stored.appearance === "light" || stored.appearance === "dark" || stored.appearance === "system" ? stored.appearance : "system";
   const kmerTreeMode = stored.kmerTreeMode === "bases" || stored.kmerTreeMode === "cards" ? stored.kmerTreeMode : "cards";
   const sequenceChartType = stored.sequenceChartType === "line" || stored.sequenceChartType === "bar" ? stored.sequenceChartType : "bar";
+  const sequenceChartSeries =
+    stored.sequenceChartSeries === "coverage" || stored.sequenceChartSeries === "ratio" || stored.sequenceChartSeries === "both"
+      ? stored.sequenceChartSeries
+      : "both";
 
   return {
     activeProvider,
@@ -471,6 +477,7 @@ function mergeSettings(input: unknown): AppSettings {
     appearance,
     kmerTreeMode,
     sequenceChartType,
+    sequenceChartSeries,
     primerFront: normalizePrimer(stored.primerFront, defaults.primerFront),
     primerBack: normalizePrimer(stored.primerBack, defaults.primerBack)
   };
@@ -1117,27 +1124,55 @@ function renderIndexResult(data: IndexResult) {
   `;
 }
 
-function renderSequenceChartControls() {
-  const options: Array<{ type: "bar" | "line"; label: string }> = [
+function renderSequenceChartControls(hasRatios: boolean) {
+  const typeOptions: Array<{ type: "bar" | "line"; label: string }> = [
     { type: "bar", label: "Bars" },
     { type: "line", label: "Line" }
   ];
+  const seriesOptions: Array<{ value: "coverage" | "ratio" | "both"; label: string }> = [
+    { value: "coverage", label: "Coverage" },
+    { value: "ratio", label: "Fold change" },
+    { value: "both", label: "Both" }
+  ];
+  const series = hasRatios ? appSettings.sequenceChartSeries : "coverage";
+  const showTypeToggle = series !== "ratio";
   return `
     <div class="sequence-chart-header">
       <div>
         <strong>Coverage by k-mer position</strong>
-        <span>Bars/line: coverage (left axis). Orange line: adjacent fold-change, larger/smaller (right axis).</span>
+        <span>Green: coverage. Orange: adjacent fold-change (larger/smaller). Toggle to show either series alone or both on twin axes.</span>
       </div>
-      <div class="chart-toggle" role="tablist" aria-label="Sequence path chart type">
-        ${options
-          .map(
-            (option) => `
+      <div class="chart-toggles">
+        ${
+          hasRatios
+            ? `<div class="chart-toggle series" role="tablist" aria-label="Chart series">
+          ${seriesOptions
+            .map(
+              (option) => `
+              <button type="button" class="${series === option.value ? "active" : ""}" data-sequence-series="${option.value}" role="tab" aria-selected="${series === option.value}">
+                ${escapeHtml(option.label)}
+              </button>
+            `
+            )
+            .join("")}
+        </div>`
+            : ""
+        }
+        ${
+          showTypeToggle
+            ? `<div class="chart-toggle" role="tablist" aria-label="Coverage chart type">
+          ${typeOptions
+            .map(
+              (option) => `
               <button type="button" class="${appSettings.sequenceChartType === option.type ? "active" : ""}" data-sequence-chart="${option.type}" role="tab" aria-selected="${appSettings.sequenceChartType === option.type}">
                 ${escapeHtml(option.label)}
               </button>
             `
-          )
-          .join("")}
+            )
+            .join("")}
+        </div>`
+            : ""
+        }
       </div>
     </div>
   `;
@@ -1187,59 +1222,98 @@ function formatRatio(value: number) {
   return `${value.toFixed(value >= 10 ? 0 : 1)}×`;
 }
 
-function renderRatioOverlay(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
-  if (ratios.length === 0 || count < 2) return "";
-  // Each ratio is the fold-change across the edge between two adjacent k-mers,
-  // so plot it at the midpoint between their coverage positions.
-  const points = ratios
+// Each ratio is the fold-change across the edge between two adjacent k-mers,
+// so plot it at the midpoint between their coverage positions.
+function ratioPolylinePoints(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
+  return ratios
     .map((item, index) => {
       const x = ((index + 0.5) / (count - 1)) * 100;
       const y = 100 - (item.ratio / maxRatio) * 100;
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     })
     .join(" ");
+}
+
+function renderRatioOverlay(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
+  if (ratios.length === 0 || count < 2) return "";
   return `
     <svg class="ratio-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="adjacent coverage fold-change">
-      <polyline points="${points}" class="ratio-line"></polyline>
+      <polyline points="${ratioPolylinePoints(ratios, count, maxRatio)}" class="ratio-line"></polyline>
+    </svg>
+  `;
+}
+
+function renderRatioLinePlot(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
+  if (ratios.length === 0 || count < 2) return "";
+  return `
+    <svg class="coverage-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="adjacent coverage fold-change line">
+      <line x1="0" y1="0" x2="100" y2="0" class="chart-grid-line"></line>
+      <line x1="0" y1="50" x2="100" y2="50" class="chart-grid-line"></line>
+      <line x1="0" y1="100" x2="100" y2="100" class="chart-grid-line baseline"></line>
+      <polyline points="${ratioPolylinePoints(ratios, count, maxRatio)}" class="ratio-line solo"></polyline>
     </svg>
   `;
 }
 
 function renderSequenceCoverageChart(data: SequenceResult) {
   const shown = data.coverages.slice(0, 180);
-  const maxCoverage = Math.max(1, ...shown.map((item) => item.coverage));
-  const halfCoverage = Math.round(maxCoverage / 2);
   const xLabels = chartAxisLabels(shown);
-  const plot = appSettings.sequenceChartType === "line"
-    ? renderCoverageLinePlot(shown, maxCoverage)
-    : renderCoverageBarPlot(shown, maxCoverage);
-
   const shownRatios = (data.ratios ?? []).slice(0, Math.max(0, shown.length - 1));
   const hasRatios = shownRatios.length > 0;
-  const maxRatio = Math.max(1, ...shownRatios.map((item) => item.ratio));
-  const overlay = renderRatioOverlay(shownRatios, shown.length, maxRatio);
 
-  return `
-    <section class="sequence-chart-panel">
-      ${renderSequenceChartControls()}
-      <div class="sequence-chart-frame${hasRatios ? " dual-axis" : ""}">
+  // Fold-change can only be shown when adjacent pairs exist; otherwise fall back.
+  const series = hasRatios ? appSettings.sequenceChartSeries : "coverage";
+
+  const maxCoverage = Math.max(1, ...shown.map((item) => item.coverage));
+  const maxRatio = Math.max(1, ...shownRatios.map((item) => item.ratio));
+
+  const coverageAxis = `
         <div class="y-axis-label">Coverage</div>
         <div class="y-axis">
           <span>${formatNumber(maxCoverage)}</span>
-          <span>${formatNumber(halfCoverage)}</span>
+          <span>${formatNumber(Math.round(maxCoverage / 2))}</span>
           <span>0</span>
-        </div>
-        <div class="chart-plot">${plot}${overlay}</div>
-        ${
-          hasRatios
-            ? `<div class="y-axis right">
+        </div>`;
+  const ratioLeftAxis = `
+        <div class="y-axis-label fold">Fold change</div>
+        <div class="y-axis fold">
+          <span>${formatRatio(maxRatio)}</span>
+          <span>${formatRatio(maxRatio / 2)}</span>
+          <span>0</span>
+        </div>`;
+  const ratioRightAxis = `
+        <div class="y-axis right">
           <span>${formatRatio(maxRatio)}</span>
           <span>${formatRatio(maxRatio / 2)}</span>
           <span>0</span>
         </div>
-        <div class="y-axis-label right">Fold change</div>`
-            : ""
-        }
+        <div class="y-axis-label right">Fold change</div>`;
+
+  const coveragePlot = appSettings.sequenceChartType === "line"
+    ? renderCoverageLinePlot(shown, maxCoverage)
+    : renderCoverageBarPlot(shown, maxCoverage);
+
+  let leftAxis = coverageAxis;
+  let plot = coveragePlot;
+  let rightAxis = "";
+  let dual = false;
+
+  if (series === "ratio") {
+    leftAxis = ratioLeftAxis;
+    plot = renderRatioLinePlot(shownRatios, shown.length, maxRatio);
+  } else if (series === "both") {
+    plot = `${coveragePlot}${renderRatioOverlay(shownRatios, shown.length, maxRatio)}`;
+    rightAxis = ratioRightAxis;
+    dual = true;
+  }
+
+  return `
+    <section class="sequence-chart-panel">
+      ${renderSequenceChartControls(hasRatios)}
+      <div class="sequence-chart-frame${dual ? " dual-axis" : ""}">
+        ${leftAxis}
+        <div class="chart-plot">${plot}</div>
+        ${rightAxis}
         <div class="x-axis-label">Position</div>
         <div class="x-axis">
           <span>${formatNumber(xLabels.first)}</span>
@@ -1497,6 +1571,15 @@ elements.resultView.addEventListener("click", (event) => {
   const expandButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-expand-tree]");
   if (expandButton) {
     expandTreeNode(expandButton);
+    return;
+  }
+
+  const seriesButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-series]");
+  const series = seriesButton?.dataset.sequenceSeries;
+  if (series === "coverage" || series === "ratio" || series === "both") {
+    appSettings.sequenceChartSeries = series;
+    saveSettings();
+    if (latestResult?.type === "sequence") renderSequenceResult(latestResult);
     return;
   }
 
@@ -2312,6 +2395,15 @@ ui.batchResult.addEventListener("click", (event) => {
   if (tr?.dataset.batchIndex) showBatchDetail(Number(tr.dataset.batchIndex));
 });
 ui.batchDetail.addEventListener("click", (event) => {
+  const seriesButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-series]");
+  const series = seriesButton?.dataset.sequenceSeries;
+  if ((series === "coverage" || series === "ratio" || series === "both") && batchDetailIndex != null) {
+    appSettings.sequenceChartSeries = series;
+    saveSettings();
+    showBatchDetail(batchDetailIndex);
+    return;
+  }
+
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-chart]");
   const chartType = button?.dataset.sequenceChart;
   if ((chartType === "bar" || chartType === "line") && batchDetailIndex != null) {

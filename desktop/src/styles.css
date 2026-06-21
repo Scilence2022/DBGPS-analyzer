@@ -924,6 +924,14 @@ code {
   font-size: 12px;
 }
 
+.chart-toggles {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .chart-toggle {
   flex: 0 0 auto;
   display: inline-grid;
@@ -931,6 +939,10 @@ code {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+.chart-toggle.series {
+  grid-template-columns: repeat(3, 1fr);
 }
 
 .chart-toggle button {
@@ -965,6 +977,11 @@ code {
 
 .y-axis-label.right {
   transform: rotate(0deg);
+  color: var(--amber);
+}
+
+.y-axis.fold,
+.y-axis-label.fold {
   color: var(--amber);
 }
 
@@ -1086,6 +1103,11 @@ code {
   stroke-linecap: round;
   stroke-dasharray: 3 2;
   vector-effect: non-scaling-stroke;
+}
+
+.ratio-line.solo {
+  stroke-width: 2;
+  stroke-dasharray: none;
 }
 
 .table-note {
