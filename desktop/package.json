@@ -34,6 +34,14 @@
       {
         "from": "../DBGPS-analyzer",
         "to": "DBGPS-analyzer"
+      },
+      {
+        "from": "../DBGPS-links",
+        "to": "DBGPS-links"
+      },
+      {
+        "from": "../DBGPS-seq-filter",
+        "to": "DBGPS-seq-filter"
       }
     ]
   }
