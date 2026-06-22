@@ -1424,6 +1424,19 @@ static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int prim
     gzclose(fp);
 }
 
+static void write_smkdkn_row(FILE *fp, double ratio, int cov, int total, int paths,
+                             long long noise, long long exist, long long lost,
+                             double sm, double kd)
+{
+    if (exist == 0) {
+        fprintf(fp, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\tnan\n",
+                ratio, cov, total, paths, noise, exist, lost, sm, kd);
+    } else {
+        fprintf(fp, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\t%f\n",
+                ratio, cov, total, paths, noise, exist, lost, sm, kd, (double)noise / exist);
+    }
+}
+
 static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len)
 {
     kc_c4x_t *h;
@@ -1745,15 +1758,12 @@ int main(int argc, char *argv[])
 
             double sm = (double)exist_strand_num / cache.strand_num;
             double kd = (double)lose_km / (lose_km + exist_km);
-            double kn = (double)noise_km / exist_km;
 
-            fprintf(stdout, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\t%f\n",
-                    ratio, cov, cache.strand_num, exist_strand_num,
-                    noise_km, exist_km, lose_km, sm, kd, kn);
+            write_smkdkn_row(stdout, ratio, cov, cache.strand_num, exist_strand_num,
+                              noise_km, exist_km, lose_km, sm, kd);
             if (smkdkn_fp != NULL) {
-                fprintf(smkdkn_fp, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\t%f\n",
-                        ratio, cov, cache.strand_num, exist_strand_num,
-                        noise_km, exist_km, lose_km, sm, kd, kn);
+                write_smkdkn_row(smkdkn_fp, ratio, cov, cache.strand_num, exist_strand_num,
+                                  noise_km, exist_km, lose_km, sm, kd);
             }
         }
     }
