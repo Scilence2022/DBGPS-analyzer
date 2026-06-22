@@ -77,6 +77,19 @@ strand-level agreement summary. Large intermediates such as the sampled FASTQ,
 PAF, DBGPS JSONL, and full per-strand CSV tables are intentionally ignored by
 git but remain in the local analysis folder after running the workflow.
 
+## Real YC10 Full FASTQ Analysis
+
+The `analysis/real_123_full/` folder contains the same comparison using the full
+original `YC10_5_1_BDDP210000410-1A_1.fq.gz` file without subsampling. The run
+uses all 39,612,583 reads, `minimap2 -x sr -c --cs=short`, DBGPS Analyzer
+Batch QC with `k=31`, and 18/18 bp primer trimming.
+
+See `analysis/real_123_full/README.md` and
+`analysis/real_123_full/summary/real_data_report.md` for the measured runtime,
+memory use, and strand-level agreement summary. Large outputs, including the
+7.1 GB PAF and full comparison CSV files, are retained locally and ignored by
+git.
+
 ## Production-Scale Alignment Recommendation
 
 The built-in Python aligner is intentionally simple and reproducible, but it is

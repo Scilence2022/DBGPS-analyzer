@@ -1,0 +1,12 @@
+inputs/
+scripts/__pycache__/
+alignment/*.sam
+alignment/*.bam
+alignment/*.bai
+alignment/*.mmi
+alignment/*.paf
+alignment/*.log
+dbgps/*.jsonl
+dbgps/*.log
+summary/*.full.csv
+summary/*.fa
