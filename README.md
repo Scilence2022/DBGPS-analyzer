@@ -4,8 +4,6 @@ A specialized suite of high-performance tools for **data quality analysis in DNA
 
 This codebase was split out from the original DBGPS DNA information storage encoding/decoding framework, extracting and optimizing the components specifically designed for quality control, coverage analysis, and data filtering.
 
-An academic manuscript draft describing the tool, GUI, implementation, validation plan, and publication-ready benchmark placeholders is available in [`docs/manuscript.md`](docs/manuscript.md).
-
 ---
 
 ## Table of Contents
