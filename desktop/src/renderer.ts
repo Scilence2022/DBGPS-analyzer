@@ -2243,18 +2243,19 @@ function batchCoverageClass(row: BatchRow) {
 }
 
 function renderBatchRow(row: BatchRow) {
+  const expanded = batchDetailIndex === row.index;
   if (row.status !== "ok" || !row.summary) {
     return `<tr class="batch-row ${row.status}" data-batch-index="${row.index}">
         <td>${formatNumber(row.index + 1)}</td>
         <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
         <td>${formatNumber(row.rawLength)}</td>
         <td>${formatNumber(row.analyzedLength)}</td>
-        <td colspan="4" class="batch-note">${escapeHtml(row.message || row.status)}</td>
+        <td colspan="5" class="batch-note">${escapeHtml(row.message || row.status)}</td>
         <td><span class="coverage zero">${escapeHtml(row.status)}</span></td>
       </tr>`;
   }
   const r = row.summary;
-  return `<tr class="batch-row clickable ${batchCoverageClass(row)}" data-batch-index="${row.index}">
+  return `<tr class="batch-row clickable ${batchCoverageClass(row)} ${expanded ? "expanded" : ""}" data-batch-index="${row.index}" aria-expanded="${expanded ? "true" : "false"}">
       <td>${formatNumber(row.index + 1)}</td>
       <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
       <td>${formatNumber(row.rawLength)}</td>
@@ -2264,6 +2265,12 @@ function renderBatchRow(row: BatchRow) {
       <td><span class="coverage ${coverageClass(r.minCoverage)}">${formatNumber(r.minCoverage)}</span></td>
       <td>${formatNumber(Math.round(r.meanCoverage))}</td>
       <td>${formatNumber(r.maxCoverage)}</td>
+      <td>
+        <button type="button" class="batch-detail-toggle" data-batch-toggle="${row.index}" aria-expanded="${expanded ? "true" : "false"}" title="${expanded ? "Hide read details" : "Show read details"}">
+          <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
+          <span>${expanded ? "Hide" : "Details"}</span>
+        </button>
+      </td>
     </tr>`;
 }
 
@@ -2293,13 +2300,13 @@ function renderBatchTable() {
     return;
   }
 
-  const head = ["#", "Name", "Len", "Used", "Observed", "Path", "Min", "Mean", "Max"];
+  const head = ["#", "Name", "Len", "Used", "Observed", "Path", "Min", "Mean", "Max", "Details"];
   const body = pageRows.map(renderBatchRow).join("");
 
   ui.batchResult.classList.remove("empty-state");
   ui.batchResult.innerHTML = summary +
     `<div class="batch-table-toolbar">
-      <p class="muted">Showing ${formatNumber(pageStart + 1)}-${formatNumber(pageEnd)} of ${formatNumber(batchRows.length)}. Click a strand to inspect its coverage profile and path completeness.</p>
+      <p class="muted">Showing ${formatNumber(pageStart + 1)}-${formatNumber(pageEnd)} of ${formatNumber(batchRows.length)}. Click a strand or Details to expand/collapse its coverage profile and path completeness.</p>
       <div class="batch-pager">
         <button type="button" class="secondary-button" data-batch-page="${batchPage - 1}" ${batchPage <= 0 ? "disabled" : ""}>Previous</button>
         <span>${formatNumber(batchPage + 1)} / ${formatNumber(totalPages)}</span>
@@ -2312,19 +2319,36 @@ function renderBatchTable() {
 function renderBatchDetail(row: BatchRow, result: SequenceResult) {
   latestResult = result;
   ui.batchDetail.innerHTML =
-    `<div class="batch-detail-head"><h3>${escapeHtml(row.name)}</h3><span class="muted">${formatNumber(row.analyzedLength)} bp analyzed (of ${formatNumber(row.rawLength)} bp)</span></div>` +
+    `<div class="batch-detail-head">
+      <div class="batch-detail-title">
+        <h3>${escapeHtml(row.name)}</h3>
+        <span class="muted">${formatNumber(row.analyzedLength)} bp analyzed (of ${formatNumber(row.rawLength)} bp)</span>
+      </div>
+      <button type="button" class="batch-detail-collapse" data-batch-collapse title="Hide read details">
+        <i data-lucide="chevron-up"></i>
+        <span>Hide details</span>
+      </button>
+    </div>` +
     sequenceResultHtml(result);
+  renderIcons();
+}
+
+function collapseBatchDetail() {
+  batchDetailIndex = null;
+  ui.batchDetail.innerHTML = "";
+  renderBatchTable();
   renderIcons();
 }
 
 async function showBatchDetail(index: number) {
   const row = batchRows.find((r) => r.index === index);
   if (!row || row.status !== "ok" || !row.summary) {
-    ui.batchDetail.innerHTML = "";
-    batchDetailIndex = null;
+    collapseBatchDetail();
     return;
   }
   batchDetailIndex = index;
+  renderBatchTable();
+  renderIcons();
 
   if (!row.detail) {
     ui.batchDetail.innerHTML = `<div class="tool-loading">Loading coverage profile…</div>`;
@@ -2350,6 +2374,14 @@ async function showBatchDetail(index: number) {
 
   renderBatchDetail(row, row.detail);
   ui.batchDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function toggleBatchDetail(index: number) {
+  if (batchDetailIndex === index) {
+    collapseBatchDetail();
+    return;
+  }
+  void showBatchDetail(index);
 }
 
 async function runBatchAnalysis() {
@@ -2464,9 +2496,15 @@ ui.batchResult.addEventListener("click", (event) => {
     return;
   }
   const tr = (event.target as HTMLElement).closest<HTMLElement>(".batch-row.clickable");
-  if (tr?.dataset.batchIndex) showBatchDetail(Number(tr.dataset.batchIndex));
+  if (tr?.dataset.batchIndex) toggleBatchDetail(Number(tr.dataset.batchIndex));
 });
 ui.batchDetail.addEventListener("click", (event) => {
+  const collapseButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-batch-collapse]");
+  if (collapseButton) {
+    collapseBatchDetail();
+    return;
+  }
+
   const seriesButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-series]");
   const series = seriesButton?.dataset.sequenceSeries;
   if ((series === "coverage" || series === "ratio" || series === "both") && batchDetailIndex != null) {
