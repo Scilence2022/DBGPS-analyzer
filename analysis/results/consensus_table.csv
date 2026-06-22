@@ -1,0 +1,3 @@
+strand,read_count,mean_depth,covered_bases,N_count,edit_distance,exact_match,ambiguous,best_identity
+strand1,1,1.000,16,0,0,True,False,1.000
+strand2,1,0.800,16,4,4,False,False,1.000
