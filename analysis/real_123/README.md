@@ -48,8 +48,8 @@ Runtime on this machine:
 | Method | Real seconds | Peak RSS |
 |:---|---:|---:|
 | minimap2 alignment | 7.60 | 1.053 GB |
-| majority-vote PAF parsing | 68.834 | ~1.37 GB measured by `/usr/bin/time` for parser rerun |
-| alignment + majority-vote total | 76.434 | >=1.053 GB |
+| majority-vote PAF parsing | 72.87 wall / 69.675 internal | 1.371 GB measured by `/usr/bin/time -lp` |
+| alignment + majority-vote total | 77.275 | >=1.371 GB |
 | DBGPS Analyzer Batch QC | 4.74 | 3.555 GB |
 
 ## Outputs
