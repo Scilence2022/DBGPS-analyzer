@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -256,15 +256,28 @@ function runMake(target = "DBGPS-analyzer"): Promise<string> {
   });
 }
 
-// Ensure a tool binary exists. In a packaged app it must already be bundled; in
-// dev it is built on demand with `make <binName>`.
+function toolSources(binName: string) {
+  const cSource = `${binName}.c`;
+  const shared = ["dbgps_core.h", "kseq.h", "ketopt.h", "kthread.c", "kthread.h", "Makefile"];
+  return [cSource, ...shared].map((file) => path.join(repoRoot, file));
+}
+
+function needsBuild(binName: string) {
+  const target = path.join(repoRoot, binName);
+  if (!existsSync(target)) return true;
+  const targetMtime = statSync(target).mtimeMs;
+  return toolSources(binName).some((source) => existsSync(source) && statSync(source).mtimeMs > targetMtime);
+}
+
+// Ensure a tool binary exists and is fresh. In a packaged app it must already
+// be bundled; in dev it is built on demand with `make <binName>`.
 async function ensureBuilt(binName: string, force = false) {
   const target = path.join(repoRoot, binName);
   if (app.isPackaged) {
     if (!existsSync(target)) throw new Error(`Bundled ${binName} not found at ${target}.`);
     return "";
   }
-  if (!force && existsSync(target)) return "";
+  if (!force && !needsBuild(binName)) return "";
   return runMake(binName);
 }
 

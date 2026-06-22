@@ -1,7 +1,7 @@
 /* DBGPS-seq-filter (a.k.a. DBGPS-ft) - De Bruijn graph based filter that
  * screens out entangled strands from a DNA pool. A strand is filtered when any
- * of its (primer-trimmed) k-mers has already been seen in an earlier strand
- * more than the allowed cross-link threshold.
+ * of its primer-trimmed k-mers is shared by more than the allowed number of
+ * other strands.
  *
  * Author: Lifu Song lifu.song@outlook.com
  */
@@ -45,6 +45,35 @@ typedef struct {
     kc_c4x_t *h;
 } pldat_t;
 
+static int trimmed_len_for(const kseq_t *ks, int primer_len)
+{
+    int trimmed_len = ks->seq.l - primer_len * 2;
+    return trimmed_len > 0 ? trimmed_len : 0;
+}
+
+static int collect_primer_kmers(uint64_t **kms, const kseq_t *ks, int k, int primer_len)
+{
+    int trimmed_len = trimmed_len_for(ks, primer_len);
+    *kms = 0;
+    if (trimmed_len < k) return -1;
+    MALLOC(*kms, trimmed_len - k + 1);
+    return seq_kmers_primer(*kms, k, ks->seq.l, ks->seq.s, primer_len);
+}
+
+static void count_strands(pldat_t *p)
+{
+    uint64_t mask = (1ULL << p->k * 2) - 1;
+
+    while (kseq_read(p->ks) >= 0) {
+        uint64_t *kms;
+        int km_num = collect_primer_kmers(&kms, p->ks, p->k, p->primer_len);
+        if (km_num < 0) continue;
+        for (int j = 0; j < km_num; j++)
+            add_kmer(kms[j], mask, p->h);
+        free(kms);
+    }
+}
+
 static void filter_strands(pldat_t *p)
 {
     uint64_t mask = (1ULL << p->k * 2) - 1;
@@ -52,22 +81,20 @@ static void filter_strands(pldat_t *p)
 
     while (kseq_read(p->ks) >= 0) {
         total++;
-        int l = p->ks->seq.l, km_num, kms_cov;
-        int trimmed_len = l - p->primer_len * 2;
-        if (trimmed_len < p->k) {
+        int km_num, kms_cov, max_links;
+        uint64_t *kms;
+        km_num = collect_primer_kmers(&kms, p->ks, p->k, p->primer_len);
+        if (km_num < 0) {
+            int trimmed_len = trimmed_len_for(p->ks, p->primer_len);
             fprintf(stderr,
                     "Skipping %s: %d bp remain after trimming %d bp from each end; need at least k=%d\n",
-                    p->ks->name.s, trimmed_len > 0 ? trimmed_len : 0, p->primer_len, p->k);
+                    p->ks->name.s, trimmed_len, p->primer_len, p->k);
             continue;
         }
-        uint64_t *kms;
-        MALLOC(kms, trimmed_len - p->k + 1);
-        km_num = seq_kmers_primer(kms, p->k, l, p->ks->seq.s, p->primer_len);
         kms_cov = kms_max_cov(kms, km_num, mask, p->h);
+        max_links = kms_cov > 0 ? kms_cov - 1 : 0;
 
-        if (kms_cov <= p->max_cov) { /* strand passes: record its k-mers */
-            for (int j = 0; j < km_num; j++)
-                add_kmer(kms[j], mask, p->h);
+        if (max_links <= p->max_cov) { /* strand passes */
             if (p->output > 0) {
                 printf(">%s\n", p->ks->name.s);
                 printf("%s\n", p->ks->seq.s);
@@ -93,6 +120,15 @@ static kc_c4x_t *filter_file(const char *fn, int k, int p, int max_cov, int prim
     pl.primer_len = primer_len;
     pl.h = c4x_init(p);
 
+    count_strands(&pl);
+    kseq_destroy(pl.ks);
+    gzclose(fp);
+
+    if ((fp = gzopen(fn, "r")) == 0) {
+        c4x_destroy(pl.h);
+        return 0;
+    }
+    pl.ks = kseq_init(fp);
     filter_strands(&pl);
     kseq_destroy(pl.ks);
     gzclose(fp);

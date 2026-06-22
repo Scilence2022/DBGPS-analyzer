@@ -234,7 +234,7 @@ def test_seq_filter_default_passes():
     proc = run([FILTER, "-k", "8", "-m", "0", "-p", "0", data("links.fa")])
     check(proc.returncode == 0, "seq-filter exit 0")
     names = [ln[1:] for ln in proc.stdout.splitlines() if ln.startswith(">")]
-    check(names == ["s1", "s3"], f"default passes s1,s3 (got {names})")
+    check(names == ["s3"], f"default passes only unentangled s3 (got {names})")
 
 
 def test_seq_filter_s_flag_lists_filtered():
@@ -244,8 +244,20 @@ def test_seq_filter_s_flag_lists_filtered():
     proc = run([FILTER, "-k", "8", "-m", "0", "-p", "0", "-s", data("links.fa")])
     check(proc.returncode == 0, "seq-filter -s exit 0")
     lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    check("s2" in lines, f"-s lists filtered strand s2 (got {lines})")
+    check(lines == ["s1", "s2"], f"-s lists both globally entangled strands (got {lines})")
     check(not any(ln.startswith(">") for ln in lines), "-s does not emit FASTA records")
+
+
+def test_seq_filter_threshold_is_monotonic():
+    """The filter uses a global k-mer table, so raising -m cannot create more
+    entangled records by changing which earlier strands were added to the table."""
+    print("test_seq_filter_threshold_is_monotonic")
+    counts = []
+    for m in ("0", "1", "10"):
+        proc = run([FILTER, "-k", "8", "-m", m, "-p", "0", "-s", data("links.fa")])
+        check(proc.returncode == 0, f"seq-filter -m {m} exit 0")
+        counts.append(len([ln for ln in proc.stdout.splitlines() if ln.strip()]))
+    check(counts == sorted(counts, reverse=True), f"filtered counts are monotonic as m increases (got {counts})")
 
 
 def test_seq_filter_skips_unscorable_after_primer_trim():
@@ -288,6 +300,7 @@ def main():
         test_links_count,
         test_seq_filter_default_passes,
         test_seq_filter_s_flag_lists_filtered,
+        test_seq_filter_threshold_is_monotonic,
         test_seq_filter_skips_unscorable_after_primer_trim,
         test_seq_filter_rejects_invalid_options,
     ]
