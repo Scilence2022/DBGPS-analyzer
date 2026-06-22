@@ -82,6 +82,14 @@ type SequenceSummaryResult = {
   maxAdjacentRatio: number;
 };
 
+type AnalyzerSummaryResult = {
+  type: "ready" | "summary";
+  k: number;
+  distinctKmers: number;
+  totalKmerCoverage: number;
+  files?: string[];
+};
+
 type InteractiveBatchRow = {
   index: number;
   name: string;
@@ -104,6 +112,7 @@ const linksPath = path.join(repoRoot, "DBGPS-links");
 const filterPath = path.join(repoRoot, "DBGPS-seq-filter");
 const MAX_ANALYZER_STDOUT_LINE_BYTES = 64 * 1024 * 1024;
 const INTERACTIVE_BATCH_CHUNK_SIZE = 250;
+const ADD_FILE_TIMEOUT_MS = 300000;
 
 const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
   openai: {
@@ -584,6 +593,30 @@ class AnalyzerSession {
         reject(error);
       });
     });
+  }
+
+  async addFiles(files: string[]) {
+    if (!this.child || !this.ready || this.child.killed) {
+      throw new Error("Analyzer is not running.");
+    }
+    const normalized = files.filter((file) => typeof file === "string" && file.length > 0);
+    if (normalized.length === 0) throw new Error("Select at least one additional NGS FASTA/FASTQ file.");
+
+    let latest: AnalyzerSummaryResult | null = null;
+    for (const file of normalized) {
+      const payload = await this.query(`addFile ${file}`, ADD_FILE_TIMEOUT_MS);
+      const typed = payload as { type?: string; message?: string };
+      if (typed.type === "error") {
+        throw new Error(typed.message || `Failed to count ${file}`);
+      }
+      if (typed.type !== "summary" && typed.type !== "ready") {
+        throw new Error(`Unexpected analyzer response while adding ${file}: ${typed.type || "unknown"}`);
+      }
+      latest = payload as AnalyzerSummaryResult;
+    }
+
+    if (!latest) throw new Error("Analyzer did not return an updated summary.");
+    return latest;
   }
 
   // Pump a whole chunk of commands into the kernel in one shot and collect the
@@ -1346,6 +1379,11 @@ app.whenReady().then(() => {
   ipcMain.handle("analyzer:query", async (_event, command: string) => {
     if (!session) throw new Error("Analyzer is not running.");
     return session.query(command);
+  });
+
+  ipcMain.handle("analyzer:addFiles", async (_event, files: string[]) => {
+    if (!session) throw new Error("Analyzer is not running.");
+    return session.addFiles(Array.isArray(files) ? files : []);
   });
 
   // Batch scoring for the Batch QC view. Returns one payload per command, with

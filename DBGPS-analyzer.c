@@ -935,23 +935,41 @@ static int seq_path_kmers(uint64_t *kms, int k, int len, const char *seq)
     return km_num;
 }
 
-static void emit_summary_json(kc_c4x_t *h, int k, int n_thread, int read_len)
+static char *copy_string(const char *value)
+{
+    char *out;
+    size_t len = strlen(value);
+    MALLOC(out, len + 1);
+    memcpy(out, value, len + 1);
+    return out;
+}
+
+static void emit_file_array(int file_count, char **files)
+{
+    fprintf(stdout, "\"files\":[");
+    for (int i = 0; i < file_count; ++i) {
+        if (i) fputc(',', stdout);
+        json_string(stdout, files[i]);
+    }
+    fprintf(stdout, "]");
+}
+
+static void emit_summary_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files)
 {
     fprintf(stdout, "{\"type\":\"summary\",\"k\":%d,\"threads\":%d,\"readLength\":%d,", k, n_thread, read_len);
     fprintf(stdout, "\"distinctKmers\":%d,", kc_c4x_t_size(h, h->p));
-    fprintf(stdout, "\"totalKmerCoverage\":%llu}\n", kc_c4x_total_abundance(h));
+    fprintf(stdout, "\"totalKmerCoverage\":%llu,", kc_c4x_total_abundance(h));
+    emit_file_array(file_count, files);
+    fprintf(stdout, "}\n");
     fflush(stdout);
 }
 
 static void emit_ready_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files)
 {
     fprintf(stdout, "{\"type\":\"ready\",\"mode\":\"interactive\",\"k\":%d,\"threads\":%d,\"readLength\":%d,", k, n_thread, read_len);
-    fprintf(stdout, "\"distinctKmers\":%d,\"totalKmerCoverage\":%llu,\"files\":[", kc_c4x_t_size(h, h->p), kc_c4x_total_abundance(h));
-    for (int i = 0; i < file_count; ++i) {
-        if (i) fputc(',', stdout);
-        json_string(stdout, files[i]);
-    }
-    fprintf(stdout, "]}\n");
+    fprintf(stdout, "\"distinctKmers\":%d,\"totalKmerCoverage\":%llu,", kc_c4x_t_size(h, h->p), kc_c4x_total_abundance(h));
+    emit_file_array(file_count, files);
+    fprintf(stdout, "}\n");
     fflush(stdout);
 }
 
@@ -959,6 +977,8 @@ static void emit_help_json(void)
 {
     fprintf(stdout, "{\"type\":\"help\",\"commands\":[");
     json_string(stdout, "summary");
+    fprintf(stdout, ",");
+    json_string(stdout, "addFile <NGS file>");
     fprintf(stdout, ",");
     json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
     fprintf(stdout, ",");
@@ -1495,6 +1515,8 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
     size_t line_cap = 0;
     ssize_t line_len;
     int file_count = argc - first_file;
+    int file_cap = file_count < 4 ? 4 : file_count + 4;
+    char **loaded_files;
 
     if (file_count < 1) {
         fprintf(stderr, "Error: interactive mode requires at least one NGS FASTA/FASTQ file\n");
@@ -1505,10 +1527,17 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         return 1;
     }
 
+    MALLOC(loaded_files, file_cap);
+    for (int i = 0; i < file_count; ++i) {
+        loaded_files[i] = copy_string(argv[first_file + i]);
+    }
+
     fprintf(stderr, "Counting NGS file 1 ......\n");
     h = count_file(argv[first_file], k, p, block_size, n_thread, read_len);
     if (h == 0) {
         fprintf(stderr, "Error: could not open NGS file %s\n", argv[first_file]);
+        for (int i = 0; i < file_count; ++i) free(loaded_files[i]);
+        free(loaded_files);
         return 1;
     }
 
@@ -1519,12 +1548,14 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         if (next == 0) {
             fprintf(stderr, "Error: could not open NGS file %s\n", argv[i]);
             c4x_destroy(h);
+            for (int j = 0; j < file_count; ++j) free(loaded_files[j]);
+            free(loaded_files);
             return 1;
         }
         h = next;
     }
 
-    emit_ready_json(h, k, n_thread, read_len, file_count, argv + first_file);
+    emit_ready_json(h, k, n_thread, read_len, file_count, loaded_files);
 
     while ((line_len = getline(&line, &line_cap, stdin)) >= 0) {
         char *cmd;
@@ -1552,7 +1583,29 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         } else if (command_equals(cmd, "help")) {
             emit_help_json();
         } else if (command_equals(cmd, "summary")) {
-            emit_summary_json(h, k, n_thread, read_len);
+            emit_summary_json(h, k, n_thread, read_len, file_count, loaded_files);
+        } else if (command_equals(cmd, "addFile") || command_equals(cmd, "add") || command_equals(cmd, "countFile")) {
+            kc_c4x_t *next;
+            char *file_arg = trim_left(arg);
+            trim_right(file_arg);
+            if (*file_arg == '\0') {
+                emit_error_json("addFile requires an NGS FASTA/FASTQ file path");
+            } else {
+                fprintf(stderr, "Counting NGS file %d ......\n", file_count + 1);
+                next = count_file2(file_arg, h, k, p, block_size, n_thread, read_len);
+                if (next == 0) {
+                    snprintf(err, sizeof(err), "could not open NGS file %s", file_arg);
+                    emit_error_json(err);
+                } else {
+                    h = next;
+                    if (file_count == file_cap) {
+                        file_cap = file_cap < 4 ? 4 : file_cap + (file_cap >> 1);
+                        REALLOC(loaded_files, file_cap);
+                    }
+                    loaded_files[file_count++] = copy_string(file_arg);
+                    emit_summary_json(h, k, n_thread, read_len, file_count, loaded_files);
+                }
+            }
         } else if (command_equals(cmd, "kmer")) {
             char *depth_arg = arg;
             int upstream_depth = 1;
@@ -1638,6 +1691,8 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
     }
 
     free(line);
+    for (int i = 0; i < file_count; ++i) free(loaded_files[i]);
+    free(loaded_files);
     c4x_destroy(h);
     return 0;
 }

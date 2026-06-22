@@ -214,6 +214,13 @@ body[data-status="error"] .brand p {
   gap: 12px;
 }
 
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .file-list {
   min-width: 0;
   display: flex;
