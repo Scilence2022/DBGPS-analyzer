@@ -1,0 +1,3 @@
+strand,status,observed,total_kmers,path_complete,min_coverage,mean_coverage,max_coverage,max_adjacent_ratio
+strand1,ok,12,12,True,6,6.0,6,1.0
+strand2,ok,12,16,False,0,1.5,2,1.0
