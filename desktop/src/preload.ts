@@ -69,6 +69,28 @@ type AnalyzerBatchResult = {
   command: string; stdout: string; stderr: string; code: number | null;
   k: number; rows: SmKdKnRow[];
 };
+type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
+type InteractiveBatchRow = {
+  index: number;
+  name: string;
+  rawLength: number;
+  analyzedLength: number;
+  status: "ok" | "skipped" | "error";
+  message?: string;
+  result?: unknown;
+};
+type InteractiveBatchResult = {
+  type: "batch";
+  file: string;
+  k: number;
+  primerFront: number;
+  primerBack: number;
+  total: number;
+  ok: number;
+  skipped: number;
+  errors: number;
+  rows: InteractiveBatchRow[];
+};
 
 type ReportRequest = {
   referenceFile: string; ngsFiles?: string[];
@@ -104,6 +126,8 @@ const api = {
   runFilter: (request: FilterRequest) => ipcRenderer.invoke("filter:run", request) as Promise<FilterResult>,
   runAnalyzerBatch: (request: AnalyzerBatchRequest) =>
     ipcRenderer.invoke("analyzer:runBatch", request) as Promise<AnalyzerBatchResult>,
+  runInteractiveBatch: (request: InteractiveBatchRequest) =>
+    ipcRenderer.invoke("analyzer:runInteractiveBatch", request) as Promise<InteractiveBatchResult>,
   runReport: (request: ReportRequest) => ipcRenderer.invoke("report:run", request) as Promise<ReportResult>,
   saveFile: (request: { defaultName: string; content: string }) =>
     ipcRenderer.invoke("file:save", request) as Promise<{ saved: boolean; path?: string }>,
