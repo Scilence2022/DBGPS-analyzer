@@ -1,6 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createInterface, type Interface } from "node:readline";
 import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
@@ -79,6 +78,7 @@ const repoRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname
 const analyzerPath = path.join(repoRoot, "DBGPS-analyzer");
 const linksPath = path.join(repoRoot, "DBGPS-links");
 const filterPath = path.join(repoRoot, "DBGPS-seq-filter");
+const MAX_ANALYZER_STDOUT_LINE_BYTES = 64 * 1024 * 1024;
 
 const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
   openai: {
@@ -231,6 +231,90 @@ function sendWindow(channel: string, payload: unknown) {
   mainWindow.webContents.send(channel, payload);
 }
 
+type BoundedLineReader = { close: () => void };
+
+function createBoundedLineReader(
+  input: NodeJS.ReadableStream,
+  maxLineBytes: number,
+  onLine: (line: string) => void,
+  onError: (error: Error) => void
+): BoundedLineReader {
+  let chunks: Buffer[] = [];
+  let bufferedBytes = 0;
+  let closed = false;
+
+  const close = () => {
+    closed = true;
+    chunks = [];
+    bufferedBytes = 0;
+    input.off("data", onData);
+    input.off("end", onEnd);
+    input.off("error", onInputError);
+  };
+
+  const fail = (error: Error) => {
+    if (closed) return;
+    close();
+    onError(error);
+  };
+
+  const append = (chunk: Buffer) => {
+    if (chunk.length === 0) return true;
+    bufferedBytes += chunk.length;
+    if (bufferedBytes > maxLineBytes) {
+      fail(new Error(
+        `Analyzer response exceeded ${Math.round(maxLineBytes / 1024 / 1024)} MiB. ` +
+        "Run a smaller batch or inspect individual strands."
+      ));
+      return false;
+    }
+    chunks.push(chunk);
+    return true;
+  };
+
+  const emitLine = () => {
+    let lineBuffer = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, bufferedBytes);
+    chunks = [];
+    bufferedBytes = 0;
+    if (lineBuffer.at(-1) === 13) lineBuffer = lineBuffer.subarray(0, -1);
+    try {
+      onLine(lineBuffer.toString("utf8"));
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  function onData(data: Buffer) {
+    if (closed) return;
+    let start = 0;
+    while (start < data.length) {
+      const newline = data.indexOf(10, start);
+      if (newline < 0) {
+        append(data.subarray(start));
+        return;
+      }
+      if (!append(data.subarray(start, newline))) return;
+      emitLine();
+      start = newline + 1;
+    }
+  }
+
+  function onEnd() {
+    if (closed || bufferedBytes === 0) return;
+    emitLine();
+  }
+
+  function onInputError(error: Error) {
+    fail(error);
+  }
+
+  input.on("data", onData);
+  input.on("end", onEnd);
+  input.on("error", onInputError);
+
+  return { close };
+}
+
 function toPositiveInt(value: unknown, fallback: number, min: number, max: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -346,7 +430,7 @@ function saveSecrets(map: Record<string, string>) {
 
 class AnalyzerSession {
   private child: ChildProcessWithoutNullStreams | null = null;
-  private stdout: Interface | null = null;
+  private stdout: BoundedLineReader | null = null;
   private pending: PendingQuery[] = [];
   private ready = false;
 
@@ -370,10 +454,19 @@ class AnalyzerSession {
         this.stop();
       }, 120000);
 
-      this.child = spawn(analyzerPath, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
-      this.stdout = createInterface({ input: this.child.stdout });
+      const handleFailure = (error: Error) => {
+        clearTimeout(timeout);
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+        sendWindow("analyzer:event", { kind: "stderr", line: `${error.message}\n` });
+        this.rejectPending(error);
+        this.stop();
+      };
 
-      this.stdout.on("line", (line) => {
+      this.child = spawn(analyzerPath, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
+      this.stdout = createBoundedLineReader(this.child.stdout, MAX_ANALYZER_STDOUT_LINE_BYTES, (line) => {
         let payload: unknown;
         try {
           payload = JSON.parse(line);
@@ -411,7 +504,7 @@ class AnalyzerSession {
         } else {
           sendWindow("analyzer:event", { kind: "data", payload });
         }
-      });
+      }, handleFailure);
 
       this.child.stderr.on("data", (chunk: Buffer) => {
         sendWindow("analyzer:event", { kind: "stderr", line: chunk.toString() });
