@@ -1912,12 +1912,33 @@ details > summary {
 .batch-table tbody tr.clickable:hover {
   background: var(--surface-strong);
 }
+.batch-table tbody tr.expanded {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
 .batch-table tr.skipped,
 .batch-table tr.error {
   color: var(--muted, #667085);
 }
 .batch-note {
   font-style: italic;
+}
+.batch-detail-toggle,
+.batch-detail-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.batch-detail-toggle {
+  min-width: 86px;
+}
+.batch-detail-toggle[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
 }
 .path-pill {
   display: inline-block;
@@ -1941,9 +1962,17 @@ details > summary {
 }
 .batch-detail-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.batch-detail-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
   flex-wrap: wrap;
 }
 .batch-detail-head h3 {
