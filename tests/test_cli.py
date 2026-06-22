@@ -252,7 +252,7 @@ def test_seq_filter_default_passes():
     proc = run([FILTER, "-k", "8", "-m", "0", "-p", "0", data("links.fa")])
     check(proc.returncode == 0, "seq-filter exit 0")
     names = [ln[1:] for ln in proc.stdout.splitlines() if ln.startswith(">")]
-    check(names == ["s1", "s3"], f"default passes s1,s3 (got {names})")
+    check(names == ["s3"], f"default passes only unentangled s3 (got {names})")
 
 
 def test_seq_filter_s_flag_lists_filtered():
@@ -262,8 +262,44 @@ def test_seq_filter_s_flag_lists_filtered():
     proc = run([FILTER, "-k", "8", "-m", "0", "-p", "0", "-s", data("links.fa")])
     check(proc.returncode == 0, "seq-filter -s exit 0")
     lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    check("s2" in lines, f"-s lists filtered strand s2 (got {lines})")
+    check(lines == ["s1", "s2"], f"-s lists both globally entangled strands (got {lines})")
     check(not any(ln.startswith(">") for ln in lines), "-s does not emit FASTA records")
+
+
+def test_seq_filter_threshold_is_monotonic():
+    """The filter uses a global k-mer table, so raising -m cannot create more
+    entangled records by changing which earlier strands were added to the table."""
+    print("test_seq_filter_threshold_is_monotonic")
+    counts = []
+    for m in ("0", "1", "10"):
+        proc = run([FILTER, "-k", "8", "-m", m, "-p", "0", "-s", data("links.fa")])
+        check(proc.returncode == 0, f"seq-filter -m {m} exit 0")
+        counts.append(len([ln for ln in proc.stdout.splitlines() if ln.strip()]))
+    check(counts == sorted(counts, reverse=True), f"filtered counts are monotonic as m increases (got {counts})")
+
+
+def test_seq_filter_skips_unscorable_after_primer_trim():
+    """Regression: strands shorter than k after primer trimming must not be
+    emitted as passed. The desktop view defaults to p=18, so short references
+    previously looked like a successful all-pass filter run."""
+    print("test_seq_filter_skips_unscorable_after_primer_trim")
+    proc = run([FILTER, "-k", "8", "-m", "0", "-p", "18", data("links.fa")])
+    check(proc.returncode == 0, "seq-filter skips unscorable strands without failing")
+    check(proc.stdout.strip() == "", "unscorable primer-trimmed strands are not emitted as passed")
+    check(proc.stderr.count("Skipping ") == 3, f"all short strands are reported as skipped (stderr={proc.stderr!r})")
+
+
+def test_seq_filter_rejects_invalid_options():
+    print("test_seq_filter_rejects_invalid_options")
+    bad_k = run([FILTER, "-k", "32", data("links.fa")])
+    bad_p = run([FILTER, "-p", "-1", data("links.fa")])
+    bad_m = run([FILTER, "-m", "-1", data("links.fa")])
+    check(bad_k.returncode != 0 and "-k must be between 1 and 31" in bad_k.stderr,
+          "seq-filter rejects k values above the 2-bit encoder limit")
+    check(bad_p.returncode != 0 and "-p must be non-negative" in bad_p.stderr,
+          "seq-filter rejects negative primer length")
+    check(bad_m.returncode != 0 and "-m must be non-negative" in bad_m.stderr,
+          "seq-filter rejects negative max cross-links")
 
 
 def main():
@@ -283,6 +319,9 @@ def main():
         test_links_count,
         test_seq_filter_default_passes,
         test_seq_filter_s_flag_lists_filtered,
+        test_seq_filter_threshold_is_monotonic,
+        test_seq_filter_skips_unscorable_after_primer_trim,
+        test_seq_filter_rejects_invalid_options,
     ]
     for test in tests:
         test()

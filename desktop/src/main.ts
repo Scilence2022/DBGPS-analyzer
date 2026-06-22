@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -256,15 +256,28 @@ function runMake(target = "DBGPS-analyzer"): Promise<string> {
   });
 }
 
-// Ensure a tool binary exists. In a packaged app it must already be bundled; in
-// dev it is built on demand with `make <binName>`.
+function toolSources(binName: string) {
+  const cSource = `${binName}.c`;
+  const shared = ["dbgps_core.h", "kseq.h", "ketopt.h", "kthread.c", "kthread.h", "Makefile"];
+  return [cSource, ...shared].map((file) => path.join(repoRoot, file));
+}
+
+function needsBuild(binName: string) {
+  const target = path.join(repoRoot, binName);
+  if (!existsSync(target)) return true;
+  const targetMtime = statSync(target).mtimeMs;
+  return toolSources(binName).some((source) => existsSync(source) && statSync(source).mtimeMs > targetMtime);
+}
+
+// Ensure a tool binary exists and is fresh. In a packaged app it must already
+// be bundled; in dev it is built on demand with `make <binName>`.
 async function ensureBuilt(binName: string, force = false) {
   const target = path.join(repoRoot, binName);
   if (app.isPackaged) {
     if (!existsSync(target)) throw new Error(`Bundled ${binName} not found at ${target}.`);
     return "";
   }
-  if (!force && existsSync(target)) return "";
+  if (!force && !needsBuild(binName)) return "";
   return runMake(binName);
 }
 
@@ -450,6 +463,21 @@ class AnalyzerSession {
         reject(error);
       });
     });
+  }
+
+  // Pump a whole chunk of commands into the kernel in one shot and collect the
+  // responses in order. The kernel reads stdin lines sequentially and emits one
+  // JSON line per command, so the FIFO `pending` queue matches them up. This
+  // collapses N renderer<->main IPC round-trips into one for batch scoring.
+  queryBatch(commands: string[]) {
+    if (!this.child || !this.ready || this.child.killed) {
+      throw new Error("Analyzer is not running.");
+    }
+    const normalized = commands.map((c) => c.trim()).filter((c) => c.length > 0);
+    // Scale the timeout with the chunk size; the kernel scores each strand in
+    // microseconds, so this is a generous upper bound, not an expected wait.
+    const timeoutMs = Math.max(60000, normalized.length * 50);
+    return Promise.all(normalized.map((command) => this.query(command, timeoutMs)));
   }
 
   stop() {
@@ -905,18 +933,36 @@ async function runFilter(req: FilterRequest) {
   const listFiltered = Boolean(req.listFiltered);
   const norm = normalizeToFasta(req.file);
   try {
-    const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
-    if (listFiltered) args.push("-s");
-    args.push(norm.path);
+    const baseArgs = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
+    const args = listFiltered ? [...baseArgs, "-s", norm.path] : [...baseArgs, norm.path];
     const result = await runTool(filterPath, args);
-    const passedCount = (result.stdout.match(/^>/gm) || []).length;
+    let saveOutput = result.stdout;
+    if (listFiltered) {
+      const passedResult = await runTool(filterPath, [...baseArgs, norm.path]);
+      saveOutput = passedResult.stdout;
+    }
+    const passedCount = (saveOutput.match(/^>/gm) || []).length;
     // In default mode the filtered strands are marked with " * " on stderr; in -s
     // mode each filtered strand name is one stdout line.
     const filteredCount = listFiltered
       ? result.stdout.split("\n").filter((line) => line.trim().length > 0).length
       : (result.stderr.match(/\*/g) || []).length;
+    const skippedCount = (result.stderr.match(/^Skipping /gm) || []).length;
     const command = result.command.replace(norm.path, req.file);
-    return { ...result, command, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount };
+    return {
+      ...result,
+      command,
+      file: req.file,
+      k,
+      m,
+      primerLen,
+      listFiltered,
+      passedCount,
+      filteredCount,
+      skippedCount,
+      saveOutput,
+      saveDefaultName: "passed.fa"
+    };
   } finally {
     norm.cleanup();
   }
@@ -1082,6 +1128,25 @@ app.whenReady().then(() => {
   ipcMain.handle("analyzer:query", async (_event, command: string) => {
     if (!session) throw new Error("Analyzer is not running.");
     return session.query(command);
+  });
+
+  // Batch scoring for the Batch QC view. Returns one payload per command, with
+  // the heavy per-k-mer `coverages`/`ratios` arrays stripped — the table only
+  // needs the summary scalars, and the drill-down re-queries a single strand on
+  // demand. This keeps the IPC payload (and renderer memory) bounded even for
+  // hundreds of thousands of strands.
+  ipcMain.handle("analyzer:queryBatch", async (_event, commands: string[]) => {
+    if (!session) throw new Error("Analyzer is not running.");
+    const payloads = await session.queryBatch(Array.isArray(commands) ? commands : []);
+    return payloads.map((payload) => {
+      if (payload && typeof payload === "object" && (payload as { type?: string }).type === "sequence") {
+        const { coverages, ratios, ...summary } = payload as Record<string, unknown>;
+        void coverages;
+        void ratios;
+        return summary;
+      }
+      return payload;
+    });
   });
 
   ipcMain.handle("analyzer:stop", async () => {

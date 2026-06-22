@@ -1752,10 +1752,24 @@ const ui = {
 let linksFile = "";
 let filterFile = "";
 let filterOutput = "";
+let filterSaveOutput = "";
+let filterSaveDefaultName = "passed.fa";
 let reportRefFile = "";
 let reportNgsFiles: string[] = [];
 let latestReport: ReportResult | null = null;
 let reportNarrative = "";
+
+// Compact per-strand metrics kept separately from the full coverage profile so
+// table rendering stays cheap even when the kernel returns every strand at once.
+type SequenceSummary = {
+  observed: number;
+  kmerCount: number;
+  complete: boolean;
+  minCoverage: number;
+  meanCoverage: number;
+  maxCoverage: number;
+  maxAdjacentRatio: number;
+};
 
 type BatchRow = {
   index: number;
@@ -1764,8 +1778,10 @@ type BatchRow = {
   analyzedLength: number;
   status: "ok" | "skipped" | "error";
   message?: string;
-  result?: SequenceResult;
+  summary?: SequenceSummary;
+  detail?: SequenceResult;
 };
+
 let batchFile = "";
 let batchRows: BatchRow[] = [];
 let batchRunning = false;
@@ -1889,6 +1905,8 @@ async function runFilterTool() {
     renderFilterResult(result);
   } catch (error) {
     filterOutput = "";
+    filterSaveOutput = "";
+    filterSaveDefaultName = "passed.fa";
     ui.filterSaveButton.disabled = true;
     ui.filterResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
   } finally {
@@ -1899,10 +1917,15 @@ async function runFilterTool() {
 
 function renderFilterResult(result: FilterResult) {
   filterOutput = result.stdout;
-  ui.filterSaveButton.disabled = !filterOutput.trim();
+  filterSaveOutput = result.saveOutput;
+  filterSaveDefaultName = result.saveDefaultName;
+  ui.filterSaveButton.disabled = !filterSaveOutput.trim();
   const headline = result.listFiltered
     ? `<div class="metric-card"><span>Filtered (entangled)</span><strong>${formatNumber(result.filteredCount)}</strong></div>`
     : `<div class="metric-card"><span>Passed</span><strong>${formatNumber(result.passedCount)}</strong></div>`;
+  const skippedMetric = result.skippedCount > 0
+    ? `<div class="metric-card"><span>Skipped</span><strong>${formatNumber(result.skippedCount)}</strong></div>`
+    : "";
   const note = result.listFiltered
     ? "Listing names of entangled strands that exceed the cross-link threshold."
     : "Emitting strands that passed the entanglement filter as FASTA.";
@@ -1910,6 +1933,7 @@ function renderFilterResult(result: FilterResult) {
   ui.filterResult.innerHTML = `
     <div class="report-metrics">
       ${headline}
+      ${skippedMetric}
       <div class="metric-card"><span>k-mer</span><strong>${formatNumber(result.k)}</strong></div>
       <div class="metric-card"><span>max cross-links</span><strong>${formatNumber(result.m)}</strong></div>
       <div class="metric-card"><span>primer length</span><strong>${formatNumber(result.primerLen)}</strong></div>
@@ -1921,10 +1945,9 @@ function renderFilterResult(result: FilterResult) {
 }
 
 async function saveFilterOutput() {
-  if (!filterOutput.trim()) return;
-  const name = ui.filterListFiltered.checked ? "filtered-names.txt" : "passed.fa";
+  if (!filterSaveOutput.trim()) return;
   try {
-    const res = await window.dbgps.saveFile({ defaultName: name, content: filterOutput });
+    const res = await window.dbgps.saveFile({ defaultName: filterSaveDefaultName, content: filterSaveOutput });
     if (res.saved) appendLog(`Saved filter output to ${res.path}`);
   } catch (error) {
     appendLog(`Save failed: ${errMessage(error)}`);
@@ -2210,13 +2233,38 @@ async function selectBatchFile() {
 }
 
 function batchCoverageClass(row: BatchRow) {
-  if (row.status !== "ok" || !row.result) return "warn";
-  return row.result.complete ? "ok" : "bad";
+  if (row.status !== "ok" || !row.summary) return "warn";
+  return row.summary.complete ? "ok" : "bad";
+}
+
+function renderBatchRow(row: BatchRow) {
+  if (row.status !== "ok" || !row.summary) {
+    return `<tr class="batch-row ${row.status}" data-batch-index="${row.index}">
+        <td>${formatNumber(row.index + 1)}</td>
+        <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
+        <td>${formatNumber(row.rawLength)}</td>
+        <td>${formatNumber(row.analyzedLength)}</td>
+        <td colspan="4" class="batch-note">${escapeHtml(row.message || row.status)}</td>
+        <td><span class="coverage zero">${escapeHtml(row.status)}</span></td>
+      </tr>`;
+  }
+  const r = row.summary;
+  return `<tr class="batch-row clickable ${batchCoverageClass(row)}" data-batch-index="${row.index}">
+      <td>${formatNumber(row.index + 1)}</td>
+      <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
+      <td>${formatNumber(row.rawLength)}</td>
+      <td>${formatNumber(row.analyzedLength)}</td>
+      <td>${formatNumber(r.observed)} / ${formatNumber(r.kmerCount)}</td>
+      <td><span class="path-pill ${r.complete ? "ok" : "bad"}">${r.complete ? "complete" : "broken"}</span></td>
+      <td><span class="coverage ${coverageClass(r.minCoverage)}">${formatNumber(r.minCoverage)}</span></td>
+      <td>${formatNumber(Math.round(r.meanCoverage))}</td>
+      <td>${formatNumber(r.maxCoverage)}</td>
+    </tr>`;
 }
 
 function renderBatchTable() {
-  const analyzed = batchRows.filter((r) => r.status === "ok" && r.result);
-  const complete = analyzed.filter((r) => r.result!.complete).length;
+  const analyzed = batchRows.filter((r) => r.status === "ok" && r.summary);
+  const complete = analyzed.filter((r) => r.summary!.complete).length;
   const broken = analyzed.length - complete;
   const skipped = batchRows.filter((r) => r.status !== "ok").length;
   const totalPages = Math.max(1, Math.ceil(batchRows.length / BATCH_PAGE_SIZE));
@@ -2241,30 +2289,7 @@ function renderBatchTable() {
   }
 
   const head = ["#", "Name", "Len", "Used", "Observed", "Path", "Min", "Mean", "Max"];
-  const body = pageRows.map((row) => {
-    if (row.status !== "ok" || !row.result) {
-      return `<tr class="batch-row ${row.status}" data-batch-index="${row.index}">
-        <td>${formatNumber(row.index + 1)}</td>
-        <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
-        <td>${formatNumber(row.rawLength)}</td>
-        <td>${formatNumber(row.analyzedLength)}</td>
-        <td colspan="4" class="batch-note">${escapeHtml(row.message || row.status)}</td>
-        <td><span class="coverage zero">${escapeHtml(row.status)}</span></td>
-      </tr>`;
-    }
-    const r = row.result;
-    return `<tr class="batch-row clickable ${batchCoverageClass(row)}" data-batch-index="${row.index}">
-      <td>${formatNumber(row.index + 1)}</td>
-      <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
-      <td>${formatNumber(row.rawLength)}</td>
-      <td>${formatNumber(row.analyzedLength)}</td>
-      <td>${formatNumber(r.observed)} / ${formatNumber(r.kmerCount)}</td>
-      <td><span class="path-pill ${r.complete ? "ok" : "bad"}">${r.complete ? "complete" : "broken"}</span></td>
-      <td><span class="coverage ${coverageClass(r.minCoverage)}">${formatNumber(r.minCoverage)}</span></td>
-      <td>${formatNumber(Math.round(r.meanCoverage))}</td>
-      <td>${formatNumber(r.maxCoverage)}</td>
-    </tr>`;
-  }).join("");
+  const body = pageRows.map(renderBatchRow).join("");
 
   ui.batchResult.classList.remove("empty-state");
   ui.batchResult.innerHTML = summary +
@@ -2279,19 +2304,29 @@ function renderBatchTable() {
     `<div class="table-wrap"><table class="data-table batch-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
-function showBatchDetail(index: number) {
+function renderBatchDetail(row: BatchRow, result: SequenceResult) {
+  latestResult = result;
+  ui.batchDetail.innerHTML =
+    `<div class="batch-detail-head"><h3>${escapeHtml(row.name)}</h3><span class="muted">${formatNumber(row.analyzedLength)} bp analyzed (of ${formatNumber(row.rawLength)} bp)</span></div>` +
+    sequenceResultHtml(result);
+  renderIcons();
+}
+
+async function showBatchDetail(index: number) {
   const row = batchRows.find((r) => r.index === index);
-  if (!row || row.status !== "ok" || !row.result) {
+  if (!row || row.status !== "ok" || !row.summary) {
     ui.batchDetail.innerHTML = "";
     batchDetailIndex = null;
     return;
   }
   batchDetailIndex = index;
-  latestResult = row.result;
-  ui.batchDetail.innerHTML =
-    `<div class="batch-detail-head"><h3>${escapeHtml(row.name)}</h3><span class="muted">${formatNumber(row.analyzedLength)} bp analyzed (of ${formatNumber(row.rawLength)} bp)</span></div>` +
-    sequenceResultHtml(row.result);
-  renderIcons();
+
+  if (!row.detail) {
+    ui.batchDetail.innerHTML = `<div class="error-card">Coverage profile is not available for this row.</div>`;
+    return;
+  }
+
+  renderBatchDetail(row, row.detail);
   ui.batchDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
@@ -2330,15 +2365,29 @@ async function runBatchAnalysis() {
       primerFront: front,
       primerBack: back
     });
-    batchRows = (result.rows || []).map((row) => ({
-      index: row.index,
-      name: row.name || `seq${row.index + 1}`,
-      rawLength: row.rawLength,
-      analyzedLength: row.analyzedLength,
-      status: row.status,
-      message: row.message,
-      result: row.result && (row.result as SequenceResult).type === "sequence" ? row.result as SequenceResult : undefined
-    }));
+    batchRows = (result.rows || []).map((row) => {
+      const detail = row.result && (row.result as SequenceResult).type === "sequence"
+        ? row.result as SequenceResult
+        : undefined;
+      return {
+        index: row.index,
+        name: row.name || `seq${row.index + 1}`,
+        rawLength: row.rawLength,
+        analyzedLength: row.analyzedLength,
+        status: row.status,
+        message: row.message,
+        summary: detail ? {
+          observed: detail.observed,
+          kmerCount: detail.kmerCount,
+          complete: detail.complete,
+          minCoverage: detail.minCoverage,
+          meanCoverage: detail.meanCoverage,
+          maxCoverage: detail.maxCoverage,
+          maxAdjacentRatio: detail.maxAdjacentRatio
+        } : undefined,
+        detail
+      };
+    });
     renderBatchTable();
     renderIcons();
     ui.batchProgress.textContent = `${formatNumber(batchRows.length)} / ${formatNumber(batchRows.length)} done`;
@@ -2356,7 +2405,7 @@ function buildBatchCsv() {
   const header = ["index", "name", "raw_length", "analyzed_length", "status", "observed_kmers", "total_kmers", "path_complete", "min_cov", "mean_cov", "max_cov", "max_adjacent_ratio"];
   const lines = [header.join(",")];
   for (const row of batchRows) {
-    const r = row.result;
+    const r = row.summary;
     const cell = (v: unknown) => {
       const s = String(v ?? "");
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -2372,7 +2421,7 @@ function buildBatchCsv() {
 }
 
 async function saveBatchCsv() {
-  if (!batchRows.some((r) => r.result)) return;
+  if (!batchRows.some((r) => r.summary)) return;
   try {
     const res = await window.dbgps.saveFile({ defaultName: "batch-qc.csv", content: buildBatchCsv() });
     if (res.saved) appendLog(`Saved Batch QC table to ${res.path}`);
