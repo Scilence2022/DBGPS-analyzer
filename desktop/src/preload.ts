@@ -52,7 +52,7 @@ type FilterRequest = { file: string; k?: number; m?: number; primerLen?: number;
 type FilterResult = {
   command: string; stdout: string; stderr: string; code: number | null;
   file: string; k: number; m: number; primerLen: number; listFiltered: boolean;
-  passedCount: number; filteredCount: number;
+  passedCount: number; filteredCount: number; skippedCount: number;
 };
 
 type SmKdKnRow = {

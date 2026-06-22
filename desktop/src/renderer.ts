@@ -1920,6 +1920,9 @@ function renderFilterResult(result: FilterResult) {
   const headline = result.listFiltered
     ? `<div class="metric-card"><span>Filtered (entangled)</span><strong>${formatNumber(result.filteredCount)}</strong></div>`
     : `<div class="metric-card"><span>Passed</span><strong>${formatNumber(result.passedCount)}</strong></div>`;
+  const skippedMetric = result.skippedCount > 0
+    ? `<div class="metric-card"><span>Skipped</span><strong>${formatNumber(result.skippedCount)}</strong></div>`
+    : "";
   const note = result.listFiltered
     ? "Listing names of entangled strands that exceed the cross-link threshold."
     : "Emitting strands that passed the entanglement filter as FASTA.";
@@ -1927,6 +1930,7 @@ function renderFilterResult(result: FilterResult) {
   ui.filterResult.innerHTML = `
     <div class="report-metrics">
       ${headline}
+      ${skippedMetric}
       <div class="metric-card"><span>k-mer</span><strong>${formatNumber(result.k)}</strong></div>
       <div class="metric-card"><span>max cross-links</span><strong>${formatNumber(result.m)}</strong></div>
       <div class="metric-card"><span>primer length</span><strong>${formatNumber(result.primerLen)}</strong></div>

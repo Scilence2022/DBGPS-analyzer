@@ -53,9 +53,15 @@ static void filter_strands(pldat_t *p)
     while (kseq_read(p->ks) >= 0) {
         total++;
         int l = p->ks->seq.l, km_num, kms_cov;
-        if (l < p->k) continue;
+        int trimmed_len = l - p->primer_len * 2;
+        if (trimmed_len < p->k) {
+            fprintf(stderr,
+                    "Skipping %s: %d bp remain after trimming %d bp from each end; need at least k=%d\n",
+                    p->ks->name.s, trimmed_len > 0 ? trimmed_len : 0, p->primer_len, p->k);
+            continue;
+        }
         uint64_t *kms;
-        MALLOC(kms, l - p->k + 1);
+        MALLOC(kms, trimmed_len - p->k + 1);
         km_num = seq_kmers_primer(kms, p->k, l, p->ks->seq.s, p->primer_len);
         kms_cov = kms_max_cov(kms, km_num, mask, p->h);
 
@@ -118,6 +124,18 @@ int main(int argc, char *argv[])
         fprintf(stderr,   "  -m INT     maximum allowed cross-links per strand [%d]\n", max_links);
         fprintf(stderr,   "  -p INT     length of primers to ignore at both ends [%d]\n", primer_len);
         fprintf(stderr,   "  -s         output names of filtered (entangled) strands instead of passed FASTA\n");
+        return 1;
+    }
+    if (k < 1 || k > 31) {
+        fprintf(stderr, "Error: -k must be between 1 and 31 (got %d)\n", k);
+        return 1;
+    }
+    if (max_links < 0) {
+        fprintf(stderr, "Error: -m must be non-negative (got %d)\n", max_links);
+        return 1;
+    }
+    if (primer_len < 0) {
+        fprintf(stderr, "Error: -p must be non-negative (got %d)\n", primer_len);
         return 1;
     }
 

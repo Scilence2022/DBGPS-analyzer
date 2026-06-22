@@ -930,8 +930,9 @@ async function runFilter(req: FilterRequest) {
     const filteredCount = listFiltered
       ? result.stdout.split("\n").filter((line) => line.trim().length > 0).length
       : (result.stderr.match(/\*/g) || []).length;
+    const skippedCount = (result.stderr.match(/^Skipping /gm) || []).length;
     const command = result.command.replace(norm.path, req.file);
-    return { ...result, command, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount };
+    return { ...result, command, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount, skippedCount };
   } finally {
     norm.cleanup();
   }
