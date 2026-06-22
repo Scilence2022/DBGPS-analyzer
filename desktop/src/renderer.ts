@@ -332,6 +332,7 @@ const elements = {
   stopButton: $("stopButton") as HTMLButtonElement,
   settingsButton: $("settingsButton") as HTMLButtonElement,
   selectFilesButton: $("selectFilesButton") as HTMLButtonElement,
+  addFilesButton: $("addFilesButton") as HTMLButtonElement,
   fileList: $("fileList"),
   kInput: $("kInput") as HTMLInputElement,
   threadsInput: $("threadsInput") as HTMLInputElement,
@@ -1407,11 +1408,48 @@ function setAnalyzerReady(ready: boolean) {
   elements.queryButton.disabled = !ready;
   elements.stopButton.disabled = !ready;
   elements.startButton.disabled = ready;
+  elements.addFilesButton.disabled = !ready;
+  elements.selectFilesButton.disabled = ready;
+  elements.kInput.disabled = ready;
+  elements.threadsInput.disabled = ready;
+  elements.readLengthInput.disabled = ready;
 }
 
 async function selectFiles() {
+  if (analyzerReady) return;
   selectedFiles = await window.dbgps.selectFiles();
   renderFileList();
+}
+
+async function addSequencingFiles() {
+  if (!analyzerReady) return;
+  const files = await window.dbgps.selectFiles();
+  const newFiles = files.filter((file) => !selectedFiles.includes(file));
+  if (newFiles.length === 0) {
+    if (files.length > 0) appendLog("No new sequencing files selected.");
+    return;
+  }
+
+  elements.addFilesButton.disabled = true;
+  elements.queryButton.disabled = true;
+  setStatus(`Counting ${formatNumber(newFiles.length)} additional NGS file${newFiles.length === 1 ? "" : "s"}`, "running");
+
+  try {
+    const summary = (await window.dbgps.addAnalyzerFiles(newFiles)) as SummaryResult;
+    selectedFiles = summary.files?.length ? summary.files : [...selectedFiles, ...newFiles];
+    renderFileList();
+    renderSummary(summary);
+    latestResult = summary;
+    appendLog(`Added ${formatNumber(newFiles.length)} NGS file${newFiles.length === 1 ? "" : "s"} to the running kernel.`);
+    setStatus("Kernel running", "running");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendLog(message);
+    setStatus("Failed to add sequencing files", "error");
+  } finally {
+    elements.addFilesButton.disabled = !analyzerReady;
+    elements.queryButton.disabled = !analyzerReady;
+  }
 }
 
 async function buildAnalyzer() {
@@ -1437,6 +1475,11 @@ async function startAnalyzer() {
   setAnalyzerReady(false);
   setStatus("Loading sequencing k-mer table", "running");
   elements.startButton.disabled = true;
+  elements.selectFilesButton.disabled = true;
+  elements.addFilesButton.disabled = true;
+  elements.kInput.disabled = true;
+  elements.threadsInput.disabled = true;
+  elements.readLengthInput.disabled = true;
 
   try {
     const ready = (await window.dbgps.startAnalyzer({
@@ -1445,6 +1488,10 @@ async function startAnalyzer() {
       threads: Number(elements.threadsInput.value),
       readLength: Number(elements.readLengthInput.value)
     })) as SummaryResult;
+    if (ready.files?.length) {
+      selectedFiles = ready.files;
+      renderFileList();
+    }
     renderSummary(ready);
     latestResult = ready;
     setAnalyzerReady(true);
@@ -1562,6 +1609,7 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
 });
 
 elements.selectFilesButton.addEventListener("click", selectFiles);
+elements.addFilesButton.addEventListener("click", addSequencingFiles);
 elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
 elements.stopButton.addEventListener("click", stopAnalyzer);

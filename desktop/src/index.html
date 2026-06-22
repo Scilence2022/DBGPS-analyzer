@@ -50,10 +50,16 @@
           <div id="view-interactive" class="view active">
           <section class="config-band">
             <div class="file-picker">
-              <button id="selectFilesButton" class="primary-button">
-                <i data-lucide="folder-open"></i>
-                <span>Select sequencing files</span>
-              </button>
+              <div class="file-actions">
+                <button id="selectFilesButton" class="primary-button">
+                  <i data-lucide="folder-open"></i>
+                  <span>Select sequencing files</span>
+                </button>
+                <button id="addFilesButton" class="ghost-button" disabled>
+                  <i data-lucide="plus"></i>
+                  <span>Add sequencing files</span>
+                </button>
+              </div>
               <div id="fileList" class="file-list">No files selected</div>
             </div>
             <div class="config-grid">

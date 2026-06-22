@@ -7,6 +7,14 @@ type AnalyzerConfig = {
   readLength: number;
 };
 
+type AnalyzerSummaryResult = {
+  type: "ready" | "summary";
+  k: number;
+  distinctKmers: number;
+  totalKmerCoverage: number;
+  files?: string[];
+};
+
 type ProviderId =
   | "openai"
   | "google"
@@ -124,6 +132,8 @@ const api = {
   selectFiles: () => ipcRenderer.invoke("analyzer:selectFiles") as Promise<string[]>,
   buildAnalyzer: () => ipcRenderer.invoke("analyzer:build") as Promise<{ ok: boolean; log: string }>,
   startAnalyzer: (config: AnalyzerConfig) => ipcRenderer.invoke("analyzer:start", config) as Promise<unknown>,
+  addAnalyzerFiles: (files: string[]) =>
+    ipcRenderer.invoke("analyzer:addFiles", files) as Promise<AnalyzerSummaryResult>,
   queryAnalyzer: (command: string) => ipcRenderer.invoke("analyzer:query", command) as Promise<unknown>,
   queryAnalyzerBatch: (commands: string[]) =>
     ipcRenderer.invoke("analyzer:queryBatch", commands) as Promise<unknown[]>,
