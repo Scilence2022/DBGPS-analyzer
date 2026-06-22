@@ -172,13 +172,14 @@ static inline void c4x_destroy(kc_c4x_t *h)
 /* coverage (saturating count) of a canonical k-mer key */
 static inline unsigned short kmer_cov(uint64_t kmer, uint64_t mask, kc_c4x_t *h)
 {
-    int j, x, cov = 0;
+    int j, cov = 0;
+    khint_t x;
     uint64_t hash_key = hash64(kmer, mask);
-    j = hash_key & ((1 << KC_BITS) - 1);
+    j = hash_key & ((1 << h->p) - 1);
     if (kh_size(h->h[j]) < 1) return 0;
-    hash_key = hash_key >> KC_BITS << KC_BITS;
+    hash_key = hash_key >> h->p << KC_BITS;
     x = kc_c4_get(h->h[j], hash_key);
-    if (kh_exist(h->h[j], x))
+    if (x != kh_end(h->h[j]) && kh_exist(h->h[j], x))
         cov = kh_key(h->h[j], x) & KC_MAX;
     return cov;
 }
