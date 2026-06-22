@@ -1327,6 +1327,43 @@ static void write_sequence_result_json(FILE *fp, kc_c4x_t *h, int k, const char 
     free(kms);
 }
 
+static void write_sequence_summary_json(FILE *fp, kc_c4x_t *h, int k, const char *seq, int len)
+{
+    uint64_t mask = (1ULL<<k*2) - 1;
+    int km_num = len - k + 1;
+    uint64_t *kms;
+    int *coverages;
+    int observed = 0, missing = 0, min_cov = 0, max_cov = 0;
+    long long cov_sum = 0;
+    double max_ratio = 0.0;
+
+    MALLOC(kms, km_num);
+    MALLOC(coverages, km_num);
+
+    km_num = seq_path_kmers(kms, k, len, seq);
+    for (int i = 0; i < km_num; ++i) {
+        coverages[i] = kmer_cov(kms[i], mask, h);
+        if (i == 0 || coverages[i] < min_cov) min_cov = coverages[i];
+        if (i == 0 || coverages[i] > max_cov) max_cov = coverages[i];
+        if (coverages[i] > 0) ++observed;
+        else ++missing;
+        cov_sum += coverages[i];
+    }
+
+    for (int i = 0; i + 1 < km_num; ++i) {
+        double ratio = coverage_ratio(coverages[i], coverages[i + 1]);
+        if (ratio > max_ratio) max_ratio = ratio;
+    }
+
+    fprintf(fp, "{\"type\":\"sequenceSummary\",\"length\":%d,\"k\":%d,\"kmerCount\":%d,", len, k, km_num);
+    fprintf(fp, "\"observed\":%d,\"missing\":%d,\"complete\":%s,", observed, missing, missing == 0 ? "true" : "false");
+    fprintf(fp, "\"minCoverage\":%d,\"maxCoverage\":%d,\"meanCoverage\":%.3f,\"maxAdjacentRatio\":%.3f}",
+            min_cov, max_cov, km_num > 0 ? (double)cov_sum / km_num : 0.0, max_ratio);
+
+    free(coverages);
+    free(kms);
+}
+
 static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int len)
 {
     if (len < k) {
@@ -1410,8 +1447,8 @@ static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int prim
             fputc('}', stdout);
             ++errors;
         } else {
-            fprintf(stdout, "\"status\":\"ok\",\"result\":");
-            write_sequence_result_json(stdout, h, k, ks->seq.s + start, analyzed_len);
+            fprintf(stdout, "\"status\":\"ok\",\"summary\":");
+            write_sequence_summary_json(stdout, h, k, ks->seq.s + start, analyzed_len);
             fputc('}', stdout);
             ++ok;
         }
