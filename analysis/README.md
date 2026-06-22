@@ -61,6 +61,22 @@ python3 analysis/run_consensus_vs_dbgps.py \
 The default `k=5` is chosen for the small bundled fixtures. For real DBGPS
 datasets, use the intended k-mer size, usually `--k 31`.
 
+## Real YC10 10% Analysis
+
+The `analysis/real_123/` folder contains a real-data run using
+`/Users/song/Documents/123/6.5MB.DNAs.newids.tab` as the 210,000-strand
+reference and a deterministic 10% subsample of
+`YC10_5_1_BDDP210000410-1A_1.fq.gz` as the NGS reads. This run uses
+`minimap2 -x sr -c --cs=short` for fast alignment and compares its
+reference-guided majority consensus against DBGPS Analyzer Batch QC with
+18/18 bp primer trimming.
+
+See `analysis/real_123/README.md` and
+`analysis/real_123/summary/real_data_report.md` for the measured runtime and
+strand-level agreement summary. Large intermediates such as the sampled FASTQ,
+PAF, DBGPS JSONL, and full per-strand CSV tables are intentionally ignored by
+git but remain in the local analysis folder after running the workflow.
+
 ## Production-Scale Alignment Recommendation
 
 The built-in Python aligner is intentionally simple and reproducible, but it is
