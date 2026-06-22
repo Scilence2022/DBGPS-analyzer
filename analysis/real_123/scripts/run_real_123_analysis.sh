@@ -29,7 +29,7 @@ minimap2 -x sr -t "$THREADS" -c --cs=short \
 /usr/bin/time -lp sh -c "printf 'batch $FRONT $BACK $OUT/inputs/reference.fa\nexit\n' | ./DBGPS-analyzer -i -k $K -t $THREADS -L 200 '$OUT/inputs/YC10_5_1_10pct.fq.gz' > '$OUT/dbgps/dbgps_batch_10pct.jsonl' 2> '$OUT/dbgps/dbgps_kernel_10pct.log'" \
   2> "$OUT/dbgps/dbgps_time_10pct.log"
 
-python3 "$OUT/scripts/parse_minimap2_vs_dbgps.py" \
+/usr/bin/time -lp python3 "$OUT/scripts/parse_minimap2_vs_dbgps.py" \
   --reference "$OUT/inputs/reference.fa" \
   --paf "$OUT/alignment/minimap2_10pct.paf" \
   --dbgps-jsonl "$OUT/dbgps/dbgps_batch_10pct.jsonl" \
@@ -39,4 +39,10 @@ python3 "$OUT/scripts/parse_minimap2_vs_dbgps.py" \
   --primer-front "$FRONT" \
   --primer-back "$BACK" \
   --min-identity 0.75 \
-  --min-mapq 20
+  --min-mapq 20 \
+  2> "$OUT/summary/parser_time_10pct.log"
+
+python3 analysis/record_parser_memory.py \
+  --parser-log "$OUT/summary/parser_time_10pct.log" \
+  --summary-csv "$OUT/summary/summary_stats.csv" \
+  --report "$OUT/summary/real_data_report.md"

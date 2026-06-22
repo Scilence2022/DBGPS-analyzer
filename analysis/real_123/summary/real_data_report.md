@@ -13,8 +13,8 @@
 | Method | Real seconds | Peak RSS (GB) | Notes |
 |:---|---:|---:|:---|
 | minimap2 alignment | 7.6 | 1.053 | `-x sr -c --cs=short`, 16 threads |
-| majority-vote PAF parsing | 68.834 | n/a | Python reference-guided consensus over trimmed region |
-| alignment + majority-vote total | 76.434 | >= 1.053 | minimap2 plus parser runtime |
+| majority-vote PAF parsing | 69.675 | 1.371 | Python reference-guided consensus over trimmed region; `/usr/bin/time -lp` wall time 72.87 s |
+| alignment + majority-vote total | 77.275 | >= 1.371 | minimap2 plus parser runtime; peak RSS is max stage RSS |
 | DBGPS Analyzer Batch QC | 4.74 | 3.555 | k=31, 16 threads, includes counting + batch query |
 
 ## Strand-Level Results

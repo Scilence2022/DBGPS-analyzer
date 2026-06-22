@@ -8,8 +8,10 @@ consensus_only,1684
 dbgps_only,3921
 minimap2_real_seconds,7.6
 minimap2_peak_rss_gb,1.053
-consensus_parse_seconds,68.834
-alignment_consensus_total_seconds,76.434
+consensus_parse_seconds,69.675
+consensus_parse_wall_seconds,72.87
+consensus_parse_peak_rss_gb,1.371
+alignment_consensus_total_seconds,77.275
 dbgps_real_seconds,4.74
 dbgps_peak_rss_gb,3.555
 dbgps_distinct_kmers,124950624
