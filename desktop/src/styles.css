@@ -2390,7 +2390,15 @@ details > summary {
   gap: 12px;
   flex-wrap: wrap;
 }
-.batch-table-toolbar p {
+.batch-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+.batch-toolbar-left p {
   margin: 0;
 }
 .batch-pager {
@@ -2400,6 +2408,29 @@ details > summary {
   font-size: 12px;
   color: var(--muted, #667085);
   font-variant-numeric: tabular-nums;
+}
+.batch-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.batch-search-label {
+  font-size: 12px;
+  color: var(--muted, #667085);
+  white-space: nowrap;
+}
+.batch-search-input {
+  width: 80px;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.batch-page-input {
+  width: 52px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 .batch-table td,
 .batch-table th {
@@ -2413,6 +2444,14 @@ details > summary {
 }
 .batch-table tbody tr.expanded {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+.batch-table tbody tr.highlight {
+  background: rgba(59, 130, 246, 0.12);
+  outline: 2px solid rgba(59, 130, 246, 0.45);
+  outline-offset: -2px;
+}
+.batch-table tbody tr.highlight:hover {
+  background: rgba(59, 130, 246, 0.18);
 }
 .batch-table tr.skipped,
 .batch-table tr.error {

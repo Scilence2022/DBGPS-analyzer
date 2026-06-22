@@ -2602,6 +2602,7 @@ let batchRows: BatchRow[] = [];
 let batchRunning = false;
 let batchDetailIndex: number | null = null;
 let batchPage = 0;
+let batchHighlightIndex: number | null = null;
 let batchPrimerFrontUsed = DEFAULT_PRIMER;
 let batchPrimerBackUsed = DEFAULT_PRIMER;
 const BATCH_PAGE_SIZE = 100;
@@ -3074,8 +3075,9 @@ function batchCoverageClass(row: BatchRow) {
 
 function renderBatchRow(row: BatchRow) {
   const expanded = batchDetailIndex === row.index;
+  const hl = batchHighlightIndex === row.index ? " highlight" : "";
   if (row.status !== "ok" || !row.summary) {
-    return `<tr class="batch-row ${row.status}" data-batch-index="${row.index}">
+    return `<tr class="batch-row ${row.status}${hl}" data-batch-index="${row.index}">
         <td>${formatNumber(row.index + 1)}</td>
         <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
         <td>${formatNumber(row.rawLength)}</td>
@@ -3085,7 +3087,7 @@ function renderBatchRow(row: BatchRow) {
       </tr>`;
   }
   const r = row.summary;
-  return `<tr class="batch-row clickable ${batchCoverageClass(row)} ${expanded ? "expanded" : ""}" data-batch-index="${row.index}" aria-expanded="${expanded ? "true" : "false"}">
+  return `<tr class="batch-row clickable ${batchCoverageClass(row)} ${expanded ? "expanded" : ""}${hl}" data-batch-index="${row.index}" aria-expanded="${expanded ? "true" : "false"}">
       <td>${formatNumber(row.index + 1)}</td>
       <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
       <td>${formatNumber(row.rawLength)}</td>
@@ -3140,14 +3142,28 @@ function renderBatchTable() {
   ui.batchResult.classList.remove("empty-state");
   ui.batchResult.innerHTML = summary +
     `<div class="batch-table-toolbar">
-      <p class="muted">Showing ${formatNumber(pageStart + 1)}-${formatNumber(pageEnd)} of ${formatNumber(batchRows.length)}. Click a strand or Details to expand/collapse its coverage profile and path completeness.</p>
+      <div class="batch-toolbar-left">
+        <p class="muted">Showing ${formatNumber(pageStart + 1)}-${formatNumber(pageEnd)} of ${formatNumber(batchRows.length)}. Click a strand or Details to expand/collapse its coverage profile and path completeness.</p>
+        <div class="batch-search">
+          <label for="batch-idx-input" class="batch-search-label">Find #:</label>
+          <input id="batch-idx-input" type="number" min="1" max="${batchRows.length}" placeholder="index" class="batch-search-input" value="${batchHighlightIndex != null ? batchHighlightIndex + 1 : ""}">
+        </div>
+      </div>
       <div class="batch-pager">
         <button type="button" class="secondary-button" data-batch-page="${batchPage - 1}" ${batchPage <= 0 ? "disabled" : ""}>Previous</button>
-        <span>${formatNumber(batchPage + 1)} / ${formatNumber(totalPages)}</span>
+        <input type="number" min="1" max="${totalPages}" value="${batchPage + 1}" class="batch-page-input" title="Go to page" id="batch-page-input">
+        <span> / ${formatNumber(totalPages)}</span>
         <button type="button" class="secondary-button" data-batch-page="${batchPage + 1}" ${batchPage + 1 >= totalPages ? "disabled" : ""}>Next</button>
       </div>
     </div>` +
     `<div class="table-wrap"><table class="data-table batch-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+
+  if (batchHighlightIndex != null) {
+    requestAnimationFrame(() => {
+      const row = ui.batchResult.querySelector(`tr[data-batch-index="${batchHighlightIndex}"]`);
+      if (row) row.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
 }
 
 function renderBatchDetail(row: BatchRow, result: SequenceResult) {
@@ -3242,6 +3258,7 @@ async function runBatchAnalysis() {
   batchRunning = true;
   batchRows = [];
   batchDetailIndex = null;
+  batchHighlightIndex = null;
   batchPage = 0;
   document.getElementById("view-batch")?.classList.remove("detail-open");
   ui.batchDetail.innerHTML = "";
@@ -3334,11 +3351,54 @@ ui.batchResult.addEventListener("click", (event) => {
   const pageButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-batch-page]");
   if (pageButton?.dataset.batchPage) {
     batchPage = Number(pageButton.dataset.batchPage) || 0;
+    batchHighlightIndex = null;
     renderBatchTable();
     return;
   }
   const tr = (event.target as HTMLElement).closest<HTMLElement>(".batch-row.clickable");
   if (tr?.dataset.batchIndex) toggleBatchDetail(Number(tr.dataset.batchIndex));
+});
+
+// Page jump: Enter triggers page change
+ui.batchResult.addEventListener("keydown", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.id === "batch-page-input" && event.key === "Enter") {
+    const input = target as HTMLInputElement;
+    const totalPages = Math.max(1, Math.ceil(batchRows.length / BATCH_PAGE_SIZE));
+    const page = Math.max(1, Math.min(totalPages, Number(input.value) || batchPage + 1));
+    batchPage = page - 1;
+    batchHighlightIndex = null;
+    renderBatchTable();
+  }
+  if (target.id === "batch-idx-input" && event.key === "Enter") {
+    const input = target as HTMLInputElement;
+    const idx = Number(input.value);
+    if (idx >= 1 && idx <= batchRows.length) {
+      const targetIndex = idx - 1;
+      batchPage = Math.floor(targetIndex / BATCH_PAGE_SIZE);
+      batchHighlightIndex = targetIndex;
+    } else {
+      batchHighlightIndex = null;
+    }
+    renderBatchTable();
+  }
+});
+
+// Index search blur: keep highlight but re-navigate on blur with valid value
+ui.batchResult.addEventListener("change", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.id === "batch-idx-input") {
+    const input = target as HTMLInputElement;
+    const idx = Number(input.value);
+    if (idx >= 1 && idx <= batchRows.length) {
+      const targetIndex = idx - 1;
+      batchPage = Math.floor(targetIndex / BATCH_PAGE_SIZE);
+      batchHighlightIndex = targetIndex;
+    } else {
+      batchHighlightIndex = null;
+    }
+    renderBatchTable();
+  }
 });
 ui.batchDetail.addEventListener("click", (event) => {
   const collapseButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-batch-collapse]");
