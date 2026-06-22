@@ -53,6 +53,7 @@ type FilterResult = {
   command: string; stdout: string; stderr: string; code: number | null;
   file: string; k: number; m: number; primerLen: number; listFiltered: boolean;
   passedCount: number; filteredCount: number; skippedCount: number;
+  saveOutput: string; saveDefaultName: string;
 };
 
 type SmKdKnRow = {

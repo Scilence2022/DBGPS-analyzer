@@ -933,11 +933,15 @@ async function runFilter(req: FilterRequest) {
   const listFiltered = Boolean(req.listFiltered);
   const norm = normalizeToFasta(req.file);
   try {
-    const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
-    if (listFiltered) args.push("-s");
-    args.push(norm.path);
+    const baseArgs = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
+    const args = listFiltered ? [...baseArgs, "-s", norm.path] : [...baseArgs, norm.path];
     const result = await runTool(filterPath, args);
-    const passedCount = (result.stdout.match(/^>/gm) || []).length;
+    let saveOutput = result.stdout;
+    if (listFiltered) {
+      const passedResult = await runTool(filterPath, [...baseArgs, norm.path]);
+      saveOutput = passedResult.stdout;
+    }
+    const passedCount = (saveOutput.match(/^>/gm) || []).length;
     // In default mode the filtered strands are marked with " * " on stderr; in -s
     // mode each filtered strand name is one stdout line.
     const filteredCount = listFiltered
@@ -945,7 +949,20 @@ async function runFilter(req: FilterRequest) {
       : (result.stderr.match(/\*/g) || []).length;
     const skippedCount = (result.stderr.match(/^Skipping /gm) || []).length;
     const command = result.command.replace(norm.path, req.file);
-    return { ...result, command, file: req.file, k, m, primerLen, listFiltered, passedCount, filteredCount, skippedCount };
+    return {
+      ...result,
+      command,
+      file: req.file,
+      k,
+      m,
+      primerLen,
+      listFiltered,
+      passedCount,
+      filteredCount,
+      skippedCount,
+      saveOutput,
+      saveDefaultName: "passed.fa"
+    };
   } finally {
     norm.cleanup();
   }

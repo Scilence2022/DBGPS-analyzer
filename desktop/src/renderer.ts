@@ -1751,6 +1751,8 @@ const ui = {
 let linksFile = "";
 let filterFile = "";
 let filterOutput = "";
+let filterSaveOutput = "";
+let filterSaveDefaultName = "passed.fa";
 let reportRefFile = "";
 let reportNgsFiles: string[] = [];
 let latestReport: ReportResult | null = null;
@@ -1906,6 +1908,8 @@ async function runFilterTool() {
     renderFilterResult(result);
   } catch (error) {
     filterOutput = "";
+    filterSaveOutput = "";
+    filterSaveDefaultName = "passed.fa";
     ui.filterSaveButton.disabled = true;
     ui.filterResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
   } finally {
@@ -1916,7 +1920,9 @@ async function runFilterTool() {
 
 function renderFilterResult(result: FilterResult) {
   filterOutput = result.stdout;
-  ui.filterSaveButton.disabled = !filterOutput.trim();
+  filterSaveOutput = result.saveOutput;
+  filterSaveDefaultName = result.saveDefaultName;
+  ui.filterSaveButton.disabled = !filterSaveOutput.trim();
   const headline = result.listFiltered
     ? `<div class="metric-card"><span>Filtered (entangled)</span><strong>${formatNumber(result.filteredCount)}</strong></div>`
     : `<div class="metric-card"><span>Passed</span><strong>${formatNumber(result.passedCount)}</strong></div>`;
@@ -1942,10 +1948,9 @@ function renderFilterResult(result: FilterResult) {
 }
 
 async function saveFilterOutput() {
-  if (!filterOutput.trim()) return;
-  const name = ui.filterListFiltered.checked ? "filtered-names.txt" : "passed.fa";
+  if (!filterSaveOutput.trim()) return;
   try {
-    const res = await window.dbgps.saveFile({ defaultName: name, content: filterOutput });
+    const res = await window.dbgps.saveFile({ defaultName: filterSaveDefaultName, content: filterSaveOutput });
     if (res.saved) appendLog(`Saved filter output to ${res.path}`);
   } catch (error) {
     appendLog(`Save failed: ${errMessage(error)}`);
