@@ -1845,6 +1845,24 @@ details > summary {
   color: var(--muted, #667085);
   font-variant-numeric: tabular-nums;
 }
+.batch-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.batch-table-toolbar p {
+  margin: 0;
+}
+.batch-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted, #667085);
+  font-variant-numeric: tabular-nums;
+}
 .batch-table td,
 .batch-table th {
   white-space: nowrap;

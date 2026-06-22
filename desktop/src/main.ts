@@ -426,7 +426,7 @@ class AnalyzerSession {
     });
   }
 
-  query(command: string) {
+  query(command: string, timeoutMs = 60000) {
     if (!this.child || !this.ready || this.child.killed) {
       throw new Error("Analyzer is not running.");
     }
@@ -440,7 +440,7 @@ class AnalyzerSession {
         timer: setTimeout(() => {
           this.pending = this.pending.filter((item) => item !== pending);
           reject(new Error("Analyzer query timed out."));
-        }, 60000)
+        }, timeoutMs)
       };
       this.pending.push(pending);
       this.child?.stdin.write(`${normalized}\n`, (error) => {
@@ -947,6 +947,7 @@ type AnalyzerBatchRequest = {
   k?: number; threads?: number; readLength?: number;
   minCov?: number; maxCov?: number; ratio?: number; maxR?: number; step?: number; skip?: number;
 };
+type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
 async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
@@ -968,6 +969,20 @@ async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
     const result = await runTool(analyzerPath, args);
     const command = result.command.replace(norm.path, req.strandsFile);
     return { ...result, command, k, rows: parseSmKdKn(result.stdout) };
+  } finally {
+    norm.cleanup();
+  }
+}
+
+async function runInteractiveBatch(req: InteractiveBatchRequest) {
+  if (!session) throw new Error("Analyzer is not running.");
+  if (!req || !req.file) throw new Error("Select a reference file for Batch QC.");
+  const primerFront = toPositiveInt(req.primerFront, 0, 0, 100000);
+  const primerBack = toPositiveInt(req.primerBack, 0, 0, 100000);
+  const norm = normalizeToFasta(req.file);
+  try {
+    const result = await session.query(`batch ${primerFront} ${primerBack} ${norm.path}`, 600000);
+    return { ...(result as object), file: req.file };
   } finally {
     norm.cleanup();
   }
@@ -1089,6 +1104,7 @@ app.whenReady().then(() => {
   ipcMain.handle("links:run", async (_event, request: LinksRequest) => runLinks(request));
   ipcMain.handle("filter:run", async (_event, request: FilterRequest) => runFilter(request));
   ipcMain.handle("analyzer:runBatch", async (_event, request: AnalyzerBatchRequest) => runAnalyzerBatch(request));
+  ipcMain.handle("analyzer:runInteractiveBatch", async (_event, request: InteractiveBatchRequest) => runInteractiveBatch(request));
   ipcMain.handle("report:run", async (_event, request: ReportRequest) => runReport(request));
 
   ipcMain.handle("file:save", async (_event, request: { defaultName?: string; content?: string }) => {

@@ -1701,6 +1701,7 @@ type ViewName = "interactive" | "batch" | "links" | "filter" | "report";
 type LinksResult = Awaited<ReturnType<DbgpsApi["runLinks"]>>;
 type FilterResult = Awaited<ReturnType<DbgpsApi["runFilter"]>>;
 type ReportResult = Awaited<ReturnType<DbgpsApi["runReport"]>>;
+type InteractiveBatchResult = Awaited<ReturnType<DbgpsApi["runInteractiveBatch"]>>;
 type SmKdKnRow = NonNullable<ReportResult["analyzer"]>["rows"][number];
 type Verdict = { level: "ok" | "warn" | "bad"; text: string };
 
@@ -1769,6 +1770,8 @@ let batchFile = "";
 let batchRows: BatchRow[] = [];
 let batchRunning = false;
 let batchDetailIndex: number | null = null;
+let batchPage = 0;
+const BATCH_PAGE_SIZE = 100;
 
 function errMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -2216,6 +2219,11 @@ function renderBatchTable() {
   const complete = analyzed.filter((r) => r.result!.complete).length;
   const broken = analyzed.length - complete;
   const skipped = batchRows.filter((r) => r.status !== "ok").length;
+  const totalPages = Math.max(1, Math.ceil(batchRows.length / BATCH_PAGE_SIZE));
+  batchPage = Math.min(Math.max(0, batchPage), totalPages - 1);
+  const pageStart = batchPage * BATCH_PAGE_SIZE;
+  const pageRows = batchRows.slice(pageStart, pageStart + BATCH_PAGE_SIZE);
+  const pageEnd = pageStart + pageRows.length;
   ui.batchSaveButton.disabled = analyzed.length === 0;
 
   const summary = `
@@ -2233,7 +2241,7 @@ function renderBatchTable() {
   }
 
   const head = ["#", "Name", "Len", "Used", "Observed", "Path", "Min", "Mean", "Max"];
-  const body = batchRows.map((row) => {
+  const body = pageRows.map((row) => {
     if (row.status !== "ok" || !row.result) {
       return `<tr class="batch-row ${row.status}" data-batch-index="${row.index}">
         <td>${formatNumber(row.index + 1)}</td>
@@ -2260,7 +2268,14 @@ function renderBatchTable() {
 
   ui.batchResult.classList.remove("empty-state");
   ui.batchResult.innerHTML = summary +
-    `<p class="muted">Click a strand to inspect its coverage profile and path completeness.</p>` +
+    `<div class="batch-table-toolbar">
+      <p class="muted">Showing ${formatNumber(pageStart + 1)}-${formatNumber(pageEnd)} of ${formatNumber(batchRows.length)}. Click a strand to inspect its coverage profile and path completeness.</p>
+      <div class="batch-pager">
+        <button type="button" class="secondary-button" data-batch-page="${batchPage - 1}" ${batchPage <= 0 ? "disabled" : ""}>Previous</button>
+        <span>${formatNumber(batchPage + 1)} / ${formatNumber(totalPages)}</span>
+        <button type="button" class="secondary-button" data-batch-page="${batchPage + 1}" ${batchPage + 1 >= totalPages ? "disabled" : ""}>Next</button>
+      </div>
+    </div>` +
     `<div class="table-wrap"><table class="data-table batch-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
@@ -2301,60 +2316,40 @@ async function runBatchAnalysis() {
   batchRunning = true;
   batchRows = [];
   batchDetailIndex = null;
+  batchPage = 0;
   ui.batchDetail.innerHTML = "";
   ui.batchRunButton.disabled = true;
   ui.batchSaveButton.disabled = true;
   ui.batchResult.classList.remove("empty-state");
-  ui.batchResult.innerHTML = `<div class="tool-loading">Parsing reference file…</div>`;
+  ui.batchResult.innerHTML = `<div class="tool-loading">Running Batch QC in the C kernel…</div>`;
+  ui.batchProgress.textContent = "C kernel running";
 
-  let records: Array<{ name: string; seq: string }> = [];
   try {
-    records = await window.dbgps.parseSequences(batchFile);
+    const result: InteractiveBatchResult = await window.dbgps.runInteractiveBatch({
+      file: batchFile,
+      primerFront: front,
+      primerBack: back
+    });
+    batchRows = (result.rows || []).map((row) => ({
+      index: row.index,
+      name: row.name || `seq${row.index + 1}`,
+      rawLength: row.rawLength,
+      analyzedLength: row.analyzedLength,
+      status: row.status,
+      message: row.message,
+      result: row.result && (row.result as SequenceResult).type === "sequence" ? row.result as SequenceResult : undefined
+    }));
+    renderBatchTable();
+    renderIcons();
+    ui.batchProgress.textContent = `${formatNumber(batchRows.length)} / ${formatNumber(batchRows.length)} done`;
+    appendLog(`Batch QC analyzed ${batchRows.length} reference strands from ${compactPath(batchFile)}.`);
   } catch (error) {
     ui.batchResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+    ui.batchProgress.textContent = "failed";
+  } finally {
     batchRunning = false;
     ui.batchRunButton.disabled = false;
-    return;
   }
-
-  const k = Number(elements.kInput.value) || 31;
-  ui.batchProgress.textContent = `0 / ${records.length}`;
-
-  for (let i = 0; i < records.length; i++) {
-    const rec = records[i];
-    const raw = rec.seq.replace(/\s+/g, "");
-    const name = rec.name || `seq${i + 1}`;
-    const trimmed = back > 0 ? raw.slice(front, Math.max(front, raw.length - back)) : raw.slice(front);
-    const row: BatchRow = { index: i, name, rawLength: raw.length, analyzedLength: trimmed.length, status: "ok" };
-
-    if (trimmed.length < k) {
-      row.status = "skipped";
-      row.message = `shorter than k=${k} after primer trim`;
-    } else {
-      try {
-        const result = (await window.dbgps.queryAnalyzer(`sequence ${trimmed}`)) as AnalyzerResult;
-        if (result.type === "sequence") {
-          row.result = result;
-        } else {
-          row.status = "error";
-          row.message = result.type === "error" ? result.message : `unexpected ${result.type} response`;
-        }
-      } catch (error) {
-        row.status = "error";
-        row.message = errMessage(error);
-      }
-    }
-    batchRows.push(row);
-    ui.batchProgress.textContent = `${i + 1} / ${records.length}`;
-    if ((i + 1) % 25 === 0 || i === records.length - 1) renderBatchTable();
-  }
-
-  renderBatchTable();
-  renderIcons();
-  ui.batchProgress.textContent = `${records.length} / ${records.length} done`;
-  batchRunning = false;
-  ui.batchRunButton.disabled = false;
-  appendLog(`Batch QC analyzed ${records.length} reference strands from ${compactPath(batchFile)}.`);
 }
 
 function buildBatchCsv() {
@@ -2391,6 +2386,12 @@ ui.batchSelectButton.addEventListener("click", selectBatchFile);
 ui.batchRunButton.addEventListener("click", runBatchAnalysis);
 ui.batchSaveButton.addEventListener("click", saveBatchCsv);
 ui.batchResult.addEventListener("click", (event) => {
+  const pageButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-batch-page]");
+  if (pageButton?.dataset.batchPage) {
+    batchPage = Number(pageButton.dataset.batchPage) || 0;
+    renderBatchTable();
+    return;
+  }
   const tr = (event.target as HTMLElement).closest<HTMLElement>(".batch-row.clickable");
   if (tr?.dataset.batchIndex) showBatchDetail(Number(tr.dataset.batchIndex));
 });

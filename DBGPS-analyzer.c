@@ -599,6 +599,32 @@ static int parse_positive_int_token(char **arg, int fallback, int *out)
     return 1;
 }
 
+static int parse_unbounded_nonnegative_int_token(char **arg, int fallback, int *out)
+{
+    char *s;
+    char *end;
+    long value;
+
+    if (arg == 0 || *arg == 0 || **arg == '\0') {
+        *out = fallback;
+        return 1;
+    }
+
+    s = trim_left(*arg);
+    if (*s == '\0') {
+        *arg = s;
+        *out = fallback;
+        return 1;
+    }
+
+    value = strtol(s, &end, 10);
+    if (end == s || value < 0 || value > INT_MAX) return 0;
+
+    *out = (int)value;
+    *arg = trim_left(end);
+    return 1;
+}
+
 static char *normalize_dna_arg(const char *arg, int *out_len, char *err, size_t err_len)
 {
     int n = 0;
@@ -940,6 +966,8 @@ static void emit_help_json(void)
     fprintf(stdout, ",");
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
+    json_string(stdout, "batch <primerFront> <primerBack> <reference.fasta>");
+    fprintf(stdout, ",");
     json_string(stdout, "exit");
     fprintf(stdout, "]}\n");
     fflush(stdout);
@@ -1243,7 +1271,7 @@ static double coverage_ratio(int a, int b)
     return 0.0;
 }
 
-static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int len)
+static void write_sequence_result_json(FILE *fp, kc_c4x_t *h, int k, const char *seq, int len)
 {
     uint64_t mask = (1ULL<<k*2) - 1;
     int km_num = len - k + 1;
@@ -1253,11 +1281,6 @@ static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int le
     long long cov_sum = 0;
     double max_ratio = 0.0;
     char *canonical;
-
-    if (km_num <= 0) {
-        emit_error_json("sequence length must be at least k");
-        return;
-    }
 
     MALLOC(kms, km_num);
     MALLOC(coverages, km_num);
@@ -1278,31 +1301,127 @@ static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int le
         if (ratio > max_ratio) max_ratio = ratio;
     }
 
-    fprintf(stdout, "{\"type\":\"sequence\",\"length\":%d,\"k\":%d,\"kmerCount\":%d,", len, k, km_num);
-    fprintf(stdout, "\"observed\":%d,\"missing\":%d,\"complete\":%s,", observed, missing, missing == 0 ? "true" : "false");
-    fprintf(stdout, "\"minCoverage\":%d,\"maxCoverage\":%d,\"meanCoverage\":%.3f,\"maxAdjacentRatio\":%.3f,", min_cov, max_cov, km_num > 0 ? (double)cov_sum / km_num : 0.0, max_ratio);
-    fprintf(stdout, "\"coverages\":[");
+    fprintf(fp, "{\"type\":\"sequence\",\"length\":%d,\"k\":%d,\"kmerCount\":%d,", len, k, km_num);
+    fprintf(fp, "\"observed\":%d,\"missing\":%d,\"complete\":%s,", observed, missing, missing == 0 ? "true" : "false");
+    fprintf(fp, "\"minCoverage\":%d,\"maxCoverage\":%d,\"meanCoverage\":%.3f,\"maxAdjacentRatio\":%.3f,", min_cov, max_cov, km_num > 0 ? (double)cov_sum / km_num : 0.0, max_ratio);
+    fprintf(fp, "\"coverages\":[");
     for (int i = 0; i < km_num; ++i) {
-        if (i) fputc(',', stdout);
+        if (i) fputc(',', fp);
         uint64_acgt(kms[i], (unsigned char*)canonical, (unsigned char)k);
         canonical[k] = '\0';
-        fprintf(stdout, "{\"position\":%d,\"kmer\":", i);
-        json_string_n(stdout, seq + i, k);
-        fprintf(stdout, ",\"canonical\":");
-        json_string(stdout, canonical);
-        fprintf(stdout, ",\"coverage\":%d}", coverages[i]);
+        fprintf(fp, "{\"position\":%d,\"kmer\":", i);
+        json_string_n(fp, seq + i, k);
+        fprintf(fp, ",\"canonical\":");
+        json_string(fp, canonical);
+        fprintf(fp, ",\"coverage\":%d}", coverages[i]);
     }
-    fprintf(stdout, "],\"ratios\":[");
+    fprintf(fp, "],\"ratios\":[");
     for (int i = 0; i + 1 < km_num; ++i) {
-        if (i) fputc(',', stdout);
-        fprintf(stdout, "{\"position\":%d,\"ratio\":%.3f}", i, coverage_ratio(coverages[i], coverages[i + 1]));
+        if (i) fputc(',', fp);
+        fprintf(fp, "{\"position\":%d,\"ratio\":%.3f}", i, coverage_ratio(coverages[i], coverages[i + 1]));
     }
-    fprintf(stdout, "]}\n");
-    fflush(stdout);
+    fprintf(fp, "]}");
 
     free(canonical);
     free(coverages);
     free(kms);
+}
+
+static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int len)
+{
+    if (len < k) {
+        emit_error_json("sequence length must be at least k");
+        return;
+    }
+
+    write_sequence_result_json(stdout, h, k, seq, len);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
+static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int primer_front, int primer_back)
+{
+    gzFile fp;
+    kseq_t *ks;
+    int index = 0;
+    int ok = 0;
+    int skipped = 0;
+    int errors = 0;
+    int first = 1;
+
+    if (file == 0 || *file == '\0') {
+        emit_error_json("missing batch reference file");
+        return;
+    }
+
+    fp = gzopen(file, "r");
+    if (fp == 0) {
+        fprintf(stdout, "{\"type\":\"batch\",\"file\":");
+        json_string(stdout, file);
+        fprintf(stdout, ",\"k\":%d,\"primerFront\":%d,\"primerBack\":%d,\"rows\":[", k, primer_front, primer_back);
+        fprintf(stdout, "{\"index\":0,\"name\":\"\",\"rawLength\":0,\"analyzedLength\":0,\"status\":\"error\",\"message\":\"could not open reference file\"}],");
+        fprintf(stdout, "\"total\":0,\"ok\":0,\"skipped\":0,\"errors\":1}\n");
+        fflush(stdout);
+        return;
+    }
+
+    ks = kseq_init(fp);
+    fprintf(stdout, "{\"type\":\"batch\",\"file\":");
+    json_string(stdout, file);
+    fprintf(stdout, ",\"k\":%d,\"primerFront\":%d,\"primerBack\":%d,\"rows\":[", k, primer_front, primer_back);
+
+    while (kseq_read(ks) >= 0) {
+        int raw_len = (int)ks->seq.l;
+        int start = primer_front < raw_len ? primer_front : raw_len;
+        int end = raw_len - primer_back;
+        int analyzed_len;
+        int invalid_offset = -1;
+        const char *name = ks->name.s && ks->name.l > 0 ? ks->name.s : "";
+        if (end < start) end = start;
+        analyzed_len = end - start;
+        for (int i = 0; i < analyzed_len; ++i) {
+            unsigned char b = (unsigned char)ks->seq.s[start + i];
+            if (seq_nt4_table[b] >= 4) {
+                invalid_offset = i;
+                break;
+            }
+        }
+
+        if (!first) fputc(',', stdout);
+        first = 0;
+
+        fprintf(stdout, "{\"index\":%d,\"name\":", index);
+        if (*name) json_string(stdout, name);
+        else {
+            char generated[32];
+            snprintf(generated, sizeof(generated), "seq%d", index + 1);
+            json_string(stdout, generated);
+        }
+        fprintf(stdout, ",\"rawLength\":%d,\"analyzedLength\":%d,", raw_len, analyzed_len);
+
+        if (analyzed_len < k) {
+            fprintf(stdout, "\"status\":\"skipped\",\"message\":\"shorter than k=%d after primer trim\"}", k);
+            ++skipped;
+        } else if (invalid_offset >= 0) {
+            char message[96];
+            snprintf(message, sizeof(message), "invalid DNA base '%c' at analyzed position %d", ks->seq.s[start + invalid_offset], invalid_offset + 1);
+            fprintf(stdout, "\"status\":\"error\",\"message\":");
+            json_string(stdout, message);
+            fputc('}', stdout);
+            ++errors;
+        } else {
+            fprintf(stdout, "\"status\":\"ok\",\"result\":");
+            write_sequence_result_json(stdout, h, k, ks->seq.s + start, analyzed_len);
+            fputc('}', stdout);
+            ++ok;
+        }
+        ++index;
+    }
+
+    fprintf(stdout, "],\"total\":%d,\"ok\":%d,\"skipped\":%d,\"errors\":%d}\n", index, ok, skipped, errors);
+    fflush(stdout);
+    kseq_destroy(ks);
+    gzclose(fp);
 }
 
 static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len)
@@ -1412,6 +1531,19 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 emit_error_json("downstream depth must be a non-negative integer");
             } else {
                 emit_index_query_json(h, k, index_token, base_length, upstream_depth, downstream_depth);
+            }
+        } else if (command_equals(cmd, "batch")) {
+            int primer_front = 0;
+            int primer_back = 0;
+            char *file_arg = arg;
+            if (!parse_unbounded_nonnegative_int_token(&file_arg, 0, &primer_front)) {
+                emit_error_json("batch front primer length must be a non-negative integer");
+            } else if (!parse_unbounded_nonnegative_int_token(&file_arg, 0, &primer_back)) {
+                emit_error_json("batch back primer length must be a non-negative integer");
+            } else {
+                file_arg = trim_left(file_arg);
+                trim_right(file_arg);
+                emit_batch_query_json(h, k, file_arg, primer_front, primer_back);
             }
         } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));

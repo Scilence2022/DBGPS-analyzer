@@ -122,6 +122,24 @@ def test_interactive_validation():
     check(len(errors) >= 1, "invalid base produces an error")
 
 
+def test_interactive_batch_qc():
+    print("test_interactive_batch_qc")
+    commands = f"batch 0 0 {data('strands.fa')}\nexit\n"
+    proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")], stdin=commands)
+    check(proc.returncode == 0, f"batch kernel exit code 0 (got {proc.returncode})")
+    objs = jsonl(proc.stdout)
+    batches = [o for o in objs if o.get("type") == "batch"]
+    check(len(batches) == 1, f"one batch result emitted (got {len(batches)})")
+    batch = batches[0]
+    check(batch["total"] == len(batch["rows"]) and batch["total"] > 0, "batch reports row count")
+    first = batch["rows"][0]
+    check(first["status"] == "ok", f"first batch row ok (got {first.get('status')})")
+    result = first["result"]
+    check(result["type"] == "sequence", "batch row embeds sequence result")
+    check(result["kmerCount"] == first["analyzedLength"] - 4 + 1, "batch kmer count matches row length")
+    check(result["observed"] > 0, "batch row has observed k-mers")
+
+
 # --------------------------------------------------------------------------- #
 # Batch Sm/Kd/Kn metrics
 # --------------------------------------------------------------------------- #
@@ -257,6 +275,7 @@ def main():
     tests = [
         test_interactive_kernel,
         test_interactive_validation,
+        test_interactive_batch_qc,
         test_batch_metrics,
         test_batch_output_files,
         test_grid_golden,
