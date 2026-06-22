@@ -1685,8 +1685,11 @@ elements.chatInput.addEventListener("keydown", (event) => {
 });
 
 window.dbgps.onAnalyzerEvent((event) => {
-  const payload = event as { kind?: string; line?: string; code?: number };
+  const payload = event as { kind?: string; line?: string; code?: number | null; done?: number; total?: number };
   if (payload.kind === "stderr" && payload.line) appendLog(payload.line);
+  if (payload.kind === "batchProgress" && batchRunning) {
+    ui.batchProgress.textContent = `${formatNumber(payload.done || 0)} / ${formatNumber(payload.total || 0)} done`;
+  }
   if (payload.kind === "exit") {
     setAnalyzerReady(false);
     elements.startButton.disabled = false;

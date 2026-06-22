@@ -75,7 +75,7 @@ def last_data_row(stdout):
 # --------------------------------------------------------------------------- #
 def test_interactive_kernel():
     print("test_interactive_kernel")
-    commands = "summary\nsequence ACGTACGTACGT\nkmer ACGT 1 1\nbogus\nexit\n"
+    commands = "summary\nsequence ACGTACGTACGT\nsequenceSummary ACGTACGTACGT\nkmer ACGT 1 1\nbogus\nexit\n"
     proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")], stdin=commands)
     check(proc.returncode == 0, f"kernel exit code 0 (got {proc.returncode})")
     objs = jsonl(proc.stdout)
@@ -97,6 +97,10 @@ def test_interactive_kernel():
     check(seq["observed"] == 9 and seq["missing"] == 0, "sequence fully observed")
     check(seq["complete"] is True, "sequence complete==true")
     check(seq["minCoverage"] == 4 and seq["maxCoverage"] == 8, "sequence min/max coverage 4/8")
+
+    seq_summary = by_type["sequenceSummary"][0]
+    check(seq_summary["kmerCount"] == seq["kmerCount"], "sequenceSummary kmerCount matches sequence")
+    check("coverages" not in seq_summary and "ratios" not in seq_summary, "sequenceSummary omits per-position arrays")
 
     kmer = by_type["kmer"][0]
     check(kmer["coverage"] == 6, f"kmer ACGT coverage==6 (got {kmer.get('coverage')})")

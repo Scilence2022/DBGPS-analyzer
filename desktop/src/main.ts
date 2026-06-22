@@ -68,6 +68,30 @@ type PendingQuery = {
   timer: NodeJS.Timeout;
 };
 
+type SequenceSummaryResult = {
+  type: "sequenceSummary";
+  length: number;
+  k: number;
+  kmerCount: number;
+  observed: number;
+  missing: number;
+  complete: boolean;
+  minCoverage: number;
+  maxCoverage: number;
+  meanCoverage: number;
+  maxAdjacentRatio: number;
+};
+
+type InteractiveBatchRow = {
+  index: number;
+  name: string;
+  rawLength: number;
+  analyzedLength: number;
+  status: "ok" | "skipped" | "error";
+  message?: string;
+  summary?: SequenceSummaryResult;
+};
+
 let mainWindow: BrowserWindow | null = null;
 let session: AnalyzerSession | null = null;
 
@@ -79,6 +103,7 @@ const analyzerPath = path.join(repoRoot, "DBGPS-analyzer");
 const linksPath = path.join(repoRoot, "DBGPS-links");
 const filterPath = path.join(repoRoot, "DBGPS-seq-filter");
 const MAX_ANALYZER_STDOUT_LINE_BYTES = 64 * 1024 * 1024;
+const INTERACTIVE_BATCH_CHUNK_SIZE = 250;
 
 const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
   openai: {
@@ -433,6 +458,7 @@ class AnalyzerSession {
   private stdout: BoundedLineReader | null = null;
   private pending: PendingQuery[] = [];
   private ready = false;
+  private k = 31;
 
   async start(config: AnalyzerConfig) {
     await ensureAnalyzerBuilt(false);
@@ -444,6 +470,7 @@ class AnalyzerSession {
     if (files.length === 0) throw new Error("Select at least one NGS FASTA/FASTQ file.");
 
     const args = ["-i", "-k", String(k), "-t", String(threads), "-L", String(readLength), ...files];
+    this.k = k;
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -475,10 +502,11 @@ class AnalyzerSession {
           return;
         }
 
-        const typed = payload as { type?: string; message?: string };
+        const typed = payload as { type?: string; message?: string; k?: number };
         if (!this.ready) {
           if (typed.type === "ready") {
             this.ready = true;
+            if (Number.isFinite(Number(typed.k))) this.k = Number(typed.k);
             clearTimeout(timeout);
             if (!settled) {
               settled = true;
@@ -582,6 +610,10 @@ class AnalyzerSession {
     }
     this.stdout?.close();
     this.ready = false;
+  }
+
+  getK() {
+    return this.k;
   }
 
   private rejectPending(error: Error) {
@@ -1088,6 +1120,28 @@ type AnalyzerBatchRequest = {
 };
 type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
 type BatchSequenceRequest = { file: string; index: number; primerFront?: number; primerBack?: number };
+
+function sliceAnalyzedSequence(record: SeqRecord, primerFront: number, primerBack: number) {
+  const raw = record.seq.replace(/\s+/g, "").toUpperCase();
+  const end = primerBack > 0 ? Math.max(primerFront, raw.length - primerBack) : raw.length;
+  const seq = raw.slice(primerFront, end);
+  return { raw, seq, analyzedLength: Math.max(0, end - primerFront) };
+}
+
+function invalidDnaBase(seq: string) {
+  const match = /[^ACGT]/.exec(seq);
+  return match ? { base: match[0], position: match.index + 1 } : null;
+}
+
+function isSequenceSummary(payload: unknown): payload is SequenceSummaryResult {
+  return Boolean(
+    payload &&
+    typeof payload === "object" &&
+    (payload as { type?: string }).type === "sequenceSummary" &&
+    Number.isFinite(Number((payload as { kmerCount?: unknown }).kmerCount))
+  );
+}
+
 async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
@@ -1119,13 +1173,64 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
   if (!req || !req.file) throw new Error("Select a reference file for Batch QC.");
   const primerFront = toPositiveInt(req.primerFront, 0, 0, 100000);
   const primerBack = toPositiveInt(req.primerBack, 0, 0, 100000);
-  const norm = normalizeToFasta(req.file);
-  try {
-    const result = await session.query(`batch ${primerFront} ${primerBack} ${norm.path}`, 600000);
-    return { ...(result as object), file: req.file };
-  } finally {
-    norm.cleanup();
+  const k = session.getK();
+  const rows: InteractiveBatchRow[] = [];
+  const queries: Array<{ row: InteractiveBatchRow; seq: string }> = [];
+
+  const records = parseSequenceRecords(req.file);
+  records.forEach((record, index) => {
+    const { raw, seq, analyzedLength } = sliceAnalyzedSequence(record, primerFront, primerBack);
+    const row: InteractiveBatchRow = {
+      index,
+      name: record.name || `seq${index + 1}`,
+      rawLength: raw.length,
+      analyzedLength,
+      status: "ok"
+    };
+    rows.push(row);
+
+    if (analyzedLength < k) {
+      row.status = "skipped";
+      row.message = `shorter than k=${k} after primer trim`;
+      return;
+    }
+
+    const invalid = invalidDnaBase(seq);
+    if (invalid) {
+      row.status = "error";
+      row.message = `invalid DNA base '${invalid.base}' at analyzed position ${invalid.position}`;
+      return;
+    }
+
+    queries.push({ row, seq });
+  });
+
+  let completed = rows.length - queries.length;
+  sendWindow("analyzer:event", { kind: "batchProgress", done: completed, total: rows.length });
+
+  for (let i = 0; i < queries.length; i += INTERACTIVE_BATCH_CHUNK_SIZE) {
+    const chunk = queries.slice(i, i + INTERACTIVE_BATCH_CHUNK_SIZE);
+    const payloads = await session.queryBatch(chunk.map((item) => `sequenceSummary ${item.seq}`));
+
+    payloads.forEach((payload, offset) => {
+      const row = chunk[offset].row;
+      if (isSequenceSummary(payload)) {
+        row.summary = payload;
+      } else {
+        row.status = "error";
+        row.message = payload && typeof payload === "object" && "message" in payload
+          ? String((payload as { message?: unknown }).message || "sequence summary failed")
+          : "sequence summary failed";
+      }
+      completed += 1;
+    });
+    sendWindow("analyzer:event", { kind: "batchProgress", done: completed, total: rows.length });
   }
+
+  const ok = rows.filter((row) => row.status === "ok" && row.summary).length;
+  const skipped = rows.filter((row) => row.status === "skipped").length;
+  const errors = rows.length - ok - skipped;
+  return { type: "batch", file: req.file, k, primerFront, primerBack, total: rows.length, ok, skipped, errors, rows };
 }
 
 async function loadBatchSequence(req: BatchSequenceRequest) {

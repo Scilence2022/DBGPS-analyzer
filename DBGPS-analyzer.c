@@ -966,6 +966,8 @@ static void emit_help_json(void)
     fprintf(stdout, ",");
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
+    json_string(stdout, "sequenceSummary <ACGT...>");
+    fprintf(stdout, ",");
     json_string(stdout, "batch <primerFront> <primerBack> <reference.fasta>");
     fprintf(stdout, ",");
     json_string(stdout, "exit");
@@ -1376,6 +1378,18 @@ static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int le
     fflush(stdout);
 }
 
+static void emit_sequence_summary_query_json(kc_c4x_t *h, int k, const char *seq, int len)
+{
+    if (len < k) {
+        emit_error_json("sequence length must be at least k");
+        return;
+    }
+
+    write_sequence_summary_json(stdout, h, k, seq, len);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
 static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int primer_front, int primer_back)
 {
     gzFile fp;
@@ -1595,6 +1609,17 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 trim_right(file_arg);
                 emit_batch_query_json(h, k, file_arg, primer_front, primer_back);
             }
+        } else if (command_equals(cmd, "sequenceSummary") || command_equals(cmd, "seqSummary") || command_equals(cmd, "summarySequence")) {
+            seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
+            if (seq == 0) {
+                emit_error_json(err);
+            } else if (seq_len < k) {
+                snprintf(err, sizeof(err), "sequence length is %d, but k is %d", seq_len, k);
+                emit_error_json(err);
+            } else {
+                emit_sequence_summary_query_json(h, k, seq, seq_len);
+            }
+            free(seq);
         } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
             if (seq == 0) {
