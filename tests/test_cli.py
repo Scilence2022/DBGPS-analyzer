@@ -134,10 +134,11 @@ def test_interactive_batch_qc():
     check(batch["total"] == len(batch["rows"]) and batch["total"] > 0, "batch reports row count")
     first = batch["rows"][0]
     check(first["status"] == "ok", f"first batch row ok (got {first.get('status')})")
-    result = first["result"]
-    check(result["type"] == "sequence", "batch row embeds sequence result")
-    check(result["kmerCount"] == first["analyzedLength"] - 4 + 1, "batch kmer count matches row length")
-    check(result["observed"] > 0, "batch row has observed k-mers")
+    summary = first["summary"]
+    check(summary["type"] == "sequenceSummary", "batch row embeds compact sequence summary")
+    check(summary["kmerCount"] == first["analyzedLength"] - 4 + 1, "batch kmer count matches row length")
+    check(summary["observed"] > 0, "batch row has observed k-mers")
+    check("coverages" not in summary and "ratios" not in summary, "batch summary omits per-position arrays")
 
 
 # --------------------------------------------------------------------------- #

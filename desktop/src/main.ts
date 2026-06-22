@@ -994,6 +994,7 @@ type AnalyzerBatchRequest = {
   minCov?: number; maxCov?: number; ratio?: number; maxR?: number; step?: number; skip?: number;
 };
 type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
+type BatchSequenceRequest = { file: string; index: number; primerFront?: number; primerBack?: number };
 async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
@@ -1032,6 +1033,25 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
   } finally {
     norm.cleanup();
   }
+}
+
+async function loadBatchSequence(req: BatchSequenceRequest) {
+  if (!req || !req.file) throw new Error("No sequence file provided.");
+  const index = toPositiveInt(req.index, 0, 0, Number.MAX_SAFE_INTEGER);
+  const primerFront = toPositiveInt(req.primerFront, 0, 0, 100000);
+  const primerBack = toPositiveInt(req.primerBack, 0, 0, 100000);
+  const records = parseSequenceRecords(req.file);
+  const record = records[index];
+  if (!record) throw new Error(`No sequence found at row ${index + 1}.`);
+  const raw = record.seq.replace(/\s+/g, "");
+  const end = primerBack > 0 ? Math.max(primerFront, raw.length - primerBack) : raw.length;
+  return {
+    index,
+    name: record.name || `seq${index + 1}`,
+    rawLength: raw.length,
+    analyzedLength: Math.max(0, end - primerFront),
+    seq: raw.slice(primerFront, end)
+  };
 }
 
 type ReportRequest = {
@@ -1170,6 +1190,7 @@ app.whenReady().then(() => {
   ipcMain.handle("filter:run", async (_event, request: FilterRequest) => runFilter(request));
   ipcMain.handle("analyzer:runBatch", async (_event, request: AnalyzerBatchRequest) => runAnalyzerBatch(request));
   ipcMain.handle("analyzer:runInteractiveBatch", async (_event, request: InteractiveBatchRequest) => runInteractiveBatch(request));
+  ipcMain.handle("sequence:batchRecord", async (_event, request: BatchSequenceRequest) => loadBatchSequence(request));
   ipcMain.handle("report:run", async (_event, request: ReportRequest) => runReport(request));
 
   ipcMain.handle("file:save", async (_event, request: { defaultName?: string; content?: string }) => {

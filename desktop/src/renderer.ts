@@ -1787,6 +1787,8 @@ let batchRows: BatchRow[] = [];
 let batchRunning = false;
 let batchDetailIndex: number | null = null;
 let batchPage = 0;
+let batchPrimerFrontUsed = DEFAULT_PRIMER;
+let batchPrimerBackUsed = DEFAULT_PRIMER;
 const BATCH_PAGE_SIZE = 100;
 
 function errMessage(error: unknown) {
@@ -2322,8 +2324,25 @@ async function showBatchDetail(index: number) {
   batchDetailIndex = index;
 
   if (!row.detail) {
-    ui.batchDetail.innerHTML = `<div class="error-card">Coverage profile is not available for this row.</div>`;
-    return;
+    ui.batchDetail.innerHTML = `<div class="tool-loading">Loading coverage profile…</div>`;
+    try {
+      const record = await window.dbgps.loadBatchSequence({
+        file: batchFile,
+        index,
+        primerFront: batchPrimerFrontUsed,
+        primerBack: batchPrimerBackUsed
+      });
+      const result = (await window.dbgps.queryAnalyzer(`sequence ${record.seq}`)) as AnalyzerResult;
+      if (batchDetailIndex !== index) return;
+      if (result.type !== "sequence") {
+        ui.batchDetail.innerHTML = `<div class="error-card">${escapeHtml(result.type === "error" ? result.message : `unexpected ${result.type} response`)}</div>`;
+        return;
+      }
+      row.detail = result;
+    } catch (error) {
+      if (batchDetailIndex === index) ui.batchDetail.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+      return;
+    }
   }
 
   renderBatchDetail(row, row.detail);
@@ -2346,6 +2365,8 @@ async function runBatchAnalysis() {
   const back = normalizePrimer(ui.batchPrimerBack.value, appSettings.primerBack);
   appSettings.primerFront = front;
   appSettings.primerBack = back;
+  batchPrimerFrontUsed = front;
+  batchPrimerBackUsed = back;
   saveSettings();
 
   batchRunning = true;
@@ -2366,9 +2387,7 @@ async function runBatchAnalysis() {
       primerBack: back
     });
     batchRows = (result.rows || []).map((row) => {
-      const detail = row.result && (row.result as SequenceResult).type === "sequence"
-        ? row.result as SequenceResult
-        : undefined;
+      const summary = row.summary;
       return {
         index: row.index,
         name: row.name || `seq${row.index + 1}`,
@@ -2376,16 +2395,16 @@ async function runBatchAnalysis() {
         analyzedLength: row.analyzedLength,
         status: row.status,
         message: row.message,
-        summary: detail ? {
-          observed: detail.observed,
-          kmerCount: detail.kmerCount,
-          complete: detail.complete,
-          minCoverage: detail.minCoverage,
-          meanCoverage: detail.meanCoverage,
-          maxCoverage: detail.maxCoverage,
-          maxAdjacentRatio: detail.maxAdjacentRatio
+        summary: summary ? {
+          observed: summary.observed,
+          kmerCount: summary.kmerCount,
+          complete: summary.complete,
+          minCoverage: summary.minCoverage,
+          meanCoverage: summary.meanCoverage,
+          maxCoverage: summary.maxCoverage,
+          maxAdjacentRatio: summary.maxAdjacentRatio
         } : undefined,
-        detail
+        detail: undefined
       };
     });
     renderBatchTable();

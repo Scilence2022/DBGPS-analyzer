@@ -70,6 +70,20 @@ type AnalyzerBatchResult = {
   k: number; rows: SmKdKnRow[];
 };
 type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
+type BatchSequenceRequest = { file: string; index: number; primerFront?: number; primerBack?: number };
+type SequenceSummary = {
+  type: "sequenceSummary";
+  length: number;
+  k: number;
+  kmerCount: number;
+  observed: number;
+  missing: number;
+  complete: boolean;
+  minCoverage: number;
+  maxCoverage: number;
+  meanCoverage: number;
+  maxAdjacentRatio: number;
+};
 type InteractiveBatchRow = {
   index: number;
   name: string;
@@ -77,7 +91,7 @@ type InteractiveBatchRow = {
   analyzedLength: number;
   status: "ok" | "skipped" | "error";
   message?: string;
-  result?: unknown;
+  summary?: SequenceSummary;
 };
 type InteractiveBatchResult = {
   type: "batch";
@@ -122,6 +136,8 @@ const api = {
     ipcRenderer.invoke("secrets:save", map) as Promise<{ ok: boolean; encrypted: boolean }>,
   parseSequences: (file: string) =>
     ipcRenderer.invoke("sequence:parse", file) as Promise<Array<{ name: string; seq: string }>>,
+  loadBatchSequence: (request: BatchSequenceRequest) =>
+    ipcRenderer.invoke("sequence:batchRecord", request) as Promise<{ index: number; name: string; rawLength: number; analyzedLength: number; seq: string }>,
   runLinks: (request: LinksRequest) => ipcRenderer.invoke("links:run", request) as Promise<LinksResult>,
   runFilter: (request: FilterRequest) => ipcRenderer.invoke("filter:run", request) as Promise<FilterResult>,
   runAnalyzerBatch: (request: AnalyzerBatchRequest) =>
