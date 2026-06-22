@@ -122,6 +122,35 @@ static void test_count_set(void)
     c4x_destroy(h);
 }
 
+static void test_kmer_cov_absent_expanded_bucket(void)
+{
+    printf("test_kmer_cov_absent_expanded_bucket\n");
+    kc_c4x_t *h = c4x_init(KC_BITS);
+    uint64_t mask = (1ULL << (8 * 2)) - 1; /* k = 8 */
+    uint64_t absent = encode_canonical("GGGGGGGG");
+    uint64_t absent_hash = hash64(absent, mask);
+    int shard = absent_hash & ((1 << h->p) - 1);
+    uint64_t absent_stored_key = absent_hash >> h->p << KC_BITS;
+    kc_c4_t *bucket = h->h[shard];
+    int absent_flag = 0;
+
+    for (uint64_t i = 1; kh_end(bucket) < 32 || kh_size(bucket) < 13; ++i) {
+        uint64_t stored_key = i << KC_BITS;
+        khint_t pos;
+        if ((stored_key >> KC_BITS) == (absent_stored_key >> KC_BITS)) continue;
+        pos = kc_c4_put(bucket, stored_key, &absent_flag);
+        if (absent_flag > 0) kh_key(bucket, pos) |= 1;
+    }
+
+    CHECK(kh_end(bucket) >= 32, "test bucket expands past one used-flag word");
+    CHECK(kc_c4_get(bucket, absent_stored_key) == kh_end(bucket),
+          "absent k-mer lookup returns kh_end sentinel");
+    CHECK(kmer_cov(absent, mask, h) == 0,
+          "missing k-mer in expanded bucket has coverage 0");
+
+    c4x_destroy(h);
+}
+
 int main(void)
 {
     test_hash_roundtrip();
@@ -130,6 +159,7 @@ int main(void)
     test_insert_kms();
     test_seq_kmers();
     test_count_set();
+    test_kmer_cov_absent_expanded_bucket();
 
     printf("\n");
     if (failures) {
