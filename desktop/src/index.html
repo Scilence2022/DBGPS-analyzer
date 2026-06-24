@@ -347,15 +347,26 @@
               <i data-lucide="message-square"></i>
               <h2>AI ChatBox</h2>
             </div>
-            <span id="aiProvider" class="provider-pill">local</span>
+            <div class="chat-header-actions">
+              <span id="aiProvider" class="provider-pill">local</span>
+              <button id="clearChatButton" class="icon-only ghost" title="Clear conversation">
+                <i data-lucide="eraser"></i>
+              </button>
+            </div>
           </div>
+          <div id="chatContextChip" class="chat-context-chip" hidden></div>
           <div id="chatMessages" class="chat-messages">
-            <div class="message assistant">Run a query and I will diagnose the current coverage and De Bruijn Graph adjacency evidence.</div>
+            <div class="message assistant">
+              <div class="message-body">Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</div>
+            </div>
           </div>
           <div class="chat-input-row">
-            <textarea id="chatInput" spellcheck="false" placeholder="Ask about the current result"></textarea>
-            <button id="sendChatButton" class="icon-only" title="Send">
+            <textarea id="chatInput" spellcheck="false" placeholder="Ask about the current result… (Enter to send, Shift+Enter for newline)"></textarea>
+            <button id="sendChatButton" class="icon-only" title="Send (Enter)">
               <i data-lucide="send"></i>
+            </button>
+            <button id="stopChatButton" class="icon-only stop" title="Stop generating" hidden>
+              <i data-lucide="square"></i>
             </button>
           </div>
         </aside>

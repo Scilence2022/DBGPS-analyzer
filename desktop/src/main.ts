@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type OpenDialogOptions, type IpcMainInvokeEvent } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
@@ -43,7 +43,8 @@ type ProviderRefreshRequest = {
   baseUrl?: string;
 };
 
-type AiRequest = {
+type AiChatRequest = {
+  id?: string;
   messages?: Array<{ role: string; content: string }>;
   context?: unknown;
   settings?: AiSettings;
@@ -670,7 +671,19 @@ function envValue(name?: string) {
   return name ? process.env[name] || "" : "";
 }
 
-function normalizeAiSettings(settings?: AiSettings) {
+type NormalizedAiSettings = {
+  provider: ProviderId;
+  apiStyle: ProviderApiStyle;
+  apiKeyRequired: boolean;
+  label: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  temperature: number;
+  maxTokens: number;
+};
+
+function normalizeAiSettings(settings?: AiSettings): NormalizedAiSettings {
   const definition = providerDefinition(settings?.provider);
   const temperature = Number.isFinite(Number(settings?.temperature)) ? Number(settings?.temperature) : 0.2;
   const maxTokens = Number.isFinite(Number(settings?.maxTokens)) ? Math.max(128, Math.trunc(Number(settings?.maxTokens))) : 900;
@@ -692,84 +705,243 @@ function requireSetting(value: string, message: string) {
   return value;
 }
 
-function diagnosticSystemPrompt() {
-  return "You are a DNA information storage sequencing quality diagnostician. Explain DBGPS k-mer graph evidence concisely in English. Focus on coverage, dropout, path completeness, adjacent coverage ratio, and graph branching. Be explicit about which evidence supports each diagnosis.";
-}
+// --------------------------------------------------------------------------- #
+// AI chat: a streaming, multi-turn diagnostics assistant. The renderer sends the
+// full conversation plus a compact snapshot of the active view's result; the main
+// process streams the model's reply back token-by-token over the "ai:chunk" IPC
+// channel and resolves the invoke with the complete text once the stream ends.
+// --------------------------------------------------------------------------- #
+const CONTEXT_CHAR_LIMIT = 12000;
 
-function diagnosticUserPrompt(request: AiRequest) {
-  const messages = request.messages || [];
-  const latestQuestion = messages.filter((message) => message.role === "user").at(-1)?.content || "";
-  const history = messages
-    .slice(-8)
-    .map((message) => `${message.role}: ${message.content}`)
-    .join("\n");
-
+function assistantSystemPrompt() {
   return [
-    `Analyzer context JSON:\n${JSON.stringify(request.context).slice(0, 12000)}`,
-    history ? `Recent conversation:\n${history}` : "",
-    `Current user question:\n${latestQuestion || "Diagnose the current analyzer result."}`
-  ].filter(Boolean).join("\n\n");
+    "You are the AI assistant built into DBGPS Analyzer, a desktop quality-control toolkit for DNA data storage.",
+    "You help researchers interpret De Bruijn graph sequencing diagnostics: k-mer coverage, dropout (Kd), strand recovery (Sm), k-mer noise (Kn), adjacency/coverage ratios, graph branching, cross-links, and entanglement filtering.",
+    "When the user message includes an \"Analyzer context\" block, ground your answer in that evidence and name the specific numbers that support each conclusion. When no context is relevant, just answer the question directly and helpfully.",
+    "Be concise and reply in Markdown: short paragraphs, bullet lists, and compact tables where they help."
+  ].join(" ");
 }
 
-async function postJson(url: string, headers: Record<string, string>, body: unknown, timeoutMs = 60000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
+// Serialize the active view's result snapshot into a compact, size-bounded block
+// that is prepended to the latest user turn (so it travels with the question
+// rather than being re-sent on every turn as standalone history).
+function contextBlock(context: unknown): string {
+  if (context == null) return "";
+  let json: string;
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
+    json = JSON.stringify(context);
+  } catch {
+    return "";
+  }
+  if (!json || json === "null" || json === "{}") return "";
+  const body = json.length > CONTEXT_CHAR_LIMIT ? `${json.slice(0, CONTEXT_CHAR_LIMIT)}\n…(truncated)` : json;
+  return `Analyzer context (JSON):\n${body}`;
+}
 
-    const text = await response.text();
-    let payload: any = {};
-    if (text) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = { text };
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
+// Normalize the renderer's history into a clean alternating transcript that every
+// provider accepts: non-empty turns only, leading assistant turns dropped, and a
+// guaranteed final user turn. The analyzer context is folded into that last user
+// turn so the model always sees the evidence alongside the question being asked.
+function conversationTurns(request: AiChatRequest): ChatTurn[] {
+  const turns: ChatTurn[] = [];
+  for (const message of request.messages || []) {
+    const role = message?.role === "assistant" ? "assistant" : "user";
+    const content = typeof message?.content === "string" ? message.content.trim() : "";
+    if (!content) continue;
+    // Merge consecutive same-role turns (e.g. a question whose reply errored and
+    // was not recorded) so strict providers always see a clean alternation.
+    const previous = turns[turns.length - 1];
+    if (previous && previous.role === role) previous.content += `\n\n${content}`;
+    else turns.push({ role, content });
+  }
+  while (turns.length && turns[0].role === "assistant") turns.shift();
+  if (turns.length === 0 || turns[turns.length - 1].role !== "user") {
+    turns.push({ role: "user", content: "Diagnose the current analyzer result." });
+  }
+  const block = contextBlock(request.context);
+  if (block) {
+    const last = turns[turns.length - 1];
+    last.content = `${block}\n\n${last.content}`;
+  }
+  return turns;
+}
+
+// Split a fetch streaming body into newline-delimited lines without buffering the
+// whole response. Works on the WHATWG ReadableStream that Electron's fetch returns.
+async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        yield buffer.slice(0, nl).replace(/\r$/, "");
+        buffer = buffer.slice(nl + 1);
       }
     }
-
-    if (!response.ok) {
-      const detail = payload?.error?.message || payload?.message || payload?.text || response.statusText;
-      throw new Error(`Provider request failed (${response.status}): ${String(detail).slice(0, 600)}`);
-    }
-
-    return payload;
+    buffer += decoder.decode();
+    if (buffer) for (const line of buffer.split("\n")) yield line.replace(/\r$/, "");
   } finally {
-    clearTimeout(timer);
+    try { reader.releaseLock(); } catch { /* ignore */ }
   }
 }
 
-function extractResponsesText(payload: any) {
-  if (typeof payload?.output_text === "string") return payload.output_text;
-  const chunks: string[] = [];
-  for (const item of payload?.output || []) {
-    for (const content of item.content || []) {
-      if (typeof content.text === "string") chunks.push(content.text);
+async function openStream(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
+  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    let payload: any = {};
+    if (text) {
+      try { payload = JSON.parse(text); } catch { payload = { text }; }
+    }
+    const detail = payload?.error?.message || payload?.message || payload?.text || response.statusText;
+    throw new Error(`Provider request failed (${response.status}): ${String(detail).slice(0, 600)}`);
+  }
+  return response;
+}
+
+// Yield each parsed `data:` JSON object from a Server-Sent-Events stream, stopping
+// at the OpenAI-style "[DONE]" sentinel and ignoring comment/keep-alive lines.
+async function* sseData(response: Response): AsyncGenerator<any> {
+  for await (const line of streamLines(response.body as ReadableStream<Uint8Array>)) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data) continue;
+    if (data === "[DONE]") return;
+    try {
+      yield JSON.parse(data);
+    } catch {
+      /* keep-alive or partial frame: skip */
     }
   }
-  return chunks.join("\n").trim();
 }
 
-function extractChatCompletionText(payload: any) {
-  return String(payload?.choices?.[0]?.message?.content || "").trim();
+type DeltaSink = (text: string) => void;
+
+// OpenAI o-series (o1/o3/o4…) and gpt-5 reasoning models reject a custom
+// `temperature` (only the default is allowed); omit it for them so the request
+// isn't rejected with HTTP 400. The id may be provider-prefixed (e.g. the
+// OpenRouter "openai/o4-mini" form), so test the last path segment.
+function isReasoningModel(model: string): boolean {
+  const id = (model.split("/").pop() || "").toLowerCase();
+  return /^o\d/.test(id) || id.startsWith("gpt-5");
 }
 
-function extractAnthropicText(payload: any) {
-  const chunks: string[] = [];
-  for (const item of payload?.content || []) {
-    if (item?.type === "text" && typeof item.text === "string") chunks.push(item.text);
+async function streamOpenAiCompatible(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+  const body: Record<string, unknown> = {
+    model: settings.model,
+    messages: [{ role: "system", content: system }, ...turns],
+    max_tokens: settings.maxTokens,
+    stream: true
+  };
+  if (!isReasoningModel(settings.model)) body.temperature = settings.temperature;
+  const response = await openStream(`${settings.baseUrl}/chat/completions`, headers, body, signal);
+  let text = "";
+  for await (const json of sseData(response)) {
+    if (json?.error) throw new Error(String(json.error?.message || json.error).slice(0, 600));
+    const delta = json?.choices?.[0]?.delta?.content;
+    if (typeof delta === "string" && delta) { text += delta; sink(delta); }
   }
-  return chunks.join("\n").trim();
+  return text;
 }
 
-function extractGoogleText(payload: any) {
-  const parts = payload?.candidates?.[0]?.content?.parts || [];
-  return parts.map((part: any) => typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
+async function streamAnthropic(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
+  const response = await openStream(`${settings.baseUrl}/messages`, {
+    "Content-Type": "application/json",
+    "x-api-key": settings.apiKey,
+    "anthropic-version": "2023-06-01"
+  }, {
+    model: settings.model,
+    system,
+    messages: turns,
+    temperature: settings.temperature,
+    max_tokens: settings.maxTokens,
+    stream: true
+  }, signal);
+  let text = "";
+  for await (const json of sseData(response)) {
+    if (json?.type === "error") throw new Error(String(json?.error?.message || "Anthropic stream error").slice(0, 600));
+    if (json?.type === "content_block_delta" && typeof json?.delta?.text === "string" && json.delta.text) {
+      text += json.delta.text;
+      sink(json.delta.text);
+    }
+  }
+  return text;
+}
+
+async function streamGoogle(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
+  const contents = turns.map((turn) => ({
+    role: turn.role === "assistant" ? "model" : "user",
+    parts: [{ text: turn.content }]
+  }));
+  const url = `${settings.baseUrl}/models/${encodeURIComponent(settings.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(settings.apiKey)}`;
+  const response = await openStream(url, { "Content-Type": "application/json" }, {
+    systemInstruction: { parts: [{ text: system }] },
+    contents,
+    generationConfig: { temperature: settings.temperature, maxOutputTokens: settings.maxTokens }
+  }, signal);
+  let text = "";
+  for await (const json of sseData(response)) {
+    if (json?.error) throw new Error(String(json.error?.message || json.error).slice(0, 600));
+    for (const part of json?.candidates?.[0]?.content?.parts || []) {
+      if (typeof part?.text === "string" && part.text) { text += part.text; sink(part.text); }
+    }
+  }
+  return text;
+}
+
+async function streamOpenAiResponses(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
+  const body: Record<string, unknown> = {
+    model: settings.model,
+    instructions: system,
+    input: turns.map((turn) => ({
+      role: turn.role,
+      content: [{ type: turn.role === "assistant" ? "output_text" : "input_text", text: turn.content }]
+    })),
+    max_output_tokens: settings.maxTokens,
+    stream: true
+  };
+  if (!isReasoningModel(settings.model)) body.temperature = settings.temperature;
+  const response = await openStream(`${settings.baseUrl}/responses`, {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${settings.apiKey}`
+  }, body, signal);
+  let text = "";
+  for await (const json of sseData(response)) {
+    const type = json?.type;
+    if (type === "response.output_text.delta" && typeof json?.delta === "string" && json.delta) {
+      text += json.delta;
+      sink(json.delta);
+    } else if (type === "error" || type === "response.error") {
+      throw new Error(String(json?.error?.message || json?.message || "OpenAI stream error").slice(0, 600));
+    } else if (type === "response.failed") {
+      throw new Error(String(json?.response?.error?.message || "OpenAI response failed").slice(0, 600));
+    }
+  }
+  return text;
+}
+
+function streamChat(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
+  switch (settings.apiStyle) {
+    case "openai-responses":
+      return streamOpenAiResponses(settings, system, turns, sink, signal);
+    case "anthropic-messages":
+      return streamAnthropic(settings, system, turns, sink, signal);
+    case "google-gemini":
+      return streamGoogle(settings, system, turns, sink, signal);
+    default:
+      requireSetting(settings.baseUrl, "Base URL is required for OpenAI-compatible providers.");
+      return streamOpenAiCompatible(settings, system, turns, sink, signal);
+  }
 }
 
 function uniqueModels(models: string[]) {
@@ -850,81 +1022,49 @@ async function refreshProviderModels(request: ProviderRefreshRequest) {
   return { provider: definition.id, source: "remote", models: parseOpenAiCompatibleModels(payload) };
 }
 
-async function aiDiagnose(request: AiRequest) {
+// In-flight chat streams, keyed by the renderer-supplied stream id so a matching
+// "ai:cancel" can abort the underlying fetch mid-stream.
+const activeAiStreams = new Map<string, AbortController>();
+
+async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
   const settings = normalizeAiSettings(request.settings);
-
-  requireSetting(settings.model, "Select or enter a model before sending an AI diagnosis request.");
+  requireSetting(settings.model, "Select or enter a model before chatting with the AI assistant.");
   if (settings.apiKeyRequired) {
-    requireSetting(settings.apiKey, `${settings.label} API key is required before sending an AI diagnosis request.`);
-  }
-  const system = diagnosticSystemPrompt();
-  const user = diagnosticUserPrompt(request);
-
-  if (settings.apiStyle === "openai-responses") {
-    const payload = await postJson(`${settings.baseUrl}/responses`, {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${settings.apiKey}`
-    }, {
-      model: settings.model,
-      instructions: system,
-      input: user,
-      temperature: settings.temperature,
-      max_output_tokens: settings.maxTokens
-    });
-    const content = extractResponsesText(payload);
-    if (!content) throw new Error("OpenAI returned an empty response.");
-    return { provider: "openai", model: settings.model, content };
+    requireSetting(settings.apiKey, `${settings.label} API key is required. Add one in Settings → Providers.`);
   }
 
-  if (settings.apiStyle === "google-gemini") {
-    const payload = await postJson(`${settings.baseUrl}/models/${encodeURIComponent(settings.model)}:generateContent?key=${encodeURIComponent(settings.apiKey)}`, {
-      "Content-Type": "application/json"
-    }, {
-      systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: "user", parts: [{ text: user }] }],
-      generationConfig: {
-        temperature: settings.temperature,
-        maxOutputTokens: settings.maxTokens
-      }
-    });
-    const content = extractGoogleText(payload);
-    if (!content) throw new Error("Google returned an empty response.");
-    return { provider: settings.provider, model: settings.model, content };
+  const id = String(request?.id || "");
+  if (!id) throw new Error("Missing chat stream id.");
+
+  const system = assistantSystemPrompt();
+  const turns = conversationTurns(request);
+
+  const controller = new AbortController();
+  activeAiStreams.set(id, controller);
+  const sink: DeltaSink = (delta) => {
+    if (delta && !event.sender.isDestroyed()) event.sender.send("ai:chunk", { id, delta });
+  };
+
+  try {
+    const content = await streamChat(settings, system, turns, sink, controller.signal);
+    if (!content.trim()) throw new Error(`${settings.label} returned an empty response.`);
+    return { id, provider: settings.provider, model: settings.model, content, canceled: false };
+  } catch (error) {
+    // A user-initiated cancel surfaces as an AbortError; treat it as a clean stop.
+    // The renderer keeps whatever partial text it already streamed in via "ai:chunk".
+    if (controller.signal.aborted) {
+      return { id, provider: settings.provider, model: settings.model, content: "", canceled: true };
+    }
+    throw error instanceof Error ? error : new Error(String(error));
+  } finally {
+    activeAiStreams.delete(id);
   }
+}
 
-  if (settings.apiStyle === "anthropic-messages") {
-    const payload = await postJson(`${settings.baseUrl}/messages`, {
-      "Content-Type": "application/json",
-      "x-api-key": settings.apiKey,
-      "anthropic-version": "2023-06-01"
-    }, {
-      model: settings.model,
-      system,
-      messages: [{ role: "user", content: user }],
-      temperature: settings.temperature,
-      max_tokens: settings.maxTokens
-    });
-    const content = extractAnthropicText(payload);
-    if (!content) throw new Error("Anthropic returned an empty response.");
-    return { provider: "anthropic", model: settings.model, content };
-  }
-
-  requireSetting(settings.baseUrl, "Base URL is required for OpenAI-compatible providers.");
-  const compatibleHeaders: Record<string, string> = { "Content-Type": "application/json" };
-  if (settings.apiKey) compatibleHeaders.Authorization = `Bearer ${settings.apiKey}`;
-
-  const payload = await postJson(`${settings.baseUrl}/chat/completions`, compatibleHeaders, {
-    model: settings.model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user }
-    ],
-    temperature: settings.temperature,
-    max_tokens: settings.maxTokens
-  });
-  const content = extractChatCompletionText(payload);
-  if (!content) throw new Error(`${settings.label} returned an empty response.`);
-  return { provider: settings.provider, model: settings.model, content };
+function cancelAiChat(id: string) {
+  const controller = activeAiStreams.get(String(id));
+  if (controller) controller.abort();
+  return { ok: Boolean(controller) };
 }
 
 // --------------------------------------------------------------------------- #
@@ -1411,7 +1551,8 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
-  ipcMain.handle("ai:diagnose", async (_event, request) => aiDiagnose(request));
+  ipcMain.handle("ai:chat", async (event, request: AiChatRequest) => aiChat(event, request));
+  ipcMain.handle("ai:cancel", async (_event, id: string) => cancelAiChat(id));
   ipcMain.handle("ai:refreshModels", async (_event, request) => refreshProviderModels(request));
 
   ipcMain.handle("secrets:load", async () => loadSecrets());

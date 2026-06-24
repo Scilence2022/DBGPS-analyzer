@@ -44,11 +44,22 @@ type ProviderRefreshRequest = {
   baseUrl?: string;
 };
 
-type AiRequest = {
+type AiChatRequest = {
+  id: string;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   context: unknown;
   settings: AiSettings;
 };
+
+type AiChatResult = {
+  id: string;
+  provider: string;
+  model: string;
+  content: string;
+  canceled: boolean;
+};
+
+type AiChatChunk = { id: string; delta: string };
 
 type LinksRequest = { file: string; k?: number; m?: number; primerLen?: number };
 type LinksResult = {
@@ -138,7 +149,13 @@ const api = {
   queryAnalyzerBatch: (commands: string[]) =>
     ipcRenderer.invoke("analyzer:queryBatch", commands) as Promise<unknown[]>,
   stopAnalyzer: () => ipcRenderer.invoke("analyzer:stop") as Promise<{ ok: boolean }>,
-  aiDiagnose: (request: AiRequest) => ipcRenderer.invoke("ai:diagnose", request) as Promise<{ content: string; provider: string; model: string }>,
+  aiChat: (request: AiChatRequest) => ipcRenderer.invoke("ai:chat", request) as Promise<AiChatResult>,
+  cancelAiChat: (id: string) => ipcRenderer.invoke("ai:cancel", id) as Promise<{ ok: boolean }>,
+  onAiChatChunk: (callback: (chunk: AiChatChunk) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, chunk: AiChatChunk) => callback(chunk);
+    ipcRenderer.on("ai:chunk", listener);
+    return () => ipcRenderer.removeListener("ai:chunk", listener);
+  },
   refreshProviderModels: (request: ProviderRefreshRequest) =>
     ipcRenderer.invoke("ai:refreshModels", request) as Promise<{ models: string[]; provider: string; source: string }>,
   loadSecrets: () => ipcRenderer.invoke("secrets:load") as Promise<Record<string, string>>,

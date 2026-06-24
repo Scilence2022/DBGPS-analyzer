@@ -355,6 +355,9 @@ const elements = {
   chatMessages: $("chatMessages"),
   chatInput: $("chatInput") as HTMLTextAreaElement,
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
+  stopChatButton: $("stopChatButton") as HTMLButtonElement,
+  clearChatButton: $("clearChatButton") as HTMLButtonElement,
+  chatContextChip: $("chatContextChip"),
   aiProvider: $("aiProvider"),
   settingsPanel: $("settingsPanel"),
   saveSettingsButton: $("saveSettingsButton") as HTMLButtonElement,
@@ -1391,6 +1394,7 @@ function renderSequenceResult(data: SequenceResult) {
 
 function renderResult(result: AnalyzerResult) {
   latestResult = result;
+  updateChatContextChip();
   if (result.type === "error") {
     elements.resultView.className = "result-view empty-state error-text";
     elements.resultView.textContent = result.message;
@@ -1440,6 +1444,7 @@ async function addSequencingFiles() {
     renderFileList();
     renderSummary(summary);
     latestResult = summary;
+    updateChatContextChip();
     appendLog(`Added ${formatNumber(newFiles.length)} NGS file${newFiles.length === 1 ? "" : "s"} to the running kernel.`);
     setStatus("Kernel running", "running");
   } catch (error) {
@@ -1494,6 +1499,7 @@ async function startAnalyzer() {
     }
     renderSummary(ready);
     latestResult = ready;
+    updateChatContextChip();
     setAnalyzerReady(true);
     setStatus("Kernel running", "running");
   } catch (error) {
@@ -1567,36 +1573,299 @@ async function runQuery() {
   }
 }
 
-function appendChat(role: "user" | "assistant", content: string) {
-  chatMessages.push({ role, content });
-  const div = document.createElement("div");
-  div.className = `message ${role}`;
-  div.textContent = content;
-  elements.chatMessages.appendChild(div);
+// ===========================================================================
+// AI ChatBox: a streaming, context-aware diagnostics assistant.
+//
+// The conversation is a real multi-turn transcript (`chatMessages`). On send we
+// stream the reply token-by-token over the "ai:chunk" IPC channel, render it as
+// Markdown live, and resolve with the full text when the stream ends. A compact
+// snapshot of the active view's result travels with the question as context.
+// ===========================================================================
+const CHAT_GREETING =
+  "Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the " +
+  "coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.";
+
+// --- Minimal, XSS-safe Markdown renderer (input is escaped before any tag is
+// inserted, so only the tags we emit can ever reach the DOM). ---
+function formatInline(escaped: string): string {
+  return escaped
+    .replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, text, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`);
+}
+
+function renderMarkdownToHtml(src: string): string {
+  const lines = src.replace(/\r\n?/g, "\n").split("\n");
+  const out: string[] = [];
+  let listType: "ul" | "ol" | null = null;
+  const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null; } };
+  const inline = (text: string) => formatInline(escapeHtml(text));
+
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+
+    if (/^```/.test(line)) {
+      closeList();
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
+      i++;
+      out.push(`<pre class="md-code"><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      closeList();
+      out.push(`<h${heading[1].length} class="md-h">${inline(heading[2].trim())}</h${heading[1].length}>`);
+      i++;
+      continue;
+    }
+
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    if (ul) {
+      if (listType !== "ul") { closeList(); out.push('<ul class="md-list">'); listType = "ul"; }
+      out.push(`<li>${inline(ul[1])}</li>`);
+      i++;
+      continue;
+    }
+
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ol) {
+      if (listType !== "ol") { closeList(); out.push('<ol class="md-list">'); listType = "ol"; }
+      out.push(`<li>${inline(ol[1])}</li>`);
+      i++;
+      continue;
+    }
+
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) {
+      closeList();
+      out.push(`<blockquote class="md-quote">${inline(quote[1])}</blockquote>`);
+      i++;
+      continue;
+    }
+
+    if (!line.trim()) { closeList(); i++; continue; }
+
+    closeList();
+    const para: string[] = [line];
+    i++;
+    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|\s*[-*+]\s|\s*\d+[.)]\s|```|>)/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    out.push(`<p>${inline(para.join("\n")).replace(/\n/g, "<br/>")}</p>`);
+  }
+
+  closeList();
+  return out.join("\n");
+}
+
+// --- Per-view context: the chat always reflects the active view's latest result. ---
+let latestLinks: LinksResult | null = null;
+let latestFilter: FilterResult | null = null;
+let latestBatch: InteractiveBatchResult | null = null;
+
+function currentViewName(): ViewName {
+  return (document.body.dataset.view as ViewName) || "interactive";
+}
+
+// Drop the heavy per-k-mer arrays/trees so the context payload stays small.
+function compactInteractive(result: AnalyzerResult): unknown {
+  if (result.type === "sequence") {
+    const { coverages, ratios, ...rest } = result;
+    void coverages;
+    void ratios;
+    return rest;
+  }
+  if (result.type === "kmer") {
+    const { upstreamTree, downstreamTree, ...rest } = result;
+    void upstreamTree;
+    void downstreamTree;
+    return rest;
+  }
+  return result;
+}
+
+function compactBatch(batch: InteractiveBatchResult): unknown {
+  return {
+    file: compactPath(batch.file),
+    k: batch.k,
+    primerFront: batch.primerFront,
+    primerBack: batch.primerBack,
+    total: batch.total,
+    ok: batch.ok,
+    skipped: batch.skipped,
+    errors: batch.errors,
+    sampleRows: batch.rows.slice(0, 25).map((row) => ({
+      name: row.name,
+      status: row.status,
+      message: row.message,
+      observed: row.summary?.observed,
+      kmerCount: row.summary?.kmerCount,
+      complete: row.summary?.complete,
+      minCoverage: row.summary?.minCoverage,
+      meanCoverage: row.summary?.meanCoverage,
+      maxAdjacentRatio: row.summary?.maxAdjacentRatio
+    })),
+    rowsTruncated: batch.rows.length > 25
+  };
+}
+
+function buildChatContext(): { label: string; data: unknown } | null {
+  switch (currentViewName()) {
+    case "interactive":
+      return latestResult && latestResult.type !== "error"
+        ? { label: "Interactive result", data: compactInteractive(latestResult) }
+        : null;
+    case "report":
+      return latestReport ? { label: "Diagnostics report", data: latestReport } : null;
+    case "links":
+      return latestLinks
+        ? { label: "Cross-links", data: { file: compactPath(latestLinks.file), k: latestLinks.k, m: latestLinks.m, primerLen: latestLinks.primerLen, crossLinks: latestLinks.crossLinks, command: latestLinks.command } }
+        : null;
+    case "filter":
+      return latestFilter
+        ? { label: "Seq-Filter", data: { file: compactPath(latestFilter.file), k: latestFilter.k, m: latestFilter.m, primerLen: latestFilter.primerLen, passedCount: latestFilter.passedCount, filteredCount: latestFilter.filteredCount, skippedCount: latestFilter.skippedCount, command: latestFilter.command } }
+        : null;
+    case "batch":
+      return latestBatch ? { label: "Batch QC", data: compactBatch(latestBatch) } : null;
+    default:
+      return null;
+  }
+}
+
+function updateChatContextChip() {
+  const context = buildChatContext();
+  if (!elements.chatContextChip) return;
+  if (context) {
+    elements.chatContextChip.textContent = `Context: ${context.label}`;
+    elements.chatContextChip.hidden = false;
+  } else {
+    elements.chatContextChip.hidden = true;
+  }
+}
+
+// --- Streaming chat state + DOM ---
+type ActiveChat = { id: string; bubble: HTMLElement; body: HTMLElement; text: string };
+let activeChat: ActiveChat | null = null;
+let chatStreamCounter = 0;
+let chatRenderScheduled = false;
+
+function createMessageBubble(role: "user" | "assistant"): { bubble: HTMLElement; body: HTMLElement } {
+  const bubble = document.createElement("div");
+  bubble.className = `message ${role}`;
+  const body = document.createElement("div");
+  body.className = "message-body";
+  bubble.appendChild(body);
+  elements.chatMessages.appendChild(bubble);
+  return { bubble, body };
+}
+
+function scrollChatToBottom() {
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
 }
 
+function pushUserMessage(content: string) {
+  chatMessages.push({ role: "user", content });
+  const { body } = createMessageBubble("user");
+  body.textContent = content;
+  scrollChatToBottom();
+}
+
+function setChatBusy(busy: boolean) {
+  elements.sendChatButton.hidden = busy;
+  elements.stopChatButton.hidden = !busy;
+  elements.clearChatButton.disabled = busy;
+}
+
+function scheduleAssistantRender() {
+  if (chatRenderScheduled) return;
+  chatRenderScheduled = true;
+  requestAnimationFrame(() => {
+    chatRenderScheduled = false;
+    if (!activeChat) return;
+    activeChat.body.innerHTML = renderMarkdownToHtml(activeChat.text);
+    scrollChatToBottom();
+  });
+}
+
+function finalizeAssistant(content: string, opts: { persist: boolean; error?: boolean }) {
+  if (!activeChat) return;
+  activeChat.bubble.classList.remove("streaming");
+  if (opts.error) activeChat.bubble.classList.add("error");
+  activeChat.body.innerHTML = renderMarkdownToHtml(content);
+  if (opts.persist && content.trim()) chatMessages.push({ role: "assistant", content });
+  activeChat = null;
+  setChatBusy(false);
+  scrollChatToBottom();
+}
+
 async function sendChat() {
+  if (activeChat) return;
   const question = elements.chatInput.value.trim();
   if (!question) return;
-  appendChat("user", question);
+
+  const settings = currentAiSettings();
+  if (PROVIDER_BY_ID[settings.provider]?.apiKeyRequired && !settings.apiKey) {
+    pushUserMessage(question);
+    elements.chatInput.value = "";
+    const { bubble, body } = createMessageBubble("assistant");
+    bubble.classList.add("error");
+    body.innerHTML = renderMarkdownToHtml(`**${PROVIDER_BY_ID[settings.provider].label}** needs an API key. Open **Settings → Providers** (gear icon) to add one, or switch the active provider to a local endpoint.`);
+    scrollChatToBottom();
+    return;
+  }
+
+  pushUserMessage(question);
   elements.chatInput.value = "";
-  elements.sendChatButton.disabled = true;
+
+  const id = `chat-${++chatStreamCounter}-${Date.now()}`;
+  const { bubble, body } = createMessageBubble("assistant");
+  bubble.classList.add("streaming");
+  body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+  activeChat = { id, bubble, body, text: "" };
+  setChatBusy(true);
+  scrollChatToBottom();
+
   try {
-    const result = await window.dbgps.aiDiagnose({
+    const result = await window.dbgps.aiChat({
+      id,
       messages: chatMessages,
-      context: latestResult,
-      settings: currentAiSettings()
+      context: buildChatContext()?.data ?? null,
+      settings
     });
     elements.aiProvider.textContent = PROVIDER_BY_ID[result.provider as ProviderId]?.label || result.provider;
     elements.aiProvider.title = result.model;
-    appendChat("assistant", result.content);
+    if (result.canceled) {
+      const partial = activeChat?.text ?? "";
+      finalizeAssistant(partial || "_(stopped)_", { persist: Boolean(partial.trim()) });
+    } else {
+      finalizeAssistant(result.content, { persist: true });
+    }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendChat("assistant", `Diagnosis failed: ${message}`);
-  } finally {
-    elements.sendChatButton.disabled = false;
+    finalizeAssistant(`⚠️ ${errMessage(error)}`, { persist: false, error: true });
   }
+}
+
+async function stopChat() {
+  if (!activeChat) return;
+  elements.stopChatButton.disabled = true;
+  try {
+    await window.dbgps.cancelAiChat(activeChat.id);
+  } catch {
+    /* the in-flight request will settle on its own */
+  } finally {
+    elements.stopChatButton.disabled = false;
+  }
+}
+
+function clearChat() {
+  if (activeChat) return;
+  chatMessages.length = 0;
+  elements.chatMessages.innerHTML = `<div class="message assistant"><div class="message-body">${escapeHtml(CHAT_GREETING)}</div></div>`;
 }
 
 document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((button) => {
@@ -1640,6 +1909,17 @@ elements.resultView.addEventListener("click", (event) => {
   }
 });
 elements.sendChatButton.addEventListener("click", sendChat);
+elements.stopChatButton.addEventListener("click", stopChat);
+elements.clearChatButton.addEventListener("click", clearChat);
+
+// Live token stream: append each delta to the in-flight assistant bubble and
+// re-render its Markdown on the next animation frame.
+window.dbgps.onAiChatChunk((chunk) => {
+  if (!activeChat || chunk.id !== activeChat.id) return;
+  if (!activeChat.text) activeChat.bubble.classList.remove("streaming");
+  activeChat.text += chunk.delta;
+  scheduleAssistantRender();
+});
 elements.settingsButton.addEventListener("click", () => openSettings("providers"));
 elements.saveSettingsButton.addEventListener("click", commitSettings);
 elements.closeSettingsButton.addEventListener("click", closeSettings);
@@ -1729,7 +2009,11 @@ elements.queryInput.addEventListener("keydown", (event) => {
 });
 
 elements.chatInput.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") sendChat();
+  // Enter sends; Shift+Enter inserts a newline.
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    sendChat();
+  }
 });
 
 window.dbgps.onAnalyzerEvent((event) => {
@@ -1861,6 +2145,7 @@ function setView(view: ViewName) {
     el.classList.toggle("active", el.id === `view-${view}`);
   });
   ui.viewTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
+  updateChatContextChip();
   renderIcons();
 }
 
@@ -1913,6 +2198,8 @@ async function runLinksTool() {
 }
 
 function renderLinksResult(result: LinksResult) {
+  latestLinks = result;
+  updateChatContextChip();
   const cl = result.crossLinks;
   const primerNote = result.primerLen > 0 ? ` (primers trimmed: ${result.primerLen} bp each end)` : "";
   const note = cl === 0
@@ -1969,6 +2256,8 @@ async function runFilterTool() {
 }
 
 function renderFilterResult(result: FilterResult) {
+  latestFilter = result;
+  updateChatContextChip();
   filterOutput = result.stdout;
   filterSaveOutput = result.saveOutput;
   filterSaveDefaultName = result.saveDefaultName;
@@ -2174,7 +2463,8 @@ async function interpretReport() {
       "reference strands. Write a concise interpretation: overall data quality, the most likely failure modes " +
       "(dropout, noise, entanglement/chimeras), and concrete recommendations (coverage cutoffs, primer removal, " +
       "resynthesis, deeper sequencing).";
-    const result = await window.dbgps.aiDiagnose({
+    const result = await window.dbgps.aiChat({
+      id: `report-${Date.now()}`,
       messages: [{ role: "user", content: instruction }],
       context: latestReport,
       settings: currentAiSettings()
@@ -2368,14 +2658,13 @@ function renderBatchDetail(row: BatchRow, result: SequenceResult) {
   latestResult = result;
   ui.batchDetail.innerHTML =
     `<div class="batch-detail-head">
+      <button type="button" class="batch-back-button" data-batch-collapse title="Back to strand list" aria-label="Back to strand list">
+        <i data-lucide="arrow-left"></i>
+      </button>
       <div class="batch-detail-title">
         <h3>${escapeHtml(row.name)}</h3>
         <span class="muted">${formatNumber(row.analyzedLength)} bp analyzed (of ${formatNumber(row.rawLength)} bp)</span>
       </div>
-      <button type="button" class="batch-detail-collapse" data-batch-collapse title="Hide read details">
-        <i data-lucide="chevron-up"></i>
-        <span>Hide details</span>
-      </button>
     </div>` +
     sequenceResultHtml(result);
   renderIcons();
@@ -2384,6 +2673,7 @@ function renderBatchDetail(row: BatchRow, result: SequenceResult) {
 function collapseBatchDetail() {
   batchDetailIndex = null;
   ui.batchDetail.innerHTML = "";
+  document.getElementById("view-batch")?.classList.remove("detail-open");
   renderBatchTable();
   renderIcons();
 }
@@ -2395,6 +2685,7 @@ async function showBatchDetail(index: number) {
     return;
   }
   batchDetailIndex = index;
+  document.getElementById("view-batch")?.classList.add("detail-open");
   renderBatchTable();
   renderIcons();
 
@@ -2456,6 +2747,7 @@ async function runBatchAnalysis() {
   batchRows = [];
   batchDetailIndex = null;
   batchPage = 0;
+  document.getElementById("view-batch")?.classList.remove("detail-open");
   ui.batchDetail.innerHTML = "";
   ui.batchRunButton.disabled = true;
   ui.batchSaveButton.disabled = true;
@@ -2469,6 +2761,8 @@ async function runBatchAnalysis() {
       primerFront: front,
       primerBack: back
     });
+    latestBatch = result;
+    updateChatContextChip();
     batchRows = (result.rows || []).map((row) => {
       const summary = row.summary;
       return {
