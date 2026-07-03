@@ -1251,10 +1251,10 @@ async function runLinks(req: LinksRequest) {
   await ensureBuilt("DBGPS-links");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const m = toPositiveInt(req.m, 1, 0, 1 << 20);
-  const primerLen = toPositiveInt(req.primerLen, 0, 0, 100000);
-  const norm = normalizeToFasta(req.file, primerLen, primerLen);
+  const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
+  const norm = normalizeToFasta(req.file);
   try {
-    const args = ["-k", String(k), "-m", String(m), norm.path];
+    const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen), norm.path];
     const result = await runTool(linksPath, args);
     const match = result.stdout.match(/Total cross links\s+(\d+)/i);
     const command = result.command.replace(norm.path, req.file);
@@ -1482,7 +1482,7 @@ async function runReport(req: ReportRequest) {
 
   // The three tools are independent processes; run them concurrently.
   const [links, filter, analyzer] = await Promise.all([
-    runLinks({ file: req.referenceFile, k, m: req.linksM ?? 1 }),
+    runLinks({ file: req.referenceFile, k, m: req.linksM ?? 1, primerLen }),
     runFilter({ file: req.referenceFile, k, m: req.filterM ?? 0, primerLen, listFiltered: true }),
     ngsFiles.length
       ? runAnalyzerBatch({ strandsFile: req.referenceFile, ngsFiles, k, threads: req.threads, readLength: req.readLength })
