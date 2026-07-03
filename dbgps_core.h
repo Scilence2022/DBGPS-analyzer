@@ -342,4 +342,47 @@ static inline int seq_kmers(uint64_t *kms, int k, int len, const char *seq)
     return km_num;
 }
 
+/* Like seq_kmers_dedup(), but ignores $primer_len bases at both ends of the
+ * strand so shared primer regions are not mistaken for cross-links/entanglement. */
+static inline int seq_kmers_primer(uint64_t *kms, kmer_set_t *seen, int k, int len, const char *seq, int primer_len)
+{
+    int i, l = 0, km_num = 0;
+    uint64_t x[2], mask = (1ULL << k * 2) - 1, shift = (k - 1) * 2;
+    kmer_set_reserve(seen, len - 2 * primer_len - k + 1);
+    kmer_set_clear(seen);
+    for (i = primer_len, x[0] = x[1] = 0; i < len - primer_len; ++i) {
+        int c = seq_nt4_table[(uint8_t)seq[i]];
+        if (c < 4) { /* not an "N" base */
+            x[0] = (x[0] << 2 | c) & mask;
+            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;
+            if (++l >= k) {
+                uint64_t y = x[0] < x[1] ? x[0] : x[1];
+                if (kmer_set_insert(seen, y)) kms[km_num++] = y;
+            }
+        } else l = 0, x[0] = x[1] = 0;
+    }
+    return km_num;
+}
+
+/* Returns the strand length after trimming $primer_len bases from each end
+ * (clamped to 0). */
+static inline int trimmed_len_for(int seq_len, int primer_len)
+{
+    int trimmed_len = seq_len - primer_len * 2;
+    return trimmed_len > 0 ? trimmed_len : 0;
+}
+
+/* Collect the primer-trimmed, distinct canonical k-mers of $seq (length $len)
+ * into *$kms (which this function allocates); returns the count, or -1 if
+ * fewer than k bases remain after trimming (in which case *$kms is left
+ * unallocated). */
+static inline int collect_primer_kmers(uint64_t **kms, kmer_set_t *seen, int len, const char *seq, int k, int primer_len)
+{
+    int trimmed_len = trimmed_len_for(len, primer_len);
+    *kms = 0;
+    if (trimmed_len < k) return -1;
+    MALLOC(*kms, trimmed_len - k + 1);
+    return seq_kmers_primer(*kms, seen, k, len, seq, primer_len);
+}
+
 #endif /* DBGPS_CORE_H */

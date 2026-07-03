@@ -19,30 +19,6 @@ KSEQ_INIT(gzFile, gzread)
 #define DBGPS_KC_BITS 10
 #include "dbgps_core.h" /* shared k-mer / hash-table core */
 
-/* Like seq_kmers_dedup(), but ignores $primer_len bases at both ends of the
- * strand so shared primer regions are not mistaken for cross-links. Uses the
- * reusable O(n) dedup set $seen instead of the O(n^2) insert_kms scan; output
- * order (first-occurrence) is unchanged. */
-static int seq_kmers_primer(uint64_t *kms, kmer_set_t *seen, int k, int len, const char *seq, int primer_len)
-{
-    int i, l = 0, km_num = 0;
-    uint64_t x[2], mask = (1ULL << k * 2) - 1, shift = (k - 1) * 2;
-    kmer_set_reserve(seen, len - 2 * primer_len - k + 1);
-    kmer_set_clear(seen);
-    for (i = primer_len, x[0] = x[1] = 0; i < len - primer_len; ++i) {
-        int c = seq_nt4_table[(uint8_t)seq[i]];
-        if (c < 4) { /* not an "N" base */
-            x[0] = (x[0] << 2 | c) & mask;
-            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;
-            if (++l >= k) {
-                uint64_t y = x[0] < x[1] ? x[0] : x[1];
-                if (kmer_set_insert(seen, y)) kms[km_num++] = y;
-            }
-        } else l = 0, x[0] = x[1] = 0;
-    }
-    return km_num;
-}
-
 typedef struct {
     int k, max_cov, output, primer_len;
     kseq_t *ks;
@@ -50,28 +26,13 @@ typedef struct {
     kmer_set_t seen; /* reusable per-strand dedup scratch, shared across passes */
 } pldat_t;
 
-static int trimmed_len_for(const kseq_t *ks, int primer_len)
-{
-    int trimmed_len = ks->seq.l - primer_len * 2;
-    return trimmed_len > 0 ? trimmed_len : 0;
-}
-
-static int collect_primer_kmers(uint64_t **kms, kmer_set_t *seen, const kseq_t *ks, int k, int primer_len)
-{
-    int trimmed_len = trimmed_len_for(ks, primer_len);
-    *kms = 0;
-    if (trimmed_len < k) return -1;
-    MALLOC(*kms, trimmed_len - k + 1);
-    return seq_kmers_primer(*kms, seen, k, ks->seq.l, ks->seq.s, primer_len);
-}
-
 static void count_strands(pldat_t *p)
 {
     uint64_t mask = (1ULL << p->k * 2) - 1;
 
     while (kseq_read(p->ks) >= 0) {
         uint64_t *kms;
-        int km_num = collect_primer_kmers(&kms, &p->seen, p->ks, p->k, p->primer_len);
+        int km_num = collect_primer_kmers(&kms, &p->seen, p->ks->seq.l, p->ks->seq.s, p->k, p->primer_len);
         if (km_num < 0) continue;
         for (int j = 0; j < km_num; j++)
             add_kmer(kms[j], mask, p->h);
@@ -88,9 +49,9 @@ static void filter_strands(pldat_t *p)
         total++;
         int km_num, kms_cov, max_links;
         uint64_t *kms;
-        km_num = collect_primer_kmers(&kms, &p->seen, p->ks, p->k, p->primer_len);
+        km_num = collect_primer_kmers(&kms, &p->seen, p->ks->seq.l, p->ks->seq.s, p->k, p->primer_len);
         if (km_num < 0) {
-            int trimmed_len = trimmed_len_for(p->ks, p->primer_len);
+            int trimmed_len = trimmed_len_for(p->ks->seq.l, p->primer_len);
             fprintf(stderr,
                     "Skipping %s: %d bp remain after trimming %d bp from each end; need at least k=%d\n",
                     p->ks->name.s, trimmed_len, p->primer_len, p->k);

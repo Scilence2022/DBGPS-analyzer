@@ -19,24 +19,27 @@ KSEQ_INIT(gzFile, gzread)
 #include "dbgps_core.h" /* shared k-mer / hash-table core */
 
 typedef struct {
-    int k;
+    int k, primer_len;
     kseq_t *ks;
     kc_c4x_t *h;
 } pldat_t;
 
-/* Count every distinct k-mer of every strand into the shared hash set. Because
- * k-mers are deduplicated within a strand (seq_kmers), the stored count of a
- * k-mer equals the number of distinct strands it appears in. */
+/* Count every distinct, primer-trimmed k-mer of every strand into the shared
+ * hash set. Because k-mers are deduplicated within a strand
+ * (seq_kmers_primer), the stored count of a k-mer equals the number of
+ * distinct strands it appears in. */
 static void count_strands(pldat_t *p)
 {
     uint64_t mask = (1ULL << p->k * 2) - 1;
     kmer_set_t seen = {0}; /* reusable per-strand dedup scratch (O(n) vs O(n^2)) */
     while (kseq_read(p->ks) >= 0) {
-        int l = p->ks->seq.l, km_num;
-        if (l < p->k) continue;
         uint64_t *kms;
-        MALLOC(kms, l - p->k + 1);
-        km_num = seq_kmers_dedup(kms, &seen, p->k, l, p->ks->seq.s);
+        int km_num = collect_primer_kmers(&kms, &seen, p->ks->seq.l, p->ks->seq.s, p->k, p->primer_len);
+        if (km_num < 0) {
+            fprintf(stderr, "Skipping %s: fewer than k=%d bases remain after trimming %d bp from each end\n",
+                    p->ks->name.s, p->k, p->primer_len);
+            continue;
+        }
         for (int j = 0; j < km_num; j++)
             add_kmer(kms[j], mask, p->h);
         free(kms);
@@ -44,13 +47,14 @@ static void count_strands(pldat_t *p)
     kmer_set_destroy(&seen);
 }
 
-static kc_c4x_t *count_file(const char *fn, int k, int p)
+static kc_c4x_t *count_file(const char *fn, int k, int p, int primer_len)
 {
     pldat_t pl;
     gzFile fp;
     if ((fp = gzopen(fn, "r")) == 0) return 0;
     pl.ks = kseq_init(fp);
     pl.k = k;
+    pl.primer_len = primer_len;
     pl.h = c4x_init(p);
 
     count_strands(&pl);
@@ -63,12 +67,13 @@ static kc_c4x_t *count_file(const char *fn, int k, int p)
 int main(int argc, char *argv[])
 {
     kc_c4x_t *h;
-    int c, k = 31, p = KC_BITS, max_link_num = 1;
+    int c, k = 31, p = KC_BITS, max_link_num = 1, primer_len = 0;
 
     ketopt_t o = KETOPT_INIT;
-    while ((c = ketopt(&o, argc, argv, 1, "k:m:", 0)) >= 0) {
+    while ((c = ketopt(&o, argc, argv, 1, "k:m:p:", 0)) >= 0) {
         if (c == 'k') k = atoi(o.arg);
         else if (c == 'm') max_link_num = atoi(o.arg);
+        else if (c == 'p') primer_len = atoi(o.arg);
     }
 
     if (argc - o.ind < 1) {
@@ -78,16 +83,21 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  -k INT     k-mer size [%d]\n", k);
         fprintf(stderr, "  -m INT     only count k-mers occurring in more than this many strands [%d]\n", max_link_num);
+        fprintf(stderr, "  -p INT     length of primers to ignore at both ends [%d]\n", primer_len);
         return 1;
     }
     if (k < 1 || k > 31) {
         fprintf(stderr, "Error: -k must be between 1 and 31 (got %d)\n", k);
         return 1;
     }
+    if (primer_len < 0) {
+        fprintf(stderr, "Error: -p must be non-negative (got %d)\n", primer_len);
+        return 1;
+    }
 
-    fprintf(stderr, "Please remove the primers before counting\nCounting strand links ......\n");
+    fprintf(stderr, "Trimming %d bp primers from each end before counting\nCounting strand links ......\n", primer_len);
 
-    h = count_file(argv[o.ind], k, p);
+    h = count_file(argv[o.ind], k, p, primer_len);
     if (h == 0) {
         fprintf(stderr, "Error: could not open %s\n", argv[o.ind]);
         return 1;
