@@ -2476,7 +2476,7 @@ function renderReport(report: ReportResult) {
   const h = report.analyzer?.headline || null;
   const verdicts = reportVerdicts(report);
   const narrative = reportNarrative
-    ? `<div class="narrative-body">${escapeHtml(reportNarrative).replace(/\n/g, "<br/>")}</div>`
+    ? `<div class="narrative-body">${renderMarkdownToHtml(reportNarrative)}</div>`
     : `<p class="muted">Click "Interpret with AI" for a narrative diagnosis using the active provider.</p>`;
   ui.reportResult.innerHTML = `
     <div class="report">
@@ -2595,8 +2595,8 @@ function buildReportHtml(report: ReportResult, narrative: string) {
     ["Cross-links", report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)],
     ...(h ? [["Strand recovery Sm", fmtPct(h.sm)], ["k-mer dropout Kd", fmtPct(h.kd)], ["k-mer noise Kn", Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"]] : [])
   ].map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`).join("");
-  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}";
-  const narrativeHtml = narrative ? `<h2>AI interpretation</h2><div>${escapeHtml(narrative).replace(/\n/g, "<br/>")}</div>` : "";
+  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}.narrative .md-h{font-size:15px;margin:14px 0 6px;border:0;padding:0}.narrative code{background:#f4f6f9;padding:1px 5px;border-radius:5px;font-size:12px}.narrative blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid #dde3ea;color:#667085}";
+  const narrativeHtml = narrative ? `<h2>AI interpretation</h2><div class="narrative">${renderMarkdownToHtml(narrative)}</div>` : "";
   const entangledHtml = report.entangledNames.length
     ? `<h2>Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})</h2><pre>${escapeHtml(report.entangledNames.join("\n"))}</pre>`
     : "";
