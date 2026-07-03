@@ -1749,7 +1749,20 @@ function updateChatContextChip() {
 }
 
 // --- Streaming chat state + DOM ---
-type ActiveChat = { id: string; bubble: HTMLElement; body: HTMLElement; text: string };
+// Incremental render: finalized Markdown blocks are parsed once into `stableEl`
+// (append-only) and only the trailing, still-growing block is re-parsed into
+// `liveEl` each animation frame. Per-frame cost is therefore O(current block)
+// rather than O(whole response), avoiding the O(N^2) full re-parse and the DOM
+// churn (and selection loss) of replacing the entire message every frame.
+type ActiveChat = {
+  id: string;
+  bubble: HTMLElement;
+  body: HTMLElement;
+  text: string;
+  stableEl: HTMLElement | null;
+  liveEl: HTMLElement | null;
+  stableLen: number;
+};
 let activeChat: ActiveChat | null = null;
 let chatStreamCounter = 0;
 let chatRenderScheduled = false;
@@ -1768,6 +1781,33 @@ function scrollChatToBottom() {
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
 }
 
+// Only auto-scroll while streaming when the user is already reading the newest
+// content; otherwise leave their scroll position so they can read back without
+// being yanked to the bottom on every token.
+function isChatPinnedToBottom(threshold = 56): boolean {
+  const el = elements.chatMessages;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+// Offset in `text` up to which every Markdown block is complete: the position
+// just after the last blank line that is not inside a fenced code block. Content
+// before it will not change as more tokens arrive, so it can be rendered once and
+// cached instead of re-parsed every frame.
+function stableMarkdownBoundary(text: string): number {
+  const lines = text.split("\n");
+  let inFence = false;
+  let offset = 0;
+  let boundary = 0;
+  // The last element of `lines` is the still-growing line; never treat it as stable.
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i];
+    if (/^```/.test(line.trimStart())) inFence = !inFence;
+    offset += line.length + 1; // include the trailing "\n"
+    if (!inFence && line.trim() === "") boundary = offset;
+  }
+  return boundary;
+}
+
 function pushUserMessage(content: string) {
   chatMessages.push({ role: "user", content });
   const { body } = createMessageBubble("user");
@@ -1778,6 +1818,9 @@ function pushUserMessage(content: string) {
 function setChatBusy(busy: boolean) {
   elements.sendChatButton.hidden = busy;
   elements.stopChatButton.hidden = !busy;
+  // Fold the Stop button's disabled state into the busy machine so a prior
+  // cancel can never leave it stuck disabled at the start of the next stream.
+  if (busy) elements.stopChatButton.disabled = false;
   elements.clearChatButton.disabled = busy;
 }
 
@@ -1787,20 +1830,39 @@ function scheduleAssistantRender() {
   requestAnimationFrame(() => {
     chatRenderScheduled = false;
     if (!activeChat) return;
-    activeChat.body.innerHTML = renderMarkdownToHtml(activeChat.text);
-    scrollChatToBottom();
+    const pinned = isChatPinnedToBottom();
+    if (!activeChat.stableEl || !activeChat.liveEl) {
+      // First token: swap the typing indicator for the stable/live containers.
+      activeChat.body.textContent = "";
+      activeChat.stableEl = document.createElement("div");
+      activeChat.liveEl = document.createElement("div");
+      activeChat.body.append(activeChat.stableEl, activeChat.liveEl);
+    }
+    const boundary = stableMarkdownBoundary(activeChat.text);
+    if (boundary > activeChat.stableLen) {
+      // Append only the newly-completed blocks; existing stable DOM is untouched.
+      activeChat.stableEl.insertAdjacentHTML(
+        "beforeend",
+        renderMarkdownToHtml(activeChat.text.slice(activeChat.stableLen, boundary))
+      );
+      activeChat.stableLen = boundary;
+    }
+    activeChat.liveEl.innerHTML = renderMarkdownToHtml(activeChat.text.slice(activeChat.stableLen));
+    if (pinned) scrollChatToBottom();
   });
 }
 
 function finalizeAssistant(content: string, opts: { persist: boolean; error?: boolean }) {
   if (!activeChat) return;
+  const pinned = isChatPinnedToBottom();
   activeChat.bubble.classList.remove("streaming");
   if (opts.error) activeChat.bubble.classList.add("error");
+  // Collapse the incremental stable/live containers into one authoritative render.
   activeChat.body.innerHTML = renderMarkdownToHtml(content);
   if (opts.persist && content.trim()) chatMessages.push({ role: "assistant", content });
   activeChat = null;
   setChatBusy(false);
-  scrollChatToBottom();
+  if (pinned) scrollChatToBottom();
 }
 
 async function sendChat() {
@@ -1826,7 +1888,7 @@ async function sendChat() {
   const { bubble, body } = createMessageBubble("assistant");
   bubble.classList.add("streaming");
   body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
-  activeChat = { id, bubble, body, text: "" };
+  activeChat = { id, bubble, body, text: "", stableEl: null, liveEl: null, stableLen: 0 };
   setChatBusy(true);
   scrollChatToBottom();
 
@@ -1846,7 +1908,11 @@ async function sendChat() {
       finalizeAssistant(result.content, { persist: true });
     }
   } catch (error) {
-    finalizeAssistant(`⚠️ ${errMessage(error)}`, { persist: false, error: true });
+    // Keep whatever partial answer already streamed in (like the cancel path)
+    // and append the error, instead of wiping the bubble to a bare error line.
+    const partial = activeChat?.text ?? "";
+    const notice = `⚠️ ${errMessage(error)}`;
+    finalizeAssistant(partial.trim() ? `${partial}\n\n${notice}` : notice, { persist: false, error: true });
   }
 }
 

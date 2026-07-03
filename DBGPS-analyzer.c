@@ -170,44 +170,21 @@ static void *worker_pipeline(void *data, int step, void *in) // callback for kt_
 
 
 
-static kc_c4x_t *count_file(const char *fn, int k, int p, int block_size, int n_thread, int read_len)
+/* Count the k-mers of NGS file $fn into a sharded saturating-count hash set.
+ * When $h is NULL a fresh table with 1<<p shards is allocated (the first file);
+ * otherwise the existing table is extended in place (incremental counting of
+ * additional files). Returns the table, or NULL if $fn cannot be opened. */
+static kc_c4x_t *count_file_into(const char *fn, kc_c4x_t *h, int k, int p,
+                                 int block_size, int n_thread, int read_len)
 {
     pldat_t pl;
     gzFile fp;
     if ((fp = gzopen(fn, "r")) == 0) return 0;
     pl.ks = kseq_init(fp);
     pl.k = k;
-    if(read_len > k){
-        pl.read_len = read_len;
-    }else{
-        pl.read_len = k;
-    }
-
+    pl.read_len = read_len > k ? read_len : k;
     pl.n_thread = n_thread;
-    pl.h = c4x_init(p);
-    pl.block_len = block_size;
-    kt_pipeline(3, worker_pipeline, &pl, 3);
-    kseq_destroy(pl.ks);
-    gzclose(fp);
-    return pl.h;
-}
-
-static kc_c4x_t *count_file2(const char *fn, void *hh, int k, int p, int block_size, int n_thread, int read_len)
-{
-    (void)p;
-    pldat_t pl;
-    gzFile fp;
-    if ((fp = gzopen(fn, "r")) == 0) return 0;
-    pl.ks = kseq_init(fp);
-    pl.k = k;
-    if(read_len > k){
-        pl.read_len = read_len;
-    }else{
-        pl.read_len = k;
-    }
-
-    pl.n_thread = n_thread;
-    pl.h = (kc_c4x_t *)hh;
+    pl.h = h ? h : c4x_init(p);
     pl.block_len = block_size;
     kt_pipeline(3, worker_pipeline, &pl, 3);
     kseq_destroy(pl.ks);
@@ -320,6 +297,10 @@ static void free_eval_cache(eval_cache_t *c) {
     free(c->seq_hist);
 }
 
+// Adjacent-coverage ratio (defined below); forward-declared so build_eval_cache
+// can share the one definition instead of re-inlining the four-branch formula.
+static double coverage_ratio(int a, int b);
+
 // Build the evaluation cache in one pass: per-strand min coverage and max
 // adjacent ratio, the distinct-target-k-mer coverage histogram, the sequencing
 // coverage histogram, and (once) the optional cov_details / cov_ratios /
@@ -344,6 +325,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
     kc_c4x_t *tracker = c4x_init(KC_BITS); // global k-mer dedup, built once
     int *coverages = NULL;
     int coverages_cap = 0;
+    kmer_set_t seen = {0}; // reusable per-strand dedup scratch (O(n) vs O(n^2))
 
     while (kseq_read(ks) >= 0) {
         int idx = cache->strand_num++;
@@ -360,7 +342,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
 
         uint64_t *kms;
         MALLOC(kms, l - k + 1);
-        int km_num = seq_kmers(kms, k, l, ks->seq.s);
+        int km_num = seq_kmers_dedup(kms, &seen, k, l, ks->seq.s);
         if (km_num == 0) { free(kms); continue; }
 
         if (km_num > coverages_cap) { coverages_cap = km_num * 2; REALLOC(coverages, coverages_cap); }
@@ -397,11 +379,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
             int ratio_count = km_num - 1;
             MALLOC(ratios, ratio_count);
             for (int i = 0; i < ratio_count; i++) {
-                int a = coverages[i], b = coverages[i + 1];
-                if (a >= b && b > 0) ratios[i] = (double)a / b;
-                else if (b > a && a > 0) ratios[i] = (double)b / a;
-                else if (a == 0 && b == 0) ratios[i] = 1.0;
-                else ratios[i] = 0.0;
+                ratios[i] = coverage_ratio(coverages[i], coverages[i + 1]);
                 fprintf(cov_ratios_fp, "%.3f ", ratios[i]);
             }
             fprintf(cov_ratios_fp, "\n");
@@ -410,8 +388,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
         }
 
         for (int j = 0; j < km_num; j++) {
-            if (kmer_cov(kms[j], mask, tracker) < 1) { // new distinct target k-mer
-                add_kmer(kms[j], mask, tracker);
+            if (kc_c4x_mark(kms[j], mask, tracker)) { // new distinct target k-mer
                 int c = coverages[j];
                 if (c > KC_MAX) c = KC_MAX;
                 cache->target_hist[c]++;
@@ -422,6 +399,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
     }
 
     free(coverages);
+    kmer_set_destroy(&seen);
     c4x_destroy(tracker);
     kseq_destroy(ks);
     gzclose(fp);
@@ -1508,6 +1486,17 @@ static void write_smkdkn_row(FILE *fp, double ratio, int cov, int total, int pat
     }
 }
 
+// Per-strand (max adjacent ratio, min coverage) pair, sorted by max_ratio so the
+// ratio>1 branch of the grid can be answered by an incremental sweep instead of
+// rescanning every strand for each (ratio, coverage) cell.
+typedef struct { double max_ratio; int min_cov; } strand_rc_t;
+static int cmp_strand_rc(const void *a, const void *b)
+{
+    double ra = ((const strand_rc_t *)a)->max_ratio;
+    double rb = ((const strand_rc_t *)b)->max_ratio;
+    return (ra < rb) ? -1 : (ra > rb) ? 1 : 0;
+}
+
 static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len)
 {
     kc_c4x_t *h;
@@ -1533,7 +1522,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
     }
 
     fprintf(stderr, "Counting NGS file 1 ......\n");
-    h = count_file(argv[first_file], k, p, block_size, n_thread, read_len);
+    h = count_file_into(argv[first_file], NULL, k, p, block_size, n_thread, read_len);
     if (h == 0) {
         fprintf(stderr, "Error: could not open NGS file %s\n", argv[first_file]);
         for (int i = 0; i < file_count; ++i) free(loaded_files[i]);
@@ -1544,7 +1533,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
     for (int i = first_file + 1; i < argc; ++i) {
         kc_c4x_t *next;
         fprintf(stderr, "Counting NGS file %d ......\n", i - first_file + 1);
-        next = count_file2(argv[i], h, k, p, block_size, n_thread, read_len);
+        next = count_file_into(argv[i], h, k, p, block_size, n_thread, read_len);
         if (next == 0) {
             fprintf(stderr, "Error: could not open NGS file %s\n", argv[i]);
             c4x_destroy(h);
@@ -1592,7 +1581,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 emit_error_json("addFile requires an NGS FASTA/FASTQ file path");
             } else {
                 fprintf(stderr, "Counting NGS file %d ......\n", file_count + 1);
-                next = count_file2(file_arg, h, k, p, block_size, n_thread, read_len);
+                next = count_file_into(file_arg, h, k, p, block_size, n_thread, read_len);
                 if (next == 0) {
                     snprintf(err, sizeof(err), "could not open NGS file %s", file_arg);
                     emit_error_json(err);
@@ -1756,6 +1745,19 @@ int main(int argc, char *argv[])
         return run_interactive_kernel(argc, argv, o.ind, k, p, block_size, n_thread, read_len);
     }
 
+    if (k < 1 || k > 31) {
+        fprintf(stderr, "Error: -k must be between 1 and 31 (got %d)\n", k);
+        return 1;
+    }
+    if (n_thread < 1) {
+        fprintf(stderr, "Error: -t must be at least 1 (got %d)\n", n_thread);
+        return 1;
+    }
+    if (step_size <= 0.0) {
+        fprintf(stderr, "Error: -I step size must be positive (got %g)\n", step_size);
+        return 1;
+    }
+
     if(max_cov_cut < min_cov_cut){max_cov_cut = min_cov_cut;}
 
     kc_c4x_t *h;
@@ -1766,12 +1768,22 @@ int main(int argc, char *argv[])
     fprintf(stdout, "Upper bound for ratio range iteration = %.1f\n", max_R);
    
     fprintf(stderr, "Counting NGS file 1 ......\n");
-    h = count_file(argv[o.ind + 1], k, p, block_size, n_thread, read_len);
+    h = count_file_into(argv[o.ind + 1], NULL, k, p, block_size, n_thread, read_len);
+    if (h == 0) {
+        fprintf(stderr, "Error: could not open NGS file %s\n", argv[o.ind + 1]);
+        return 1;
+    }
 
     int f_num = argc - o.ind, c_f_n = 3;
     while(c_f_n <= f_num) {
         fprintf(stderr, "Counting NGS file %d ......\n", c_f_n-1);
-        h = count_file2(argv[o.ind + c_f_n - 1], h, k, p, block_size, n_thread, read_len);  
+        kc_c4x_t *next = count_file_into(argv[o.ind + c_f_n - 1], h, k, p, block_size, n_thread, read_len);
+        if (next == 0) {
+            fprintf(stderr, "Error: could not open NGS file %s\n", argv[o.ind + c_f_n - 1]);
+            c4x_destroy(h);
+            return 1;
+        }
+        h = next;
         c_f_n = c_f_n + 1;
     }
 
@@ -1837,6 +1849,11 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: could not open strand file %s\n", argv[o.ind]);
         return 1;
     }
+    if (cache.strand_num == 0) {
+        fprintf(stderr, "Error: strand file %s contained no sequences\n", argv[o.ind]);
+        free_eval_cache(&cache);
+        return 1;
+    }
 
     // suffix[c] = number of k-mers with coverage >= c (target and sequencing).
     long long *tg_suffix, *seq_suffix;
@@ -1857,17 +1874,68 @@ int main(int argc, char *argv[])
         fprintf(smkdkn_fp, "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn\n");
     }
 
-    // Iterate over coverage ratio values and coverage cutoffs, reading from the
-    // precomputed cache (no disk re-read, no hash re-scan).
+    // Evaluate the ratio x coverage grid from precomputed aggregates instead of
+    // rescanning every strand per cell. A strand is "recovered" in cell
+    // (ratio, cov) iff it has k-mers, its min coverage > cov, and either
+    // ratio <= 1.0 or its max adjacent ratio <= ratio. That predicate factors
+    // into two regimes evaluated in O(1)/O(#covs) per ratio:
+    //   ratio <= 1.0 : count = #{valid strands with min_cov > cov}, from the
+    //                  min-coverage suffix histogram mc_suffix (ratio-independent).
+    //   ratio  > 1.0 : count = #{valid strands with min_cov > cov AND
+    //                  max_ratio <= ratio}; strands are folded in by ascending
+    //                  max_ratio as ratio grows, maintained as a per-cov
+    //                  difference array. Comparisons use the same doubles and the
+    //                  same accumulated ratio sequence as the old triple loop, so
+    //                  the emitted table is byte-for-byte identical.
+    int n_covs = max_cov_cut - min_cov_cut + 1;
+
+    long long *mc_suffix; // mc_suffix[c] = #{valid strands with min_cov >= c}
+    CALLOC(mc_suffix, KC_MAX + 2);
+    strand_rc_t *rc; // valid strands, later sorted by ascending max_ratio
+    MALLOC(rc, cache.strand_num ? cache.strand_num : 1);
+    int nrc = 0;
+    for (int snum = 0; snum < cache.strand_num; snum++) {
+        int mc = cache.min_cov[snum];
+        if (mc == INT_MIN) continue; // strand had no k-mers
+        if (mc > KC_MAX) mc = KC_MAX;
+        mc_suffix[mc]++;
+        rc[nrc].max_ratio = cache.max_ratio[snum];
+        rc[nrc].min_cov = cache.min_cov[snum];
+        nrc++;
+    }
+    for (int c = KC_MAX; c >= 0; --c) mc_suffix[c] += mc_suffix[c + 1];
+    qsort(rc, nrc, sizeof(*rc), cmp_strand_rc);
+
+    long long *cov_diff; // difference array over cov index for the ratio>1 regime
+    CALLOC(cov_diff, n_covs + 1);
+    int rc_ptr = 0; // strands with max_ratio <= current ratio already folded in
+
     for (double ratio = max_cov_ratio; ratio <= max_R + 0.001; ratio += step_size) {
-        for (int cov = min_cov_cut; cov <= max_cov_cut; cov++) {
-            int exist_strand_num = 0;
-            for (int snum = 0; snum < cache.strand_num; snum++) {
-                if (cache.min_cov[snum] == INT_MIN) continue; // strand had no k-mers
-                if (cache.min_cov[snum] > cov &&
-                    (ratio <= 1.0 || cache.max_ratio[snum] <= ratio))
-                    exist_strand_num++;
+        // Fold in every strand whose max adjacent ratio is now within the cap.
+        while (rc_ptr < nrc && rc[rc_ptr].max_ratio <= ratio) {
+            int mc = rc[rc_ptr].min_cov;
+            int hi = mc - 1 < max_cov_cut ? mc - 1 : max_cov_cut; // last cov with min_cov > cov
+            if (hi >= min_cov_cut) {
+                int ci1 = hi - min_cov_cut; // inclusive cov index
+                cov_diff[0] += 1;
+                cov_diff[ci1 + 1] -= 1;
             }
+            rc_ptr++;
+        }
+
+        long long run = 0; // running prefix of cov_diff for the ratio>1 regime
+        for (int cov = min_cov_cut; cov <= max_cov_cut; cov++) {
+            int ci = cov - min_cov_cut;
+            long long recovered;
+            if (ratio <= 1.0) {
+                long idx = (long)cov + 1;
+                if (idx > KC_MAX + 1) idx = KC_MAX + 1;
+                recovered = mc_suffix[idx];
+            } else {
+                run += cov_diff[ci];
+                recovered = run;
+            }
+            int exist_strand_num = (int)recovered;
 
             long long exist_km = suffix_at(tg_suffix, (long)cov + 1);
             long long lose_km = cache.target_total - exist_km;
@@ -1885,6 +1953,9 @@ int main(int argc, char *argv[])
         }
     }
 
+    free(cov_diff);
+    free(rc);
+    free(mc_suffix);
     free(tg_suffix);
     free(seq_suffix);
 

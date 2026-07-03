@@ -660,7 +660,21 @@ class AnalyzerSession {
 }
 
 function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.replace(/\/+$/, "");
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  // Defense-in-depth: provider URLs are fetched from the Node main process, which
+  // the renderer's connect-src CSP does not cover, so reject anything that is not a
+  // well-formed http(s) endpoint before it can be issued as a request. Every
+  // built-in provider default is http/https, so legitimate use never trips this.
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`Unsupported provider base URL: ${baseUrl || "(empty)"}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Provider base URL must use http or https (got "${parsed.protocol}")`);
+  }
+  return trimmed;
 }
 
 function providerDefinition(provider?: ProviderId) {
@@ -712,6 +726,13 @@ function requireSetting(value: string, message: string) {
 // channel and resolves the invoke with the complete text once the stream ends.
 // --------------------------------------------------------------------------- #
 const CONTEXT_CHAR_LIMIT = 12000;
+// Cap the transcript actually sent upstream so a long session cannot grow the
+// request past the provider's context window (the full history stays in the UI).
+const MAX_HISTORY_TURNS = 24;
+// Abort a chat stream if no token arrives for this long, so a wedged/stalled
+// provider connection cannot pin the assistant in a busy state forever. Generous
+// enough that a reasoning model pausing before its first token is not cut off.
+const AI_STREAM_IDLE_MS = 120000;
 
 function assistantSystemPrompt() {
   return [
@@ -756,6 +777,10 @@ function conversationTurns(request: AiChatRequest): ChatTurn[] {
     if (previous && previous.role === role) previous.content += `\n\n${content}`;
     else turns.push({ role, content });
   }
+  // Keep only the most recent turns; the leading-assistant trim and final-user
+  // guarantee below re-run afterwards, and the analyzer context is folded into
+  // the last user turn, so recent turns still carry the evidence.
+  if (turns.length > MAX_HISTORY_TURNS) turns.splice(0, turns.length - MAX_HISTORY_TURNS);
   while (turns.length && turns[0].role === "assistant") turns.shift();
   if (turns.length === 0 || turns[turns.length - 1].role !== "user") {
     turns.push({ role: "user", content: "Diagnose the current analyzer result." });
@@ -1041,15 +1066,32 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
 
   const controller = new AbortController();
   activeAiStreams.set(id, controller);
+
+  // Idle watchdog: abort if no token arrives within AI_STREAM_IDLE_MS. Re-armed on
+  // every delta so a healthy stream never times out; a timeout is distinguished
+  // from a user cancel so it surfaces as an error rather than a silent stop.
+  let timedOut = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { timedOut = true; controller.abort(); }, AI_STREAM_IDLE_MS);
+  };
   const sink: DeltaSink = (delta) => {
-    if (delta && !event.sender.isDestroyed()) event.sender.send("ai:chunk", { id, delta });
+    armIdle();
+    // Stop emitting the moment a cancel/timeout fires, even if the reader still has
+    // buffered frames, so a stopped stream appends nothing further to the bubble.
+    if (delta && !controller.signal.aborted && !event.sender.isDestroyed()) event.sender.send("ai:chunk", { id, delta });
   };
 
+  armIdle(); // also bounds the connect + first-token window
   try {
     const content = await streamChat(settings, system, turns, sink, controller.signal);
     if (!content.trim()) throw new Error(`${settings.label} returned an empty response.`);
     return { id, provider: settings.provider, model: settings.model, content, canceled: false };
   } catch (error) {
+    if (timedOut) {
+      throw new Error(`${settings.label} stream timed out (no response for ${Math.round(AI_STREAM_IDLE_MS / 1000)}s).`);
+    }
     // A user-initiated cancel surfaces as an AbortError; treat it as a clean stop.
     // The renderer keeps whatever partial text it already streamed in via "ai:chunk".
     if (controller.signal.aborted) {
@@ -1057,6 +1099,7 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
     }
     throw error instanceof Error ? error : new Error(String(error));
   } finally {
+    if (idleTimer) clearTimeout(idleTimer);
     activeAiStreams.delete(id);
   }
 }
