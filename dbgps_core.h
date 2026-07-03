@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "khashl.h" /* hash table */
 
@@ -197,7 +198,23 @@ static inline void add_kmer(uint64_t y, uint64_t mask, kc_c4x_t *h)
     if ((kh_key(h->h[pre], k) & KC_MAX) < KC_MAX) ++kh_key(h->h[pre], k);
 }
 
-/* append k-mer key $y to a linear buffer, deduplicating against existing entries */
+/* Membership-mark a canonical k-mer key: return 1 the first time $y is seen and
+ * 0 afterwards, using a single hash-set probe. This is add_kmer+kmer_cov folded
+ * into one put() for the case where a shard set is used purely for dedup and its
+ * saturating count is never read (e.g. the analyzer's distinct-target tracker). */
+static inline int kc_c4x_mark(uint64_t y, uint64_t mask, kc_c4x_t *h)
+{
+    int p = h->p;
+    uint64_t y_hash = hash64(y, mask);
+    int pre = y_hash & ((1 << p) - 1);
+    int absent;
+    kc_c4_put(h->h[pre], y_hash >> p << KC_BITS, &absent);
+    return absent != 0; /* absent==1 on first insert, 0 if already present */
+}
+
+/* append k-mer key $y to a linear buffer, deduplicating against existing entries.
+ * O(km_num) per call, i.e. O(n^2) to deduplicate an n-k-mer strand; kept for the
+ * unit tests and as a fallback. Hot paths use kmer_set_t below instead. */
 static inline int insert_kms(uint64_t *kms, uint64_t y, int km_num)
 {
     int i;
@@ -205,6 +222,78 @@ static inline int insert_kms(uint64_t *kms, uint64_t y, int km_num)
         if (y == kms[i]) return km_num;
     kms[km_num] = y;
     return km_num + 1;
+}
+
+/* SplitMix64 finalizer: spreads a 2-bit-packed k-mer key across all bits so it
+ * probes the open-addressing dedup table below evenly. */
+static inline uint64_t kmer_mix(uint64_t x)
+{
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+/* Reusable open-addressing set for order-preserving within-strand k-mer dedup.
+ * It replaces the O(n^2) insert_kms linear scan with O(n) expected work while
+ * still yielding k-mers in first-occurrence order, so every caller's output is
+ * byte-for-byte unchanged. A per-strand generation stamp clears the table in
+ * O(1) (no memset), and the backing arrays grow monotonically and are reused
+ * across strands, so steady-state work does zero allocation. */
+typedef struct {
+    uint64_t *keys;   /* slot key, live iff stamp[slot] == gen */
+    uint32_t *stamp;  /* generation stamp per slot */
+    uint32_t gen;     /* current generation (0 means "all slots empty") */
+    int cap;          /* number of slots, a power of two (0 = uninitialised) */
+    int mask;         /* cap - 1 */
+} kmer_set_t;
+
+/* Ensure the table can hold $need distinct keys at <= 0.5 load factor. */
+static inline void kmer_set_reserve(kmer_set_t *s, int need)
+{
+    int cap = 8;
+    if (need < 1) need = 1;
+    while (cap < need * 2) cap <<= 1;
+    if (cap <= s->cap) return;
+    free(s->keys);
+    free(s->stamp);
+    MALLOC(s->keys, cap);
+    CALLOC(s->stamp, cap); /* stamps start at 0; gen is bumped to >=1 before use */
+    s->cap = cap;
+    s->mask = cap - 1;
+    s->gen = 0;
+}
+
+/* Begin a fresh strand: invalidate all slots in O(1) via the generation stamp. */
+static inline void kmer_set_clear(kmer_set_t *s)
+{
+    if (++s->gen == 0) { /* 2^32 strands wrapped the counter: hard reset */
+        memset(s->stamp, 0, (size_t)s->cap * sizeof(*s->stamp));
+        s->gen = 1;
+    }
+}
+
+/* Insert $key; return 1 if it is the first occurrence, 0 if already present. */
+static inline int kmer_set_insert(kmer_set_t *s, uint64_t key)
+{
+    int i = (int)(kmer_mix(key) & (uint64_t)s->mask);
+    while (s->stamp[i] == s->gen) {
+        if (s->keys[i] == key) return 0;
+        i = (i + 1) & s->mask;
+    }
+    s->keys[i] = key;
+    s->stamp[i] = s->gen;
+    return 1;
+}
+
+static inline void kmer_set_destroy(kmer_set_t *s)
+{
+    free(s->keys);
+    free(s->stamp);
+    s->keys = NULL;
+    s->stamp = NULL;
+    s->cap = s->mask = 0;
+    s->gen = 0;
 }
 
 /* maximum coverage across a set of canonical k-mer keys */
@@ -218,11 +307,17 @@ static inline int kms_max_cov(uint64_t *kms, int km_num, uint64_t mask, kc_c4x_t
     return max_cov;
 }
 
-/* collect the distinct canonical k-mers of $seq into $kms; returns the count */
-static inline int seq_kmers(uint64_t *kms, int k, int len, const char *seq)
+/* Collect the distinct canonical k-mers of $seq into $kms in first-occurrence
+ * order; returns the count. $seen is a reusable dedup scratch table (see
+ * kmer_set_t) that is reserved/cleared internally; pass the same instance across
+ * strands to amortise its allocation to zero. Output order matches the historic
+ * O(n^2) insert_kms behaviour exactly. */
+static inline int seq_kmers_dedup(uint64_t *kms, kmer_set_t *seen, int k, int len, const char *seq)
 {
     int i, l, km_num = 0;
     uint64_t x[2], mask = (1ULL << k * 2) - 1, shift = (k - 1) * 2;
+    kmer_set_reserve(seen, len - k + 1);
+    kmer_set_clear(seen);
     for (i = l = 0, x[0] = x[1] = 0; i < len; ++i) {
         int c = seq_nt4_table[(uint8_t)seq[i]];
         if (c < 4) { /* not an "N" base */
@@ -230,10 +325,20 @@ static inline int seq_kmers(uint64_t *kms, int k, int len, const char *seq)
             x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift; /* reverse strand */
             if (++l >= k) {
                 uint64_t y = x[0] < x[1] ? x[0] : x[1];
-                km_num = insert_kms(kms, y, km_num);
+                if (kmer_set_insert(seen, y)) kms[km_num++] = y;
             }
         } else l = 0, x[0] = x[1] = 0; /* restart on "N" */
     }
+    return km_num;
+}
+
+/* Convenience wrapper that owns a throwaway dedup table. Prefer
+ * seq_kmers_dedup() with a shared kmer_set_t in loops over many strands. */
+static inline int seq_kmers(uint64_t *kms, int k, int len, const char *seq)
+{
+    kmer_set_t seen = {0};
+    int km_num = seq_kmers_dedup(kms, &seen, k, len, seq);
+    kmer_set_destroy(&seen);
     return km_num;
 }
 

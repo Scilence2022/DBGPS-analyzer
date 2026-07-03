@@ -151,6 +151,89 @@ static void test_kmer_cov_absent_expanded_bucket(void)
     c4x_destroy(h);
 }
 
+static void test_kmer_set(void)
+{
+    printf("test_kmer_set\n");
+    /* Order-preserving O(n) dedup set: first occurrence returns 1, repeats 0,
+     * and the generation stamp makes a cleared table behave as empty again.
+     * Key 0 (all-A k-mer) must be a valid, distinguishable entry. */
+    kmer_set_t s = {0};
+    kmer_set_reserve(&s, 4);
+    kmer_set_clear(&s);
+    CHECK(kmer_set_insert(&s, 0) == 1, "first insert of key 0 is new");
+    CHECK(kmer_set_insert(&s, 0) == 0, "second insert of key 0 is a duplicate");
+    CHECK(kmer_set_insert(&s, 42) == 1, "distinct key is new");
+    CHECK(kmer_set_insert(&s, 42) == 0, "distinct key repeat is a duplicate");
+    kmer_set_clear(&s); /* new strand: all slots invalidated in O(1) */
+    CHECK(kmer_set_insert(&s, 0) == 1, "after clear, key 0 is new again");
+    kmer_set_destroy(&s);
+}
+
+static void test_kc_c4x_mark(void)
+{
+    printf("test_kc_c4x_mark\n");
+    /* Membership mark folds add_kmer+kmer_cov into one probe: 1 the first time a
+     * key is seen, 0 afterwards -- the analyzer's distinct-target dedup. */
+    kc_c4x_t *h = c4x_init(KC_BITS);
+    uint64_t mask = (1ULL << (8 * 2)) - 1; /* k = 8 */
+    uint64_t a = encode_canonical("ACGTACGT");
+    uint64_t b = encode_canonical("GGGGGGGG");
+    CHECK(kc_c4x_mark(a, mask, h) == 1, "first mark of a key is new");
+    CHECK(kc_c4x_mark(a, mask, h) == 0, "second mark of a key is present");
+    CHECK(kc_c4x_mark(b, mask, h) == 1, "distinct key marks as new");
+    c4x_destroy(h);
+}
+
+static void test_seq_kmers_dedup_equiv(void)
+{
+    printf("test_seq_kmers_dedup_equiv\n");
+    /* The fast set-based dedup in seq_kmers must match the historical O(n^2)
+     * insert_kms reference exactly -- same distinct count AND first-occurrence
+     * order -- across many k sizes and pseudo-random strands. This is what keeps
+     * the analyzer's max-adjacent-ratio (which depends on kms order) unchanged. */
+    static const char bases[4] = {'A', 'C', 'G', 'T'};
+    unsigned int st = 0x1234567u;
+    for (int k = 1; k <= 20; k += (k < 8 ? 1 : 3)) {
+        for (int trial = 0; trial < 40; ++trial) {
+            int len = k + (int)(st % 400u);
+            char *seq = (char *)malloc(len + 1);
+            for (int i = 0; i < len; ++i) {
+                st = st * 1103515245u + 12345u;
+                seq[i] = bases[(st >> 16) & 3u];
+            }
+            seq[len] = '\0';
+
+            int cap = len - k + 1 > 0 ? len - k + 1 : 1;
+            uint64_t *ref = (uint64_t *)malloc(sizeof(uint64_t) * cap);
+            int rn = 0;
+            uint64_t x[2] = {0, 0}, mask = (1ULL << (k * 2)) - 1, shift = (k - 1) * 2;
+            int l = 0;
+            for (int i = 0; i < len; ++i) {
+                int c = seq_nt4_table[(unsigned char)seq[i]];
+                if (c < 4) {
+                    x[0] = (x[0] << 2 | c) & mask;
+                    x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;
+                    if (++l >= k) {
+                        uint64_t y = x[0] < x[1] ? x[0] : x[1];
+                        rn = insert_kms(ref, y, rn);
+                    }
+                } else { l = 0; x[0] = x[1] = 0; }
+            }
+
+            uint64_t *got = (uint64_t *)malloc(sizeof(uint64_t) * cap);
+            int gn = seq_kmers(got, k, len, seq);
+            int eq = (gn == rn);
+            for (int i = 0; eq && i < gn; ++i)
+                if (got[i] != ref[i]) eq = 0;
+            CHECK(eq, "seq_kmers matches insert_kms reference (count + order)");
+
+            free(got);
+            free(ref);
+            free(seq);
+        }
+    }
+}
+
 int main(void)
 {
     test_hash_roundtrip();
@@ -158,6 +241,9 @@ int main(void)
     test_canonical_encoding();
     test_insert_kms();
     test_seq_kmers();
+    test_kmer_set();
+    test_kc_c4x_mark();
+    test_seq_kmers_dedup_equiv();
     test_count_set();
     test_kmer_cov_absent_expanded_bucket();
 

@@ -1,4 +1,7 @@
-CFLAGS=-g -Wall -O3
+# -Wextra matches the warning set CI enforces (tests/run.sh adds -Werror), so a
+# plain `make` surfaces the same diagnostics locally. -Werror is left to CI so
+# downstream toolchains are not blocked by benign warnings.
+CFLAGS=-g -Wall -Wextra -O3
 CXXFLAGS=$(CFLAGS) -std=c++11
 LIBS=-lz
 PROG=DBGPS-analyzer DBGPS-links DBGPS-seq-filter
@@ -7,6 +10,13 @@ CORE=dbgps_core.h khashl.h ketopt.h kseq.h kthread.h
 ifneq ($(asan),)
 	CFLAGS+=-fsanitize=address
 	LIBS+=-fsanitize=address
+endif
+
+# Opt-in host-tuned build: `make native=1`. Faster on the build machine, but the
+# resulting binaries are NOT portable (may SIGILL on other CPUs) and must not be
+# shipped in the distributable/Electron bundle.
+ifneq ($(native),)
+	CFLAGS+=-march=native
 endif
 
 .PHONY:all clean version test

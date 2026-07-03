@@ -30,16 +30,18 @@ typedef struct {
 static void count_strands(pldat_t *p)
 {
     uint64_t mask = (1ULL << p->k * 2) - 1;
+    kmer_set_t seen = {0}; /* reusable per-strand dedup scratch (O(n) vs O(n^2)) */
     while (kseq_read(p->ks) >= 0) {
         int l = p->ks->seq.l, km_num;
         if (l < p->k) continue;
         uint64_t *kms;
         MALLOC(kms, l - p->k + 1);
-        km_num = seq_kmers(kms, p->k, l, p->ks->seq.s);
+        km_num = seq_kmers_dedup(kms, &seen, p->k, l, p->ks->seq.s);
         for (int j = 0; j < km_num; j++)
             add_kmer(kms[j], mask, p->h);
         free(kms);
     }
+    kmer_set_destroy(&seen);
 }
 
 static kc_c4x_t *count_file(const char *fn, int k, int p)
@@ -76,6 +78,10 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  -k INT     k-mer size [%d]\n", k);
         fprintf(stderr, "  -m INT     only count k-mers occurring in more than this many strands [%d]\n", max_link_num);
+        return 1;
+    }
+    if (k < 1 || k > 31) {
+        fprintf(stderr, "Error: -k must be between 1 and 31 (got %d)\n", k);
         return 1;
     }
 
