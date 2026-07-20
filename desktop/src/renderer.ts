@@ -357,6 +357,7 @@ const elements = {
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
   stopChatButton: $("stopChatButton") as HTMLButtonElement,
   clearChatButton: $("clearChatButton") as HTMLButtonElement,
+  exportChatButton: $("exportChatButton") as HTMLButtonElement,
   chatContextChip: $("chatContextChip"),
   aiProvider: $("aiProvider"),
   settingsPanel: $("settingsPanel"),
@@ -751,7 +752,14 @@ async function refreshProviderModels(providerId: ProviderId) {
       settings.refreshStatus = "No models returned";
     } else {
       settings.models = result.models;
-      if (!settings.models.includes(settings.selectedModel)) settings.selectedModel = settings.models[0];
+      // The refreshed list is sorted alphabetically, so models[0] is an arbitrary
+      // model (often a legacy or non-chat one). Prefer the provider's curated
+      // default when the previously-selected model is gone.
+      if (!settings.models.includes(settings.selectedModel)) {
+        settings.selectedModel = settings.models.includes(provider.defaultModel)
+          ? provider.defaultModel
+          : settings.models[0];
+      }
       settings.lastRefresh = new Date().toLocaleString();
       settings.refreshStatus = `${result.models.length} refreshed models`;
     }
@@ -1832,6 +1840,16 @@ function compactBatch(batch: InteractiveBatchResult): unknown {
   };
 }
 
+// The report panel shows rule-based verdicts computed from fixed thresholds, right
+// above the AI narrative. Sending them along means the assistant argues from the
+// same graded assessment the user is reading rather than inventing its own.
+function reportContext(report: ReportResult): unknown {
+  return {
+    ...report,
+    ruleBasedVerdicts: reportVerdicts(report).map((verdict) => ({ level: verdict.level, text: verdict.text }))
+  };
+}
+
 function buildChatContext(): { label: string; data: unknown } | null {
   switch (currentViewName()) {
     case "interactive":
@@ -1839,7 +1857,7 @@ function buildChatContext(): { label: string; data: unknown } | null {
         ? { label: "Interactive result", data: compactInteractive(latestResult) }
         : null;
     case "report":
-      return latestReport ? { label: "Diagnostics report", data: latestReport } : null;
+      return latestReport ? { label: "Diagnostics report", data: reportContext(latestReport) } : null;
     case "links":
       return latestLinks
         ? { label: "Cross-links", data: { file: compactPath(latestLinks.file), k: latestLinks.k, m: latestLinks.m, primerLen: latestLinks.primerLen, crossLinks: latestLinks.crossLinks, command: latestLinks.command } }
@@ -1895,6 +1913,64 @@ function createMessageBubble(role: "user" | "assistant"): { bubble: HTMLElement;
   return { bubble, body };
 }
 
+// Copy / retry live in a footer row that is only attached once a message is
+// final, so the controls never appear on a half-streamed reply.
+function attachMessageActions(bubble: HTMLElement, text: string, opts: { retry?: boolean } = {}) {
+  bubble.querySelector(".message-actions")?.remove();
+  if (!text.trim()) return;
+  const row = document.createElement("div");
+  row.className = "message-actions";
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "message-action";
+  copy.textContent = "Copy";
+  copy.setAttribute("aria-label", "Copy this message");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      copy.textContent = "Copied";
+      setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+    } catch {
+      copy.textContent = "Copy failed";
+      setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+    }
+  });
+  row.appendChild(copy);
+
+  if (opts.retry) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "message-action";
+    retry.textContent = "Retry";
+    retry.setAttribute("aria-label", "Retry this question");
+    retry.addEventListener("click", () => { void retryLastQuestion(bubble); });
+    row.appendChild(retry);
+  }
+
+  bubble.appendChild(row);
+}
+
+// Re-ask the most recent question after a failure. The failed exchange is dropped
+// from both the transcript and the DOM so the retry is a clean second attempt
+// rather than a follow-up that references an error the model never produced.
+async function retryLastQuestion(errorBubble: HTMLElement) {
+  if (activeChat) return;
+  let question = "";
+  for (let i = chatMessages.length - 1; i >= 0; i--) {
+    if (chatMessages[i].role === "user") {
+      question = chatMessages[i].content;
+      chatMessages.splice(i);
+      break;
+    }
+  }
+  if (!question) return;
+  errorBubble.previousElementSibling?.remove();
+  errorBubble.remove();
+  elements.chatInput.value = question;
+  await sendChat();
+}
+
 function scrollChatToBottom() {
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
 }
@@ -1928,8 +2004,10 @@ function stableMarkdownBoundary(text: string): number {
 
 function pushUserMessage(content: string) {
   chatMessages.push({ role: "user", content });
-  const { body } = createMessageBubble("user");
+  const { bubble, body } = createMessageBubble("user");
   body.textContent = content;
+  attachMessageActions(bubble, content);
+  saveChatTranscript();
   scrollChatToBottom();
 }
 
@@ -1982,8 +2060,10 @@ function finalizeAssistant(content: string, opts: { persist: boolean; error?: bo
   activeChat.body.innerHTML = renderMarkdownToHtml(content);
   const persisted = opts.persistContent ?? content;
   if (opts.persist && persisted.trim()) chatMessages.push({ role: "assistant", content: persisted });
+  attachMessageActions(activeChat.bubble, content, { retry: Boolean(opts.error) });
   activeChat = null;
   setChatBusy(false);
+  saveChatTranscript();
   if (pinned) scrollChatToBottom();
 }
 
@@ -1996,6 +2076,7 @@ async function sendChat() {
   if (PROVIDER_BY_ID[settings.provider]?.apiKeyRequired && !settings.apiKey) {
     pushUserMessage(question);
     elements.chatInput.value = "";
+    autoGrowChatInput();
     const { bubble, body } = createMessageBubble("assistant");
     bubble.classList.add("error");
     body.innerHTML = renderMarkdownToHtml(`**${PROVIDER_BY_ID[settings.provider].label}** needs an API key. Open **Settings → Providers** (gear icon) to add one, or switch the active provider to a local endpoint.`);
@@ -2005,6 +2086,7 @@ async function sendChat() {
 
   pushUserMessage(question);
   elements.chatInput.value = "";
+  autoGrowChatInput();
 
   const id = `chat-${++chatStreamCounter}-${Date.now()}`;
   const { bubble, body } = createMessageBubble("assistant");
@@ -2064,6 +2146,74 @@ function clearChat() {
   if (activeChat) return;
   chatMessages.length = 0;
   elements.chatMessages.innerHTML = `<div class="message assistant"><div class="message-body">${escapeHtml(CHAT_GREETING)}</div></div>`;
+  saveChatTranscript();
+}
+
+// --- Transcript persistence and export ---
+// The transcript is the researcher's record of how a result was interpreted, so it
+// survives a reload rather than being discarded with the window.
+const CHAT_STORAGE_KEY = "dbgps.chatTranscript";
+const MAX_STORED_MESSAGES = 200;
+
+function saveChatTranscript() {
+  try {
+    const recent = chatMessages.slice(-MAX_STORED_MESSAGES);
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(recent));
+  } catch {
+    /* quota exceeded or storage disabled: the in-memory transcript still works */
+  }
+}
+
+function restoreChatTranscript() {
+  let stored: unknown;
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return;
+    stored = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(stored)) return;
+
+  const restored: ChatMessage[] = [];
+  for (const entry of stored) {
+    const role = (entry as ChatMessage)?.role === "assistant" ? "assistant" : "user";
+    const content = typeof (entry as ChatMessage)?.content === "string" ? (entry as ChatMessage).content : "";
+    if (content.trim()) restored.push({ role, content });
+  }
+  if (!restored.length) return;
+
+  chatMessages.push(...restored);
+  for (const message of restored) {
+    const { bubble, body } = createMessageBubble(message.role);
+    if (message.role === "user") body.textContent = message.content;
+    else body.innerHTML = renderMarkdownToHtml(message.content);
+    attachMessageActions(bubble, message.content);
+  }
+  scrollChatToBottom();
+}
+
+function chatTranscriptMarkdown(): string {
+  const lines = [`# DBGPS AI conversation`, "", `_Exported ${new Date().toLocaleString()}_`, ""];
+  for (const message of chatMessages) {
+    lines.push(message.role === "user" ? "## Question" : "## Assistant", "", message.content, "");
+  }
+  return lines.join("\n");
+}
+
+async function exportChat() {
+  if (!chatMessages.length) {
+    appendLog("Nothing to export — the conversation is empty.");
+    return;
+  }
+  try {
+    await window.dbgps.saveFile({
+      defaultName: `dbgps-conversation-${new Date().toISOString().slice(0, 10)}.md`,
+      content: chatTranscriptMarkdown()
+    });
+  } catch (error) {
+    appendLog(`Conversation export failed: ${errMessage(error)}`);
+  }
 }
 
 document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((button) => {
@@ -2109,6 +2259,8 @@ elements.resultView.addEventListener("click", (event) => {
 elements.sendChatButton.addEventListener("click", sendChat);
 elements.stopChatButton.addEventListener("click", stopChat);
 elements.clearChatButton.addEventListener("click", clearChat);
+elements.exportChatButton.addEventListener("click", () => { void exportChat(); });
+restoreChatTranscript();
 
 // Live token stream: append each delta to the in-flight assistant bubble and
 // re-render its Markdown on the next animation frame.
@@ -2211,8 +2363,23 @@ elements.chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     sendChat();
+    return;
+  }
+  // Esc stops a running generation without reaching for the mouse.
+  if (event.key === "Escape" && activeChat) {
+    event.preventDefault();
+    void stopChat();
   }
 });
+
+// Grow the composer with its content so a multi-line question is visible while
+// being typed, up to a cap beyond which it scrolls internally.
+function autoGrowChatInput() {
+  const input = elements.chatInput;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+}
+elements.chatInput.addEventListener("input", autoGrowChatInput);
 
 window.dbgps.onAnalyzerEvent((event) => {
   const payload = event as { kind?: string; line?: string; code?: number | null; done?: number; total?: number };
@@ -2664,7 +2831,8 @@ async function interpretReport() {
     const result = await window.dbgps.aiChat({
       id: `report-${Date.now()}`,
       messages: [{ role: "user", content: instruction }],
-      context: latestReport,
+      context: reportContext(latestReport),
+      contextLabel: "Diagnostics report",
       settings: currentAiSettings()
     });
     reportNarrative = result.content;

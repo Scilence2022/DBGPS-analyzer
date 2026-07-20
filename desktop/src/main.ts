@@ -887,18 +887,51 @@ async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<st
   }
 }
 
+// Rate limits and transient upstream failures are worth a short retry: the request
+// has not produced any output yet, so retrying is safe and invisible to the user.
+// 4xx other than 408/429 are permanent (bad key, bad model) and fail immediately.
+const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+const STREAM_RETRIES = 2;
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const header = response.headers.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 20000);
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) return Math.min(Math.max(0, at - Date.now()), 20000);
+  }
+  // Exponential backoff with jitter so concurrent clients do not retry in lockstep.
+  return Math.min(1000 * 2 ** attempt, 8000) + Math.floor(Math.random() * 250);
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("Aborted"));
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    function onAbort() { clearTimeout(timer); reject(new Error("Aborted")); }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function openStream(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-  if (!response.ok || !response.body) {
+  const payloadText = JSON.stringify(body);
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url, { method: "POST", headers, body: payloadText, signal });
+    if (response.ok && response.body) return response;
+
     const text = await response.text().catch(() => "");
     let payload: any = {};
     if (text) {
       try { payload = JSON.parse(text); } catch { payload = { text }; }
     }
+    if (attempt < STREAM_RETRIES && RETRYABLE_STATUS.has(response.status)) {
+      await sleep(retryDelayMs(response, attempt), signal);
+      continue;
+    }
     const detail = payload?.error?.message || payload?.message || payload?.text || response.statusText;
     throw new Error(`Provider request failed (${response.status}): ${String(detail).slice(0, 600)}`);
   }
-  return response;
 }
 
 // Yield each parsed `data:` JSON object from a Server-Sent-Events stream, stopping
@@ -932,19 +965,32 @@ function isReasoningModel(model: string): boolean {
 async function streamOpenAiCompatible(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+  const reasoning = isReasoningModel(settings.model);
   const body: Record<string, unknown> = {
     model: settings.model,
     messages: [{ role: "system", content: system }, ...turns],
-    max_tokens: settings.maxTokens,
     stream: true
   };
-  if (!isReasoningModel(settings.model)) body.temperature = settings.temperature;
+  // Reasoning models reject the deprecated `max_tokens` in favour of
+  // `max_completion_tokens`, which also has to cover the invisible reasoning
+  // tokens — so give them extra headroom or the visible answer can come back empty.
+  if (reasoning) body.max_completion_tokens = Math.max(settings.maxTokens, 4096);
+  else body.max_tokens = settings.maxTokens;
+  if (!reasoning) body.temperature = settings.temperature;
   const response = await openStream(`${settings.baseUrl}/chat/completions`, headers, body, signal);
   let text = "";
+  let finish = "";
   for await (const json of sseData(response)) {
     if (json?.error) throw new Error(String(json.error?.message || json.error).slice(0, 600));
-    const delta = json?.choices?.[0]?.delta?.content;
+    const choice = json?.choices?.[0];
+    if (choice?.finish_reason) finish = String(choice.finish_reason);
+    const delta = choice?.delta?.content;
     if (typeof delta === "string" && delta) { text += delta; sink(delta); }
+  }
+  if (finish === "length") {
+    const notice = `\n\n_(truncated: hit the token limit — raise Max tokens in Settings for a complete answer)_`;
+    text += notice;
+    sink(notice);
   }
   return text;
 }
@@ -988,18 +1034,42 @@ async function streamGoogle(settings: NormalizedAiSettings, system: string, turn
     role: turn.role === "assistant" ? "model" : "user",
     parts: [{ text: turn.content }]
   }));
-  const url = `${settings.baseUrl}/models/${encodeURIComponent(settings.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(settings.apiKey)}`;
-  const response = await openStream(url, { "Content-Type": "application/json" }, {
+  // The key goes in a header rather than the query string: URLs end up in proxy
+  // logs, crash reports and error messages far more readily than headers do.
+  const url = `${settings.baseUrl}/models/${encodeURIComponent(settings.model)}:streamGenerateContent?alt=sse`;
+  const response = await openStream(url, {
+    "Content-Type": "application/json",
+    "x-goog-api-key": settings.apiKey
+  }, {
     systemInstruction: { parts: [{ text: system }] },
     contents,
     generationConfig: { temperature: settings.temperature, maxOutputTokens: settings.maxTokens }
   }, signal);
   let text = "";
+  let finishReason = "";
   for await (const json of sseData(response)) {
     if (json?.error) throw new Error(String(json.error?.message || json.error).slice(0, 600));
-    for (const part of json?.candidates?.[0]?.content?.parts || []) {
+    // A blocked prompt yields no candidates at all; without this the stream just
+    // ends empty and the user is told the provider returned nothing.
+    const blocked = json?.promptFeedback?.blockReason;
+    if (blocked) {
+      throw new Error(`Gemini blocked the request (${blocked})${json?.promptFeedback?.blockReasonMessage ? `: ${json.promptFeedback.blockReasonMessage}` : ""}`);
+    }
+    const candidate = json?.candidates?.[0];
+    if (candidate?.finishReason) finishReason = String(candidate.finishReason);
+    for (const part of candidate?.content?.parts || []) {
+      // Thought-summary parts are reasoning, not answer text — including them
+      // would interleave the model's scratchpad into the reply.
+      if (part?.thought === true) continue;
       if (typeof part?.text === "string" && part.text) { text += part.text; sink(part.text); }
     }
+  }
+  if (finishReason && finishReason !== "STOP") {
+    const notice = finishReason === "MAX_TOKENS"
+      ? `\n\n_(truncated: hit the token limit — raise Max tokens in Settings for a complete answer)_`
+      : `\n\n_(stopped early: ${finishReason})_`;
+    text += notice;
+    sink(notice);
   }
   return text;
 }
@@ -1008,11 +1078,12 @@ async function streamOpenAiResponses(settings: NormalizedAiSettings, system: str
   const body: Record<string, unknown> = {
     model: settings.model,
     instructions: system,
-    input: turns.map((turn) => ({
-      role: turn.role,
-      content: [{ type: turn.role === "assistant" ? "output_text" : "input_text", text: turn.content }]
-    })),
-    max_output_tokens: settings.maxTokens,
+    // Plain-string content is the documented shorthand and sidesteps having to
+    // pair the right content type with each role.
+    input: turns.map((turn) => ({ role: turn.role, content: turn.content })),
+    // max_output_tokens also covers invisible reasoning tokens, so a reasoning
+    // model can burn the whole budget before emitting any answer text.
+    max_output_tokens: isReasoningModel(settings.model) ? Math.max(settings.maxTokens, 4096) : settings.maxTokens,
     stream: true
   };
   if (!isReasoningModel(settings.model)) body.temperature = settings.temperature;
@@ -1026,10 +1097,22 @@ async function streamOpenAiResponses(settings: NormalizedAiSettings, system: str
     if (type === "response.output_text.delta" && typeof json?.delta === "string" && json.delta) {
       text += json.delta;
       sink(json.delta);
+    } else if (type === "response.refusal.delta" && typeof json?.delta === "string" && json.delta) {
+      // A refusal streams on its own channel; without this the request looks like
+      // it simply returned nothing.
+      text += json.delta;
+      sink(json.delta);
     } else if (type === "error" || type === "response.error") {
       throw new Error(String(json?.error?.message || json?.message || "OpenAI stream error").slice(0, 600));
     } else if (type === "response.failed") {
       throw new Error(String(json?.response?.error?.message || "OpenAI response failed").slice(0, 600));
+    } else if (type === "response.incomplete") {
+      const reason = String(json?.response?.incomplete_details?.reason || "unknown");
+      const notice = reason === "max_output_tokens"
+        ? `\n\n_(truncated: hit the token limit — raise Max tokens in Settings for a complete answer)_`
+        : `\n\n_(incomplete response: ${reason})_`;
+      text += notice;
+      sink(notice);
     }
   }
   return text;
@@ -1049,8 +1132,15 @@ function streamChat(settings: NormalizedAiSettings, system: string, turns: ChatT
   }
 }
 
+// Endpoints that expose one catalog for every modality list embeddings, speech,
+// image and moderation models alongside the chat ones. None of them can answer a
+// chat request, so they are noise in a model picker.
+const NON_CHAT_MODEL = /embed|whisper|tts|audio|speech|dall-?e|image|vision-only|moderation|rerank|guard/i;
+
 function uniqueModels(models: string[]) {
-  return Array.from(new Set(models.map((model) => model.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  return Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)))
+    .filter((model) => !NON_CHAT_MODEL.test(model))
+    .sort((a, b) => a.localeCompare(b));
 }
 
 function parseOpenAiCompatibleModels(payload: any) {
@@ -1108,8 +1198,7 @@ async function refreshProviderModels(request: ProviderRefreshRequest) {
   }
 
   if (definition.apiStyle === "google-gemini") {
-    const query = apiKey ? `?key=${encodeURIComponent(apiKey)}` : "";
-    const payload = await getJson(`${baseUrl}/models${query}`, {});
+    const payload = await getJson(`${baseUrl}/models`, apiKey ? { "x-goog-api-key": apiKey } : {});
     return { provider: definition.id, source: "remote", models: parseGoogleModels(payload) };
   }
 

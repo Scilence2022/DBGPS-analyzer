@@ -349,23 +349,33 @@
             </div>
             <div class="chat-header-actions">
               <span id="aiProvider" class="provider-pill">local</span>
-              <button id="clearChatButton" class="icon-only ghost" title="Clear conversation">
+              <button id="exportChatButton" class="icon-only ghost" title="Export conversation as Markdown" aria-label="Export conversation as Markdown">
+                <i data-lucide="download"></i>
+              </button>
+              <button id="clearChatButton" class="icon-only ghost" title="Clear conversation" aria-label="Clear conversation">
                 <i data-lucide="eraser"></i>
               </button>
             </div>
           </div>
           <div id="chatContextChip" class="chat-context-chip" hidden></div>
-          <div id="chatMessages" class="chat-messages">
+          <div
+            id="chatMessages"
+            class="chat-messages"
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions text"
+            aria-label="Conversation with the AI assistant"
+          >
             <div class="message assistant">
               <div class="message-body">Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</div>
             </div>
           </div>
           <div class="chat-input-row">
-            <textarea id="chatInput" spellcheck="false" placeholder="Ask about the current result… (Enter to send, Shift+Enter for newline)"></textarea>
-            <button id="sendChatButton" class="icon-only" title="Send (Enter)">
+            <textarea id="chatInput" spellcheck="false" rows="1" aria-label="Message the AI assistant" placeholder="Ask about the current result… (Enter to send, Shift+Enter for newline)"></textarea>
+            <button id="sendChatButton" class="icon-only" title="Send (Enter)" aria-label="Send message">
               <i data-lucide="send"></i>
             </button>
-            <button id="stopChatButton" class="icon-only stop" title="Stop generating" hidden>
+            <button id="stopChatButton" class="icon-only stop" title="Stop generating (Esc)" aria-label="Stop generating" hidden>
               <i data-lucide="square"></i>
             </button>
           </div>
