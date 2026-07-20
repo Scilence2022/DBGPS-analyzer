@@ -48,6 +48,7 @@ type AiChatRequest = {
   id: string;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   context: unknown;
+  contextLabel?: string;
   settings: AiSettings;
 };
 

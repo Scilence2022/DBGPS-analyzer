@@ -1448,6 +1448,49 @@ td {
   border-left: 3px solid color-mix(in srgb, var(--accent) 40%, transparent);
   color: var(--muted);
 }
+/* Markdown tables. The chat panel is narrow, so the table scrolls inside its own
+   wrapper rather than widening the bubble. These rules also have to undo two global
+   table defaults (styles.css: table-layout:fixed and position:sticky on th) that
+   are meant for the app's full-height data grids and misbehave inside a message. */
+.message-body .md-table-wrap,
+.narrative-body .md-table-wrap { margin: 6px 0 10px; overflow-x: auto; }
+.message-body .md-table,
+.narrative-body .md-table {
+  width: auto;
+  min-width: 100%;
+  table-layout: auto;
+  border-collapse: collapse;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.message-body .md-table th,
+.narrative-body .md-table th {
+  position: static;
+  z-index: auto;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-strong);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.message-body .md-table td,
+.narrative-body .md-table td {
+  padding: 5px 9px;
+  font-size: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.message-body .md-table tbody tr:last-child td,
+.narrative-body .md-table tbody tr:last-child td { border-bottom: 0; }
+.message-body .md-al-right,
+.narrative-body .md-al-right { text-align: right; }
+.message-body .md-al-center,
+.narrative-body .md-al-center { text-align: center; }
+.message-body .md-al-left,
+.narrative-body .md-al-left { text-align: left; }
+
 .message-body a,
 .narrative-body a { color: var(--accent-strong); text-decoration: underline; }
 
