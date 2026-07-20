@@ -149,7 +149,7 @@ const providerDefinitions: Record<ProviderId, ProviderDefinition> = {
     apiStyle: "anthropic-messages",
     defaultBaseUrl: "https://api.anthropic.com/v1",
     defaultModel: "claude-sonnet-5",
-    fallbackModels: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-sonnet-4-5"],
+    fallbackModels: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-sonnet-4-5"],
     apiKeyEnv: "ANTHROPIC_API_KEY",
     modelEnv: "ANTHROPIC_MODEL",
     baseUrlEnv: "ANTHROPIC_BASE_URL",
@@ -700,19 +700,32 @@ type NormalizedAiSettings = {
   maxTokens: number;
 };
 
-// The Temperature control offers the OpenAI range (0-2), but the Anthropic Messages
-// API rejects anything above 1.0 with an HTTP 400. Clamp per provider so switching
-// the active provider cannot turn a valid setting into an opaque request failure.
+// The Temperature control offers the OpenAI range (0-2), which no Claude model
+// accepts. Clamp to the Anthropic range so switching the active provider cannot
+// turn a valid setting into an opaque request failure.
 function clampTemperature(value: number, apiStyle: ProviderApiStyle): number {
   const max = apiStyle === "anthropic-messages" ? 1 : 2;
   return Math.min(max, Math.max(0, value));
+}
+
+// Claude removed the sampling parameters with Opus 4.7: Opus 4.7+, Sonnet 5 and
+// Fable 5 reject `temperature` outright with an HTTP 400, while the 3.x-4.6
+// generations still accept it in the 0-1 range. Unknown ids are treated as new,
+// because omitting the parameter merely falls back to the model's default whereas
+// sending it to a model that rejects it fails the entire request.
+function anthropicAcceptsTemperature(model: string): boolean {
+  const id = (model.split("/").pop() || "").toLowerCase();
+  return /^claude-(3[-.]|opus-4-[0-6]|sonnet-4-[0-6]|haiku-4-5)/.test(id);
 }
 
 function normalizeAiSettings(settings?: AiSettings): NormalizedAiSettings {
   const definition = providerDefinition(settings?.provider);
   const requested = Number.isFinite(Number(settings?.temperature)) ? Number(settings?.temperature) : 0.2;
   const temperature = clampTemperature(requested, definition.apiStyle);
-  const maxTokens = Number.isFinite(Number(settings?.maxTokens)) ? Math.max(128, Math.trunc(Number(settings?.maxTokens))) : 900;
+  // 900 tokens is roughly 600 words — enough for a one-paragraph answer but not for
+  // interpreting a full diagnostics report, which was silently truncating. Replies
+  // are streamed, so a larger ceiling costs nothing when the model does not use it.
+  const maxTokens = Number.isFinite(Number(settings?.maxTokens)) ? Math.max(128, Math.trunc(Number(settings?.maxTokens))) : 4096;
   return {
     provider: definition.id,
     apiStyle: definition.apiStyle,
@@ -937,25 +950,35 @@ async function streamOpenAiCompatible(settings: NormalizedAiSettings, system: st
 }
 
 async function streamAnthropic(settings: NormalizedAiSettings, system: string, turns: ChatTurn[], sink: DeltaSink, signal: AbortSignal) {
+  const body: Record<string, unknown> = {
+    model: settings.model,
+    system,
+    messages: turns,
+    max_tokens: settings.maxTokens,
+    stream: true
+  };
+  if (anthropicAcceptsTemperature(settings.model)) body.temperature = settings.temperature;
   const response = await openStream(`${settings.baseUrl}/messages`, {
     "Content-Type": "application/json",
     "x-api-key": settings.apiKey,
     "anthropic-version": "2023-06-01"
-  }, {
-    model: settings.model,
-    system,
-    messages: turns,
-    temperature: settings.temperature,
-    max_tokens: settings.maxTokens,
-    stream: true
-  }, signal);
+  }, body, signal);
   let text = "";
+  let stopReason = "";
   for await (const json of sseData(response)) {
     if (json?.type === "error") throw new Error(String(json?.error?.message || "Anthropic stream error").slice(0, 600));
+    // The stream ends with a message_delta carrying the stop reason; capture it so a
+    // reply cut off at the token ceiling is not presented as a complete answer.
+    if (json?.type === "message_delta" && json?.delta?.stop_reason) stopReason = String(json.delta.stop_reason);
     if (json?.type === "content_block_delta" && typeof json?.delta?.text === "string" && json.delta.text) {
       text += json.delta.text;
       sink(json.delta.text);
     }
+  }
+  if (stopReason === "max_tokens") {
+    const notice = `\n\n_(truncated: hit the ${settings.maxTokens}-token limit — raise Max tokens in Settings for a complete answer)_`;
+    text += notice;
+    sink(notice);
   }
   return text;
 }

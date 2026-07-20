@@ -217,7 +217,7 @@ const PROVIDERS: ProviderCatalogItem[] = [
     apiStyle: "Messages API",
     defaultModel: "claude-sonnet-5",
     defaultBaseUrl: "https://api.anthropic.com/v1",
-    models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-sonnet-4-5"],
+    models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-sonnet-4-5"],
     apiKeyRequired: true,
     envHint: "ANTHROPIC_API_KEY"
   },
@@ -425,7 +425,7 @@ function createDefaultSettings(): AppSettings {
     activeProvider: "openai",
     providers,
     temperature: 0.2,
-    maxTokens: 900,
+    maxTokens: 4096,
     appearance: "system",
     kmerTreeMode: "cards",
     sequenceChartType: "bar",
@@ -2174,7 +2174,7 @@ elements.temperatureInput.addEventListener("input", () => {
   saveSettings();
 });
 elements.maxTokensInput.addEventListener("input", () => {
-  appSettings.maxTokens = Math.max(128, Math.trunc(Number(elements.maxTokensInput.value) || 900));
+  appSettings.maxTokens = Math.max(128, Math.trunc(Number(elements.maxTokensInput.value) || 4096));
   saveSettings();
 });
 document.querySelectorAll<HTMLButtonElement>(".appearance-card").forEach((button) => {
