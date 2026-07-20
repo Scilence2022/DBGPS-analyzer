@@ -215,9 +215,9 @@ const PROVIDERS: ProviderCatalogItem[] = [
     label: "Anthropic",
     region: "Global",
     apiStyle: "Messages API",
-    defaultModel: "claude-sonnet-4-5",
+    defaultModel: "claude-sonnet-5",
     defaultBaseUrl: "https://api.anthropic.com/v1",
-    models: ["claude-sonnet-4-5", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+    models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-sonnet-4-5"],
     apiKeyRequired: true,
     envHint: "ANTHROPIC_API_KEY"
   },
@@ -357,6 +357,7 @@ const elements = {
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
   stopChatButton: $("stopChatButton") as HTMLButtonElement,
   clearChatButton: $("clearChatButton") as HTMLButtonElement,
+  exportChatButton: $("exportChatButton") as HTMLButtonElement,
   chatContextChip: $("chatContextChip"),
   aiProvider: $("aiProvider"),
   settingsPanel: $("settingsPanel"),
@@ -425,7 +426,7 @@ function createDefaultSettings(): AppSettings {
     activeProvider: "openai",
     providers,
     temperature: 0.2,
-    maxTokens: 900,
+    maxTokens: 4096,
     appearance: "system",
     kmerTreeMode: "cards",
     sequenceChartType: "bar",
@@ -751,7 +752,14 @@ async function refreshProviderModels(providerId: ProviderId) {
       settings.refreshStatus = "No models returned";
     } else {
       settings.models = result.models;
-      if (!settings.models.includes(settings.selectedModel)) settings.selectedModel = settings.models[0];
+      // The refreshed list is sorted alphabetically, so models[0] is an arbitrary
+      // model (often a legacy or non-chat one). Prefer the provider's curated
+      // default when the previously-selected model is gone.
+      if (!settings.models.includes(settings.selectedModel)) {
+        settings.selectedModel = settings.models.includes(provider.defaultModel)
+          ? provider.defaultModel
+          : settings.models[0];
+      }
       settings.lastRefresh = new Date().toLocaleString();
       settings.refreshStatus = `${result.models.length} refreshed models`;
     }
@@ -1595,6 +1603,47 @@ function formatInline(escaped: string): string {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, text, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`);
 }
 
+// Split one GFM table row into trimmed cells: drop a single optional leading and
+// trailing pipe, then split on pipes that are not backslash-escaped. Returns null
+// for a line that carries no pipe at all.
+function tableCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  const body = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === "\\" && body[i + 1] === "|") { cell += "|"; i++; continue; }
+    if (body[i] === "|") { cells.push(cell); cell = ""; continue; }
+    cell += body[i];
+  }
+  cells.push(cell);
+  return cells.map((text) => text.trim());
+}
+
+// A GFM delimiter row (`---`, `:--`, `--:`, `:-:`) doubles as the per-column
+// alignment spec. Returns null when the line is not a delimiter row, which is what
+// distinguishes a real table from an ordinary paragraph that happens to use pipes.
+function tableAlignments(line: string): Array<"left" | "right" | "center" | null> | null {
+  const cells = tableCells(line);
+  if (!cells) return null;
+  const align: Array<"left" | "right" | "center" | null> = [];
+  for (const cell of cells) {
+    const match = cell.match(/^(:?)-+(:?)$/);
+    if (!match) return null;
+    align.push(match[1] && match[2] ? "center" : match[2] ? "right" : match[1] ? "left" : null);
+  }
+  return align;
+}
+
+// A table starts where a pipe row is followed by a delimiter row of equal width.
+function startsTable(lines: string[], i: number): boolean {
+  const header = tableCells(lines[i]);
+  if (!header || i + 1 >= lines.length) return false;
+  const align = tableAlignments(lines[i + 1]);
+  return Boolean(align && align.length === header.length);
+}
+
 function renderMarkdownToHtml(src: string): string {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
@@ -1620,6 +1669,31 @@ function renderMarkdownToHtml(src: string): string {
       closeList();
       out.push(`<h${heading[1].length} class="md-h">${inline(heading[2].trim())}</h${heading[1].length}>`);
       i++;
+      continue;
+    }
+
+    // Tables are checked before lists so a delimiter row is never mistaken for a
+    // bullet. The system prompt asks the model for tables, so this branch matters.
+    if (startsTable(lines, i)) {
+      closeList();
+      const header = tableCells(line) as string[];
+      const align = tableAlignments(lines[i + 1]) as Array<"left" | "right" | "center" | null>;
+      const cell = (text: string, tag: "th" | "td", at: "left" | "right" | "center" | null) =>
+        `<${tag}${at ? ` class="md-al-${at}"` : ""}>${inline(text)}</${tag}>`;
+      const head = `<tr>${header.map((text, n) => cell(text, "th", align[n])).join("")}</tr>`;
+      const body: string[] = [];
+      i += 2;
+      while (i < lines.length) {
+        const cells = tableCells(lines[i]);
+        if (!cells) break;
+        // Normalize to the header width so a ragged row cannot skew the columns.
+        const row = Array.from({ length: header.length }, (_, n) => cells[n] ?? "");
+        body.push(`<tr>${row.map((text, n) => cell(text, "td", align[n])).join("")}</tr>`);
+        i++;
+      }
+      out.push(
+        `<div class="md-table-wrap"><table class="md-table"><thead>${head}</thead><tbody>${body.join("")}</tbody></table></div>`
+      );
       continue;
     }
 
@@ -1652,7 +1726,14 @@ function renderMarkdownToHtml(src: string): string {
     closeList();
     const para: string[] = [line];
     i++;
-    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|\s*[-*+]\s|\s*\d+[.)]\s|```|>)/.test(lines[i])) {
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^(#{1,6}\s|\s*[-*+]\s|\s*\d+[.)]\s|```|>)/.test(lines[i]) &&
+      // A table may follow a paragraph with no blank line between them; without
+      // this the header and delimiter rows get absorbed into the paragraph.
+      !startsTable(lines, i)
+    ) {
       para.push(lines[i]);
       i++;
     }
@@ -1672,13 +1753,58 @@ function currentViewName(): ViewName {
   return (document.body.dataset.view as ViewName) || "interactive";
 }
 
+// Percentiles over a numeric sample, using nearest-rank on a sorted copy.
+function percentiles(sorted: number[], points: number[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!sorted.length) return out;
+  for (const p of points) {
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+    out[`p${p}`] = sorted[idx];
+  }
+  return out;
+}
+
+// The per-k-mer coverage array is far too large to send, but dropping it outright
+// leaves the assistant unable to see the very distribution it is asked to interpret
+// (a mean of 40 looks fine whether the strand is evenly covered or has a hole in it).
+// Summarize instead: spread, zero-coverage gaps, and the sharpest adjacency ratios.
+function summarizeCoverage(coverages: SequenceCoverage[], ratios: Array<{ position: number; ratio: number }>) {
+  if (!coverages.length) return null;
+  const values = coverages.map((entry) => entry.coverage);
+  const sorted = [...values].sort((a, b) => a - b);
+
+  // Contiguous runs of zero-coverage k-mers: a single long run is a dropout region,
+  // many short ones look like uniform under-sequencing. The distinction matters.
+  const gaps: Array<{ start: number; length: number }> = [];
+  let run = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] === 0) { run++; continue; }
+    if (run) gaps.push({ start: coverages[i - run].position, length: run });
+    run = 0;
+  }
+  if (run) gaps.push({ start: coverages[values.length - run].position, length: run });
+  gaps.sort((a, b) => b.length - a.length);
+
+  const sharpest = [...ratios]
+    .sort((a, b) => Math.abs(Math.log(b.ratio || 1)) - Math.abs(Math.log(a.ratio || 1)))
+    .slice(0, 8)
+    .map((entry) => ({ position: entry.position, ratio: Number(entry.ratio.toFixed(2)) }));
+
+  return {
+    note: "Summary of the per-k-mer coverage profile; the full array is too large to include.",
+    kmers: values.length,
+    zeroCoverageKmers: values.filter((value) => value === 0).length,
+    ...percentiles(sorted, [5, 25, 50, 75, 95]),
+    largestZeroRuns: gaps.slice(0, 5),
+    sharpestAdjacencyRatios: sharpest
+  };
+}
+
 // Drop the heavy per-k-mer arrays/trees so the context payload stays small.
 function compactInteractive(result: AnalyzerResult): unknown {
   if (result.type === "sequence") {
     const { coverages, ratios, ...rest } = result;
-    void coverages;
-    void ratios;
-    return rest;
+    return { ...rest, coverageProfile: summarizeCoverage(coverages ?? [], ratios ?? []) };
   }
   if (result.type === "kmer") {
     const { upstreamTree, downstreamTree, ...rest } = result;
@@ -1714,6 +1840,16 @@ function compactBatch(batch: InteractiveBatchResult): unknown {
   };
 }
 
+// The report panel shows rule-based verdicts computed from fixed thresholds, right
+// above the AI narrative. Sending them along means the assistant argues from the
+// same graded assessment the user is reading rather than inventing its own.
+function reportContext(report: ReportResult): unknown {
+  return {
+    ...report,
+    ruleBasedVerdicts: reportVerdicts(report).map((verdict) => ({ level: verdict.level, text: verdict.text }))
+  };
+}
+
 function buildChatContext(): { label: string; data: unknown } | null {
   switch (currentViewName()) {
     case "interactive":
@@ -1721,7 +1857,7 @@ function buildChatContext(): { label: string; data: unknown } | null {
         ? { label: "Interactive result", data: compactInteractive(latestResult) }
         : null;
     case "report":
-      return latestReport ? { label: "Diagnostics report", data: latestReport } : null;
+      return latestReport ? { label: "Diagnostics report", data: reportContext(latestReport) } : null;
     case "links":
       return latestLinks
         ? { label: "Cross-links", data: { file: compactPath(latestLinks.file), k: latestLinks.k, m: latestLinks.m, primerLen: latestLinks.primerLen, crossLinks: latestLinks.crossLinks, command: latestLinks.command } }
@@ -1777,6 +1913,64 @@ function createMessageBubble(role: "user" | "assistant"): { bubble: HTMLElement;
   return { bubble, body };
 }
 
+// Copy / retry live in a footer row that is only attached once a message is
+// final, so the controls never appear on a half-streamed reply.
+function attachMessageActions(bubble: HTMLElement, text: string, opts: { retry?: boolean } = {}) {
+  bubble.querySelector(".message-actions")?.remove();
+  if (!text.trim()) return;
+  const row = document.createElement("div");
+  row.className = "message-actions";
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "message-action";
+  copy.textContent = "Copy";
+  copy.setAttribute("aria-label", "Copy this message");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      copy.textContent = "Copied";
+      setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+    } catch {
+      copy.textContent = "Copy failed";
+      setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+    }
+  });
+  row.appendChild(copy);
+
+  if (opts.retry) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "message-action";
+    retry.textContent = "Retry";
+    retry.setAttribute("aria-label", "Retry this question");
+    retry.addEventListener("click", () => { void retryLastQuestion(bubble); });
+    row.appendChild(retry);
+  }
+
+  bubble.appendChild(row);
+}
+
+// Re-ask the most recent question after a failure. The failed exchange is dropped
+// from both the transcript and the DOM so the retry is a clean second attempt
+// rather than a follow-up that references an error the model never produced.
+async function retryLastQuestion(errorBubble: HTMLElement) {
+  if (activeChat) return;
+  let question = "";
+  for (let i = chatMessages.length - 1; i >= 0; i--) {
+    if (chatMessages[i].role === "user") {
+      question = chatMessages[i].content;
+      chatMessages.splice(i);
+      break;
+    }
+  }
+  if (!question) return;
+  errorBubble.previousElementSibling?.remove();
+  errorBubble.remove();
+  elements.chatInput.value = question;
+  await sendChat();
+}
+
 function scrollChatToBottom() {
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
 }
@@ -1810,8 +2004,10 @@ function stableMarkdownBoundary(text: string): number {
 
 function pushUserMessage(content: string) {
   chatMessages.push({ role: "user", content });
-  const { body } = createMessageBubble("user");
+  const { bubble, body } = createMessageBubble("user");
   body.textContent = content;
+  attachMessageActions(bubble, content);
+  saveChatTranscript();
   scrollChatToBottom();
 }
 
@@ -1852,16 +2048,22 @@ function scheduleAssistantRender() {
   });
 }
 
-function finalizeAssistant(content: string, opts: { persist: boolean; error?: boolean }) {
+// `persistContent` lets the bubble show something the transcript does not keep —
+// used on the error path so the user sees "partial + ⚠️ error" while the upstream
+// history records only the text the model actually produced.
+function finalizeAssistant(content: string, opts: { persist: boolean; error?: boolean; persistContent?: string }) {
   if (!activeChat) return;
   const pinned = isChatPinnedToBottom();
   activeChat.bubble.classList.remove("streaming");
   if (opts.error) activeChat.bubble.classList.add("error");
   // Collapse the incremental stable/live containers into one authoritative render.
   activeChat.body.innerHTML = renderMarkdownToHtml(content);
-  if (opts.persist && content.trim()) chatMessages.push({ role: "assistant", content });
+  const persisted = opts.persistContent ?? content;
+  if (opts.persist && persisted.trim()) chatMessages.push({ role: "assistant", content: persisted });
+  attachMessageActions(activeChat.bubble, content, { retry: Boolean(opts.error) });
   activeChat = null;
   setChatBusy(false);
+  saveChatTranscript();
   if (pinned) scrollChatToBottom();
 }
 
@@ -1874,6 +2076,7 @@ async function sendChat() {
   if (PROVIDER_BY_ID[settings.provider]?.apiKeyRequired && !settings.apiKey) {
     pushUserMessage(question);
     elements.chatInput.value = "";
+    autoGrowChatInput();
     const { bubble, body } = createMessageBubble("assistant");
     bubble.classList.add("error");
     body.innerHTML = renderMarkdownToHtml(`**${PROVIDER_BY_ID[settings.provider].label}** needs an API key. Open **Settings → Providers** (gear icon) to add one, or switch the active provider to a local endpoint.`);
@@ -1883,6 +2086,7 @@ async function sendChat() {
 
   pushUserMessage(question);
   elements.chatInput.value = "";
+  autoGrowChatInput();
 
   const id = `chat-${++chatStreamCounter}-${Date.now()}`;
   const { bubble, body } = createMessageBubble("assistant");
@@ -1893,10 +2097,12 @@ async function sendChat() {
   scrollChatToBottom();
 
   try {
+    const context = buildChatContext();
     const result = await window.dbgps.aiChat({
       id,
       messages: chatMessages,
-      context: buildChatContext()?.data ?? null,
+      context: context?.data ?? null,
+      contextLabel: context?.label,
       settings
     });
     elements.aiProvider.textContent = PROVIDER_BY_ID[result.provider as ProviderId]?.label || result.provider;
@@ -1910,9 +2116,17 @@ async function sendChat() {
   } catch (error) {
     // Keep whatever partial answer already streamed in (like the cancel path)
     // and append the error, instead of wiping the bubble to a bare error line.
+    // Read the partial before finalizeAssistant clears activeChat.
     const partial = activeChat?.text ?? "";
     const notice = `⚠️ ${errMessage(error)}`;
-    finalizeAssistant(partial.trim() ? `${partial}\n\n${notice}` : notice, { persist: false, error: true });
+    const hasPartial = Boolean(partial.trim());
+    // Keep the partial answer in the transcript (without the error notice) so a
+    // follow-up question does not silently lose the turn the model half-answered.
+    finalizeAssistant(hasPartial ? `${partial}\n\n${notice}` : notice, {
+      persist: hasPartial,
+      error: true,
+      persistContent: partial
+    });
   }
 }
 
@@ -1932,6 +2146,74 @@ function clearChat() {
   if (activeChat) return;
   chatMessages.length = 0;
   elements.chatMessages.innerHTML = `<div class="message assistant"><div class="message-body">${escapeHtml(CHAT_GREETING)}</div></div>`;
+  saveChatTranscript();
+}
+
+// --- Transcript persistence and export ---
+// The transcript is the researcher's record of how a result was interpreted, so it
+// survives a reload rather than being discarded with the window.
+const CHAT_STORAGE_KEY = "dbgps.chatTranscript";
+const MAX_STORED_MESSAGES = 200;
+
+function saveChatTranscript() {
+  try {
+    const recent = chatMessages.slice(-MAX_STORED_MESSAGES);
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(recent));
+  } catch {
+    /* quota exceeded or storage disabled: the in-memory transcript still works */
+  }
+}
+
+function restoreChatTranscript() {
+  let stored: unknown;
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return;
+    stored = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(stored)) return;
+
+  const restored: ChatMessage[] = [];
+  for (const entry of stored) {
+    const role = (entry as ChatMessage)?.role === "assistant" ? "assistant" : "user";
+    const content = typeof (entry as ChatMessage)?.content === "string" ? (entry as ChatMessage).content : "";
+    if (content.trim()) restored.push({ role, content });
+  }
+  if (!restored.length) return;
+
+  chatMessages.push(...restored);
+  for (const message of restored) {
+    const { bubble, body } = createMessageBubble(message.role);
+    if (message.role === "user") body.textContent = message.content;
+    else body.innerHTML = renderMarkdownToHtml(message.content);
+    attachMessageActions(bubble, message.content);
+  }
+  scrollChatToBottom();
+}
+
+function chatTranscriptMarkdown(): string {
+  const lines = [`# DBGPS AI conversation`, "", `_Exported ${new Date().toLocaleString()}_`, ""];
+  for (const message of chatMessages) {
+    lines.push(message.role === "user" ? "## Question" : "## Assistant", "", message.content, "");
+  }
+  return lines.join("\n");
+}
+
+async function exportChat() {
+  if (!chatMessages.length) {
+    appendLog("Nothing to export — the conversation is empty.");
+    return;
+  }
+  try {
+    await window.dbgps.saveFile({
+      defaultName: `dbgps-conversation-${new Date().toISOString().slice(0, 10)}.md`,
+      content: chatTranscriptMarkdown()
+    });
+  } catch (error) {
+    appendLog(`Conversation export failed: ${errMessage(error)}`);
+  }
 }
 
 document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((button) => {
@@ -1977,6 +2259,8 @@ elements.resultView.addEventListener("click", (event) => {
 elements.sendChatButton.addEventListener("click", sendChat);
 elements.stopChatButton.addEventListener("click", stopChat);
 elements.clearChatButton.addEventListener("click", clearChat);
+elements.exportChatButton.addEventListener("click", () => { void exportChat(); });
+restoreChatTranscript();
 
 // Live token stream: append each delta to the in-flight assistant bubble and
 // re-render its Markdown on the next animation frame.
@@ -2042,7 +2326,7 @@ elements.temperatureInput.addEventListener("input", () => {
   saveSettings();
 });
 elements.maxTokensInput.addEventListener("input", () => {
-  appSettings.maxTokens = Math.max(128, Math.trunc(Number(elements.maxTokensInput.value) || 900));
+  appSettings.maxTokens = Math.max(128, Math.trunc(Number(elements.maxTokensInput.value) || 4096));
   saveSettings();
 });
 document.querySelectorAll<HTMLButtonElement>(".appearance-card").forEach((button) => {
@@ -2079,8 +2363,23 @@ elements.chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     sendChat();
+    return;
+  }
+  // Esc stops a running generation without reaching for the mouse.
+  if (event.key === "Escape" && activeChat) {
+    event.preventDefault();
+    void stopChat();
   }
 });
+
+// Grow the composer with its content so a multi-line question is visible while
+// being typed, up to a cap beyond which it scrolls internally.
+function autoGrowChatInput() {
+  const input = elements.chatInput;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+}
+elements.chatInput.addEventListener("input", autoGrowChatInput);
 
 window.dbgps.onAnalyzerEvent((event) => {
   const payload = event as { kind?: string; line?: string; code?: number | null; done?: number; total?: number };
@@ -2532,7 +2831,8 @@ async function interpretReport() {
     const result = await window.dbgps.aiChat({
       id: `report-${Date.now()}`,
       messages: [{ role: "user", content: instruction }],
-      context: latestReport,
+      context: reportContext(latestReport),
+      contextLabel: "Diagnostics report",
       settings: currentAiSettings()
     });
     reportNarrative = result.content;
@@ -2595,7 +2895,7 @@ function buildReportHtml(report: ReportResult, narrative: string) {
     ["Cross-links", report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)],
     ...(h ? [["Strand recovery Sm", fmtPct(h.sm)], ["k-mer dropout Kd", fmtPct(h.kd)], ["k-mer noise Kn", Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"]] : [])
   ].map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`).join("");
-  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}.narrative .md-h{font-size:15px;margin:14px 0 6px;border:0;padding:0}.narrative code{background:#f4f6f9;padding:1px 5px;border-radius:5px;font-size:12px}.narrative blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid #dde3ea;color:#667085}";
+  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}.narrative .md-h{font-size:15px;margin:14px 0 6px;border:0;padding:0}.narrative code{background:#f4f6f9;padding:1px 5px;border-radius:5px;font-size:12px}.narrative blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid #dde3ea;color:#667085}.md-table-wrap{overflow-x:auto;margin:8px 0}.md-al-right{text-align:right}.md-al-center{text-align:center}.md-al-left{text-align:left}";
   const narrativeHtml = narrative ? `<h2>AI interpretation</h2><div class="narrative">${renderMarkdownToHtml(narrative)}</div>` : "";
   const entangledHtml = report.entangledNames.length
     ? `<h2>Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})</h2><pre>${escapeHtml(report.entangledNames.join("\n"))}</pre>`
