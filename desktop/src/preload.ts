@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { AgentRun, AgentTraceEvent } from "./agent-types";
 
 type AnalyzerConfig = {
   files: string[];
@@ -50,6 +51,8 @@ type AiChatRequest = {
   context: unknown;
   contextLabel?: string;
   settings: AiSettings;
+  mode?: "chat" | "read-only";
+  evidenceSnapshotIds?: string[];
 };
 
 type AiChatResult = {
@@ -58,6 +61,7 @@ type AiChatResult = {
   model: string;
   content: string;
   canceled: boolean;
+  agent?: AgentRun;
 };
 
 type AiChatChunk = { id: string; delta: string };
@@ -115,6 +119,7 @@ type InteractiveBatchRow = {
 };
 type InteractiveBatchResult = {
   type: "batch";
+  datasetVersion: string;
   file: string;
   k: number;
   primerFront: number;
@@ -152,10 +157,16 @@ const api = {
   stopAnalyzer: () => ipcRenderer.invoke("analyzer:stop") as Promise<{ ok: boolean }>,
   aiChat: (request: AiChatRequest) => ipcRenderer.invoke("ai:chat", request) as Promise<AiChatResult>,
   cancelAiChat: (id: string) => ipcRenderer.invoke("ai:cancel", id) as Promise<{ ok: boolean }>,
+  clearAiEvidence: () => ipcRenderer.invoke("ai:clearEvidence") as Promise<{ ok: boolean }>,
   onAiChatChunk: (callback: (chunk: AiChatChunk) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, chunk: AiChatChunk) => callback(chunk);
     ipcRenderer.on("ai:chunk", listener);
     return () => ipcRenderer.removeListener("ai:chunk", listener);
+  },
+  onAiTool: (callback: (event: AgentTraceEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: AgentTraceEvent) => callback(payload);
+    ipcRenderer.on("ai:tool", listener);
+    return () => ipcRenderer.removeListener("ai:tool", listener);
   },
   refreshProviderModels: (request: ProviderRefreshRequest) =>
     ipcRenderer.invoke("ai:refreshModels", request) as Promise<{ models: string[]; provider: string; source: string }>,

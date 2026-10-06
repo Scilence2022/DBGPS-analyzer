@@ -57,3 +57,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test bounded agent and provider protocols
+        run: node --test tests/*.test.cjs

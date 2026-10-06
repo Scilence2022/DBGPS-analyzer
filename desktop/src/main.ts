@@ -4,6 +4,11 @@ import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSyn
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { AnalyzerQueryQueue, validateReadOnlyCommand } from "./analyzer-queue";
+import { AgentEvidenceStore } from "./agent-evidence";
+import { AGENT_LIMITS, runReadOnlyAgent } from "./agent";
+import { requestAgentTurn } from "./agent-providers";
+import type { AgentRun } from "./agent-types";
 
 type AnalyzerConfig = {
   files: string[];
@@ -51,6 +56,8 @@ type AiChatRequest = {
   // knows what it is looking at instead of inferring it from the JSON shape.
   contextLabel?: string;
   settings?: AiSettings;
+  mode?: "chat" | "read-only";
+  evidenceSnapshotIds?: string[];
 };
 
 type ProviderDefinition = {
@@ -64,12 +71,6 @@ type ProviderDefinition = {
   modelEnv?: string;
   baseUrlEnv?: string;
   apiKeyRequired: boolean;
-};
-
-type PendingQuery = {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
 };
 
 type SequenceSummaryResult = {
@@ -106,6 +107,21 @@ type InteractiveBatchRow = {
 
 let mainWindow: BrowserWindow | null = null;
 let session: AnalyzerSession | null = null;
+const agentEvidence = new AgentEvidenceStore();
+const agentHistory = new Map<number, AgentRun[]>();
+let batchGeneration = 0;
+
+function abortAgentRuns() {
+  for (const entry of activeAiStreams.values()) {
+    if (entry.agent) entry.controller.abort("dataset_changed");
+  }
+}
+
+function invalidateAgentEvidence() {
+  abortAgentRuns();
+  agentEvidence.invalidate();
+  batchGeneration++;
+}
 
 // In a packaged app the analyzer binary is shipped as an extra resource; in dev
 // it lives at the repo root (two levels up from desktop/dist) and can be built
@@ -469,7 +485,7 @@ function saveSecrets(map: Record<string, string>) {
 class AnalyzerSession {
   private child: ChildProcessWithoutNullStreams | null = null;
   private stdout: BoundedLineReader | null = null;
-  private pending: PendingQuery[] = [];
+  private queue = new AnalyzerQueryQueue(() => this.stop());
   private ready = false;
   private k = 31;
 
@@ -538,11 +554,7 @@ class AnalyzerSession {
           }
         }
 
-        const query = this.pending.shift();
-        if (query) {
-          clearTimeout(query.timer);
-          query.resolve(payload);
-        } else {
+        if (!this.queue.complete(payload)) {
           sendWindow("analyzer:event", { kind: "data", payload });
         }
       }, handleFailure);
@@ -569,34 +581,20 @@ class AnalyzerSession {
           reject(new Error(`Analyzer exited with code ${code}`));
         }
         this.rejectPending(new Error(`Analyzer exited with code ${code}`));
+        if (session === this) invalidateAgentEvidence();
       });
     });
   }
 
-  query(command: string, timeoutMs = 60000) {
+  query(command: string, timeoutMs = 60000, signal?: AbortSignal) {
     if (!this.child || !this.ready || this.child.killed) {
       throw new Error("Analyzer is not running.");
     }
+    if (typeof command !== "string" || /[\r\n\0]/.test(command)) throw new Error("Analyzer query must be a single command line.");
     const normalized = command.trim();
     if (!normalized) throw new Error("Query command is empty.");
 
-    return new Promise((resolve, reject) => {
-      const pending: PendingQuery = {
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          this.pending = this.pending.filter((item) => item !== pending);
-          reject(new Error("Analyzer query timed out."));
-        }, timeoutMs)
-      };
-      this.pending.push(pending);
-      this.child?.stdin.write(`${normalized}\n`, (error) => {
-        if (!error) return;
-        clearTimeout(pending.timer);
-        this.pending = this.pending.filter((item) => item !== pending);
-        reject(error);
-      });
-    });
+    return this.queue.enqueue((callback) => this.child!.stdin.write(`${normalized}\n`, callback), timeoutMs, signal);
   }
 
   async addFiles(files: string[]) {
@@ -604,6 +602,7 @@ class AnalyzerSession {
       throw new Error("Analyzer is not running.");
     }
     const normalized = files.filter((file) => typeof file === "string" && file.length > 0);
+    if (normalized.some((file) => /[\r\n\0]/.test(file))) throw new Error("Read-file paths cannot contain command separators.");
     if (normalized.length === 0) throw new Error("Select at least one additional NGS FASTA/FASTQ file.");
 
     let latest: AnalyzerSummaryResult | null = null;
@@ -639,14 +638,17 @@ class AnalyzerSession {
   }
 
   stop() {
-    if (this.child && !this.child.killed) {
-      this.child.stdin.write("exit\n");
+    const child = this.child;
+    this.rejectPending(new Error("Analyzer session stopped."));
+    if (child && !child.killed) {
+      child.stdin.write("exit\n", () => {});
       setTimeout(() => {
-        if (this.child && !this.child.killed) this.child.kill();
+        if (!child.killed) child.kill();
       }, 500);
     }
     this.stdout?.close();
     this.ready = false;
+    if (session === this) invalidateAgentEvidence();
   }
 
   getK() {
@@ -654,11 +656,7 @@ class AnalyzerSession {
   }
 
   private rejectPending(error: Error) {
-    for (const query of this.pending) {
-      clearTimeout(query.timer);
-      query.reject(error);
-    }
-    this.pending = [];
+    this.queue.failAll(error);
   }
 }
 
@@ -1218,7 +1216,9 @@ async function refreshProviderModels(request: ProviderRefreshRequest) {
 
 // In-flight chat streams, keyed by the renderer-supplied stream id so a matching
 // "ai:cancel" can abort the underlying fetch mid-stream.
-const activeAiStreams = new Map<string, AbortController>();
+const activeAiStreams = new Map<string, { controller: AbortController; owner: number; agent: boolean }>();
+
+function aiStreamKey(owner: number, id: string) { return `${owner}:${id}`; }
 
 async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
   const settings = normalizeAiSettings(request.settings);
@@ -1228,13 +1228,16 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
   }
 
   const id = String(request?.id || "");
-  if (!id) throw new Error("Missing chat stream id.");
-
-  const system = assistantSystemPrompt();
-  const turns = conversationTurns(request);
+  if (!id || id.length > 200) throw new Error("Missing or invalid chat stream id.");
+  const owner = event.sender.id;
+  const key = aiStreamKey(owner, id);
+  if (activeAiStreams.has(key)) throw new Error("Chat stream id is already active.");
+  if (request.mode === "read-only" && [...activeAiStreams.values()].some((entry) => entry.owner === owner && entry.agent)) {
+    throw new Error("A read-only agent request is already active.");
+  }
 
   const controller = new AbortController();
-  activeAiStreams.set(id, controller);
+  activeAiStreams.set(key, { controller, owner, agent: request.mode === "read-only" });
 
   // Idle watchdog: abort if no token arrives within AI_STREAM_IDLE_MS. Re-armed on
   // every delta so a healthy stream never times out; a timeout is distinguished
@@ -1242,8 +1245,9 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
   let timedOut = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const armIdle = () => {
+    if (request.mode === "read-only") return;
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { timedOut = true; controller.abort(); }, AI_STREAM_IDLE_MS);
+    idleTimer = setTimeout(() => { timedOut = true; controller.abort("idle-timeout"); }, AI_STREAM_IDLE_MS);
   };
   const sink: DeltaSink = (delta) => {
     armIdle();
@@ -1252,9 +1256,30 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
     if (delta && !controller.signal.aborted && !event.sender.isDestroyed()) event.sender.send("ai:chunk", { id, delta });
   };
 
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   armIdle(); // also bounds the connect + first-token window
   try {
-    const content = await streamChat(settings, system, turns, sink, controller.signal);
+    if (request.mode === "read-only") {
+      deadline = setTimeout(() => controller.abort("deadline"), AGENT_LIMITS.deadlineMs);
+      const selectedIds = Array.isArray(request.evidenceSnapshotIds) ? request.evidenceSnapshotIds.filter((value) => typeof value === "string").slice(-8) : [];
+      const previousEvidence = selectedIds.map((snapshotId) => {
+        const prior = agentHistory.get(owner)?.find((run) => run.snapshot.id === snapshotId);
+        return prior ? { snapshot: prior.snapshot, stopReason: prior.stopReason, trace: prior.trace } : { snapshotId, unavailable: true };
+      });
+      const { snapshot, backend } = agentEvidence.open({ activeView: request.context, previousEvidence }, session);
+      const agent = await runReadOnlyAgent({
+        snapshot, backend, settings, provider: requestAgentTurn,
+        messages: (request.messages || []).map((message) => ({ role: message.role === "assistant" ? "assistant" : "user", content: message.content })),
+        signal: controller.signal,
+        onTrace: (trace) => { if (!event.sender.isDestroyed()) event.sender.send("ai:tool", { id, trace }); }
+      });
+      const retained = agentHistory.get(owner) || [];
+      retained.push(agent);
+      agentHistory.set(owner, retained.slice(-8));
+      if (!event.sender.isDestroyed()) event.sender.send("ai:chunk", { id, delta: agent.content });
+      return { id, provider: settings.provider, model: settings.model, content: agent.content, canceled: agent.stopReason === "canceled", agent };
+    }
+    const content = await streamChat(settings, assistantSystemPrompt(), conversationTurns(request), sink, controller.signal);
     if (!content.trim()) throw new Error(`${settings.label} returned an empty response.`);
     return { id, provider: settings.provider, model: settings.model, content, canceled: false };
   } catch (error) {
@@ -1268,23 +1293,25 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
     }
     throw error instanceof Error ? error : new Error(String(error));
   } finally {
+    if (deadline) clearTimeout(deadline);
     if (idleTimer) clearTimeout(idleTimer);
-    activeAiStreams.delete(id);
+    activeAiStreams.delete(key);
   }
+}
+
+function cancelAiChat(owner: number, id: string) {
+  const entry = activeAiStreams.get(aiStreamKey(owner, String(id)));
+  if (entry) entry.controller.abort("canceled");
+  return { ok: Boolean(entry) };
 }
 
 // Abort every in-flight stream. Called when the renderer that owns them goes away
 // (reload or window close) — the replies can no longer be delivered anywhere, so
 // letting them run to completion just spends metered tokens.
 function abortAllAiStreams() {
-  for (const controller of activeAiStreams.values()) controller.abort();
+  for (const entry of activeAiStreams.values()) entry.controller.abort("canceled");
   activeAiStreams.clear();
-}
-
-function cancelAiChat(id: string) {
-  const controller = activeAiStreams.get(String(id));
-  if (controller) controller.abort();
-  return { ok: Boolean(controller) };
+  agentHistory.clear();
 }
 
 // --------------------------------------------------------------------------- #
@@ -1564,9 +1591,15 @@ async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
 async function runInteractiveBatch(req: InteractiveBatchRequest) {
   if (!session) throw new Error("Analyzer is not running.");
   if (!req || !req.file) throw new Error("Select a reference file for Batch QC.");
+  const currentSession = session;
+  const datasetVersion = agentEvidence.getDatasetVersion();
+  if (!datasetVersion) throw new Error("Read index is changing or unavailable. Start or finish loading it before Batch QC.");
+  abortAgentRuns();
+  agentEvidence.clearBatch();
+  const generation = ++batchGeneration;
   const primerFront = toPositiveInt(req.primerFront, 0, 0, 100000);
   const primerBack = toPositiveInt(req.primerBack, 0, 0, 100000);
-  const k = session.getK();
+  const k = currentSession.getK();
   const rows: InteractiveBatchRow[] = [];
   const queries: Array<{ row: InteractiveBatchRow; seq: string }> = [];
 
@@ -1602,8 +1635,11 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
   sendWindow("analyzer:event", { kind: "batchProgress", done: completed, total: rows.length });
 
   for (let i = 0; i < queries.length; i += INTERACTIVE_BATCH_CHUNK_SIZE) {
+    if (session !== currentSession || agentEvidence.getDatasetVersion() !== datasetVersion || generation !== batchGeneration) {
+      throw new Error("Dataset or Batch QC request changed; stale batch result discarded.");
+    }
     const chunk = queries.slice(i, i + INTERACTIVE_BATCH_CHUNK_SIZE);
-    const payloads = await session.queryBatch(chunk.map((item) => `sequenceSummary ${item.seq}`));
+    const payloads = await currentSession.queryBatch(chunk.map((item) => `sequenceSummary ${item.seq}`));
 
     payloads.forEach((payload, offset) => {
       const row = chunk[offset].row;
@@ -1623,7 +1659,12 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
   const ok = rows.filter((row) => row.status === "ok" && row.summary).length;
   const skipped = rows.filter((row) => row.status === "skipped").length;
   const errors = rows.length - ok - skipped;
-  return { type: "batch", file: req.file, k, primerFront, primerBack, total: rows.length, ok, skipped, errors, rows };
+  if (session !== currentSession || agentEvidence.getDatasetVersion() !== datasetVersion || generation !== batchGeneration) {
+    throw new Error("Dataset or Batch QC request changed; stale batch result discarded.");
+  }
+  abortAgentRuns();
+  agentEvidence.cacheBatch(datasetVersion, primerFront, primerBack, rows, new Map(queries.filter((item) => item.row.status === "ok").map((item) => [item.row.index, item.seq])));
+  return { type: "batch", datasetVersion, file: req.file, k, primerFront, primerBack, total: rows.length, ok, skipped, errors, rows };
 }
 
 async function loadBatchSequence(req: BatchSequenceRequest) {
@@ -1704,6 +1745,11 @@ function createWindow() {
     }
   });
 
+  const owner = mainWindow.webContents.id;
+  mainWindow.webContents.once("destroyed", () => {
+    for (const entry of activeAiStreams.values()) if (entry.owner === owner) entry.controller.abort("canceled");
+    agentHistory.delete(owner);
+  });
   // The assistant's replies may contain links, so every navigation request here is
   // model-authored and untrusted. Send http(s) to the user's real browser and deny
   // everything else outright rather than opening it in an Electron window.
@@ -1734,7 +1780,6 @@ function createWindow() {
   mainWindow.webContents.on("did-start-navigation", (details) => {
     if (details.isMainFrame && !details.isSameDocument) abortAllAiStreams();
   });
-
   mainWindow.loadFile(path.join(__dirname, "index.html"));
 }
 
@@ -1762,19 +1807,50 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("analyzer:start", async (_event, config: AnalyzerConfig) => {
+    invalidateAgentEvidence();
     session?.stop();
-    session = new AnalyzerSession();
-    return session.start(config);
+    const started = new AnalyzerSession();
+    session = started;
+    try {
+      const result = await started.start(config);
+      if (session !== started) throw new Error("Analyzer start was superseded.");
+      const ready = result as { k: number; threads: number; readLength: number };
+      const datasetVersion = agentEvidence.activate({ k: ready.k, threads: ready.threads, readLength: ready.readLength });
+      return { ...ready, datasetVersion };
+    } catch (error) {
+      started.stop();
+      throw error;
+    }
   });
 
   ipcMain.handle("analyzer:query", async (_event, command: string) => {
     if (!session) throw new Error("Analyzer is not running.");
-    return session.query(command);
+    validateReadOnlyCommand(command);
+    const current = session;
+    const version = agentEvidence.getDatasetVersion();
+    const result = await current.query(command);
+    if (session !== current || version !== agentEvidence.getDatasetVersion()) throw new Error("Analyzer result belongs to an older dataset version.");
+    if (session === current && version === agentEvidence.getDatasetVersion() && (result as { type?: string }).type === "sequence") {
+      agentEvidence.selectSequence(command.trim().split(/\s+/)[1]?.toUpperCase() || "");
+    }
+    return { ...(result as Record<string, unknown>), datasetVersion: version };
   });
 
   ipcMain.handle("analyzer:addFiles", async (_event, files: string[]) => {
     if (!session) throw new Error("Analyzer is not running.");
-    return session.addFiles(Array.isArray(files) ? files : []);
+    if (!agentEvidence.getDatasetVersion()) throw new Error("Read index is unavailable or already changing.");
+    const current = session;
+    invalidateAgentEvidence();
+    try {
+      const result = await current.addFiles(Array.isArray(files) ? files : []);
+      if (session !== current) throw new Error("Analyzer changed while adding reads.");
+      const loaded = result as AnalyzerSummaryResult & { threads: number; readLength: number };
+      const datasetVersion = agentEvidence.activate({ k: loaded.k, threads: loaded.threads, readLength: loaded.readLength });
+      return { ...loaded, datasetVersion };
+    } catch (error) {
+      current.stop();
+      throw error;
+    }
   });
 
   // Batch scoring for the Batch QC view. Returns one payload per command, with
@@ -1784,7 +1860,9 @@ app.whenReady().then(() => {
   // hundreds of thousands of strands.
   ipcMain.handle("analyzer:queryBatch", async (_event, commands: string[]) => {
     if (!session) throw new Error("Analyzer is not running.");
-    const payloads = await session.queryBatch(Array.isArray(commands) ? commands : []);
+    const selected = Array.isArray(commands) ? commands : [];
+    selected.forEach(validateReadOnlyCommand);
+    const payloads = await session.queryBatch(selected);
     return payloads.map((payload) => {
       if (payload && typeof payload === "object" && (payload as { type?: string }).type === "sequence") {
         const { coverages, ratios, ...summary } = payload as Record<string, unknown>;
@@ -1797,13 +1875,15 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("analyzer:stop", async () => {
+    invalidateAgentEvidence();
     session?.stop();
     session = null;
     return { ok: true };
   });
 
   ipcMain.handle("ai:chat", async (event, request: AiChatRequest) => aiChat(event, request));
-  ipcMain.handle("ai:cancel", async (_event, id: string) => cancelAiChat(id));
+  ipcMain.handle("ai:cancel", async (event, id: string) => cancelAiChat(event.sender.id, id));
+  ipcMain.handle("ai:clearEvidence", async (event) => { agentHistory.delete(event.sender.id); return { ok: true }; });
   ipcMain.handle("ai:refreshModels", async (_event, request) => refreshProviderModels(request));
 
   ipcMain.handle("secrets:load", async () => loadSecrets());
