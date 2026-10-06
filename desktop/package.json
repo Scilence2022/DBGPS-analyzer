@@ -9,6 +9,7 @@
     "dev": "npm run build && electron .",
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.typecheck.json",
+    "test": "npm run build && node --test tests/*.test.cjs",
     "dist": "npm run build && electron-builder"
   },
   "dependencies": {

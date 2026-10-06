@@ -1,5 +1,6 @@
 import { createIcons, icons } from "lucide";
 import type { DbgpsApi } from "./preload";
+import type { AgentRun, AgentToolTrace } from "./agent-types";
 
 declare global {
   interface Window {
@@ -360,6 +361,7 @@ const elements = {
   exportChatButton: $("exportChatButton") as HTMLButtonElement,
   chatContextChip: $("chatContextChip"),
   aiProvider: $("aiProvider"),
+  agentToolsToggle: $("agentToolsToggle") as HTMLInputElement,
   settingsPanel: $("settingsPanel"),
   saveSettingsButton: $("saveSettingsButton") as HTMLButtonElement,
   closeSettingsButton: $("closeSettingsButton") as HTMLButtonElement,
@@ -1817,6 +1819,7 @@ function compactInteractive(result: AnalyzerResult): unknown {
 
 function compactBatch(batch: InteractiveBatchResult): unknown {
   return {
+    datasetVersion: batch.datasetVersion,
     file: compactPath(batch.file),
     k: batch.k,
     primerFront: batch.primerFront,
@@ -1826,6 +1829,7 @@ function compactBatch(batch: InteractiveBatchResult): unknown {
     skipped: batch.skipped,
     errors: batch.errors,
     sampleRows: batch.rows.slice(0, 25).map((row) => ({
+      index: row.index,
       name: row.name,
       status: row.status,
       message: row.message,
@@ -1898,8 +1902,10 @@ type ActiveChat = {
   stableEl: HTMLElement | null;
   liveEl: HTMLElement | null;
   stableLen: number;
+  trace: AgentToolTrace[];
 };
 let activeChat: ActiveChat | null = null;
+const retainedAgentRuns: AgentRun[] = [];
 let chatStreamCounter = 0;
 let chatRenderScheduled = false;
 
@@ -2018,6 +2024,7 @@ function setChatBusy(busy: boolean) {
   // cancel can never leave it stuck disabled at the start of the next stream.
   if (busy) elements.stopChatButton.disabled = false;
   elements.clearChatButton.disabled = busy;
+  elements.agentToolsToggle.disabled = busy;
 }
 
 function scheduleAssistantRender() {
@@ -2067,6 +2074,38 @@ function finalizeAssistant(content: string, opts: { persist: boolean; error?: bo
   if (pinned) scrollChatToBottom();
 }
 
+function renderAgentTrace(bubble: HTMLElement, trace: AgentToolTrace[], run?: AgentRun): HTMLElement {
+  let container = bubble.querySelector<HTMLElement>(".agent-trace");
+  if (!container) {
+    container = document.createElement("details");
+    container.className = "agent-trace";
+    bubble.appendChild(container);
+  }
+  const open = container.hasAttribute("open");
+  const expanded = new Set(Array.from(container.querySelectorAll<HTMLElement>("details[open]")).map((item) => item.dataset.callId));
+  const summary = run ? `${trace.length} tool calls · ${run.stopReason} · ${run.snapshot.id.slice(0, 8)}` : `${trace.length} tool calls`;
+  container.innerHTML = `<summary>${escapeHtml(summary)}</summary><ol>${trace.map((item) =>
+    `<li><strong>${escapeHtml(item.name)}</strong> · ${escapeHtml(item.status)}<div><code>${escapeHtml(JSON.stringify(item.arguments))}</code></div>` +
+    `<details data-call-id="${escapeHtml(item.callId)}" ${expanded.has(item.callId) ? "open" : ""}><summary>Evidence</summary><pre>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre></details></li>`
+  ).join("")}</ol>`;
+  if (open) container.setAttribute("open", "");
+  if (run) {
+    const button = document.createElement("button");
+    button.className = "icon-only ghost";
+    button.title = "Export evidence and tool-call record";
+    button.setAttribute("aria-label", button.title);
+    button.innerHTML = '<i data-lucide="download"></i>';
+    button.addEventListener("click", async () => {
+      try {
+        await window.dbgps.saveFile({ defaultName: `DBGPS-agent-${run.snapshot.id}.json`, content: JSON.stringify(run, null, 2) });
+      } catch (error) { appendLog(`Evidence export failed: ${errMessage(error)}`); }
+    });
+    container.appendChild(button);
+    renderIcons();
+  }
+  return container;
+}
+
 async function sendChat() {
   if (activeChat) return;
   const question = elements.chatInput.value.trim();
@@ -2092,7 +2131,7 @@ async function sendChat() {
   const { bubble, body } = createMessageBubble("assistant");
   bubble.classList.add("streaming");
   body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
-  activeChat = { id, bubble, body, text: "", stableEl: null, liveEl: null, stableLen: 0 };
+  activeChat = { id, bubble, body, text: "", stableEl: null, liveEl: null, stableLen: 0, trace: [] };
   setChatBusy(true);
   scrollChatToBottom();
 
@@ -2103,11 +2142,18 @@ async function sendChat() {
       messages: chatMessages,
       context: context?.data ?? null,
       contextLabel: context?.label,
-      settings
+      settings,
+      mode: elements.agentToolsToggle.checked ? "read-only" : "chat",
+      evidenceSnapshotIds: retainedAgentRuns.map((run) => run.snapshot.id)
     });
     elements.aiProvider.textContent = PROVIDER_BY_ID[result.provider as ProviderId]?.label || result.provider;
     elements.aiProvider.title = result.model;
-    if (result.canceled) {
+    if (result.agent) {
+      retainedAgentRuns.push(result.agent);
+      if (retainedAgentRuns.length > 8) retainedAgentRuns.shift();
+      renderAgentTrace(bubble, result.agent.trace, result.agent);
+      finalizeAssistant(result.content, { persist: result.agent.stopReason === "completed", error: result.agent.stopReason === "error" });
+    } else if (result.canceled) {
       const partial = activeChat?.text ?? "";
       finalizeAssistant(partial || "_(stopped)_", { persist: Boolean(partial.trim()) });
     } else {
@@ -2145,6 +2191,8 @@ async function stopChat() {
 function clearChat() {
   if (activeChat) return;
   chatMessages.length = 0;
+  retainedAgentRuns.length = 0;
+  void window.dbgps.clearAiEvidence();
   elements.chatMessages.innerHTML = `<div class="message assistant"><div class="message-body">${escapeHtml(CHAT_GREETING)}</div></div>`;
   saveChatTranscript();
 }
@@ -2269,6 +2317,14 @@ window.dbgps.onAiChatChunk((chunk) => {
   if (!activeChat.text) activeChat.bubble.classList.remove("streaming");
   activeChat.text += chunk.delta;
   scheduleAssistantRender();
+});
+window.dbgps.onAiTool(({ id, trace }) => {
+  if (!activeChat || activeChat.id !== id) return;
+  const existing = activeChat.trace.findIndex((item) => item.callId === trace.callId);
+  if (existing < 0) activeChat.trace.push(trace);
+  else activeChat.trace[existing] = trace;
+  renderAgentTrace(activeChat.bubble, activeChat.trace);
+  scrollChatToBottom();
 });
 elements.settingsButton.addEventListener("click", () => openSettings("providers"));
 elements.saveSettingsButton.addEventListener("click", commitSettings);
@@ -2457,6 +2513,7 @@ let filterSaveDefaultName = "passed.fa";
 let reportRefFile = "";
 let reportNgsFiles: string[] = [];
 let latestReport: ReportResult | null = null;
+let reportAiRequest: { id: string; report: ReportResult } | null = null;
 let reportNarrative = "";
 
 // Compact per-strand metrics kept separately from the full coverage profile so
@@ -2682,6 +2739,14 @@ async function generateReport() {
     if (!reportRefFile) return;
   }
   ui.reportRunButton.disabled = true;
+  if (reportAiRequest) {
+    void window.dbgps.cancelAiChat(reportAiRequest.id);
+    reportAiRequest = null;
+  }
+  latestReport = null;
+  ui.reportAiButton.disabled = true;
+  ui.reportExportHtmlButton.disabled = true;
+  ui.reportExportMdButton.disabled = true;
   reportNarrative = "";
   ui.reportResult.classList.remove("empty-state");
   ui.reportResult.innerHTML = `<div class="tool-loading">Running DBGPS-analyzer, DBGPS-links, and DBGPS-seq-filter…</div>`;
@@ -2769,7 +2834,7 @@ function verdictIcon(level: Verdict["level"]) {
 function renderReport(report: ReportResult) {
   latestReport = report;
   ui.reportResult.classList.remove("empty-state");
-  ui.reportAiButton.disabled = false;
+  ui.reportAiButton.disabled = Boolean(reportAiRequest);
   ui.reportExportHtmlButton.disabled = false;
   ui.reportExportMdButton.disabled = false;
   const h = report.analyzer?.headline || null;
@@ -2817,30 +2882,33 @@ function renderReport(report: ReportResult) {
 }
 
 async function interpretReport() {
-  if (!latestReport) return;
+  if (!latestReport || reportAiRequest) return;
+  const report = latestReport;
+  const id = `report-${++chatStreamCounter}-${Date.now()}`;
+  reportAiRequest = { id, report };
   ui.reportAiButton.disabled = true;
   reportNarrative = "Generating AI interpretation…";
-  renderReport(latestReport);
+  renderReport(report);
   try {
     const instruction =
       "You are given a DBGPS DNA data-storage diagnostics report (JSON) combining strand recovery (Sm), " +
       "k-mer dropout (Kd), k-mer noise (Kn), cross-link counts, and entanglement filtering across a set of " +
-      "reference strands. Write a concise interpretation: overall data quality, the most likely failure modes " +
-      "(dropout, noise, entanglement/chimeras), and concrete recommendations (coverage cutoffs, primer removal, " +
-      "resynthesis, deeper sequencing).";
+      "reference strands. State measured facts with their denominators and tool scopes. Distinguish possible " +
+      "explanations from established causes, acknowledge missing evidence, and propose discriminating manual checks. " +
+      "Do not equate pooled k-mer support with decoding, distinct-key noise with a base-error rate, or sharing with physical chimeras.";
     const result = await window.dbgps.aiChat({
-      id: `report-${Date.now()}`,
+      id,
       messages: [{ role: "user", content: instruction }],
-      context: reportContext(latestReport),
+      context: reportContext(report),
       contextLabel: "Diagnostics report",
       settings: currentAiSettings()
     });
-    reportNarrative = result.content;
+    if (reportAiRequest?.id === id && latestReport === report) reportNarrative = result.content;
   } catch (error) {
-    reportNarrative = `AI interpretation failed: ${errMessage(error)}`;
+    if (reportAiRequest?.id === id && latestReport === report) reportNarrative = `AI interpretation failed: ${errMessage(error)}`;
   } finally {
-    ui.reportAiButton.disabled = false;
-    if (latestReport) renderReport(latestReport);
+    if (reportAiRequest?.id === id) reportAiRequest = null;
+    if (latestReport === report) renderReport(report);
   }
 }
 

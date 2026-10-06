@@ -1331,6 +1331,7 @@ td {
 }
 
 .chat-context-chip {
+  flex-shrink: 0;
   align-self: flex-start;
   max-width: 100%;
   padding: 3px 10px;
@@ -1526,6 +1527,39 @@ td {
   align-items: stretch;
 }
 
+.chat-header,
+.chat-input-row,
+.chat-agent-controls,
+.chat-messages > .message {
+  flex-shrink: 0;
+}
+
+.chat-agent-controls {
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.chat-agent-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.chat-agent-controls input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+}
+.agent-trace {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.agent-trace summary { cursor: pointer; color: var(--muted); }
+.agent-trace ol { margin: 8px 0; padding-left: 18px; }
+.agent-trace li { margin: 6px 0; }
+.agent-trace pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 10px; }
+.agent-trace .icon-only { width: 28px; height: 28px; }
+
 /* Height is driven by autoGrowChatInput(); the cap here matches its 180px ceiling
    so the textarea scrolls internally instead of pushing the transcript off-screen. */
 #chatInput {
@@ -1568,6 +1602,10 @@ td {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   opacity: 1;
+}
+
+.chat-input-row .icon-only[hidden] {
+  display: none;
 }
 
 .chat-input-row .icon-only {

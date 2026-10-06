@@ -185,7 +185,28 @@ The ChatBox can route diagnostics through these provider definitions:
 | Local | OpenAI-compatible chat completions | `http://localhost:11434/v1` |
 | Custom Endpoint | OpenAI-compatible chat completions | `http://localhost:8000/v1` |
 
-Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage. **API keys are stored separately, encrypted with the operating-system keychain via Electron `safeStorage`** (handled by the main process), and are never written to local app storage.
+Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage. API keys are stored separately by the main process using Electron `safeStorage` when encryption is available, with a plaintext fallback when unavailable; credential storage is not universally encrypted. Keys are not written to local app storage.
+
+#### Bounded read-only AI agent
+
+ChatBox defaults to ordinary streaming text chat. Enabling **Read-only tools** opts the current request into native function calling through the selected provider. The model can select an allowlisted query, receive deterministic evidence, and continue to an answer or another bounded query. Models/endpoints must support their provider's function-calling protocol; unsupported or malformed responses fail explicitly rather than being interpreted as executable text.
+
+| Tool | Available evidence |
+|:---|:---|
+| `get_analysis_summary` | Loaded-index counts and effective counting settings, plus cached batch aggregates |
+| `get_sequence_profile` | Positional coverage for a cached zero-based batch record index or the user-selected Interactive sequence; declared pagination |
+| `query_kmer` | Count and membership-derived neighborhood of one k-mer matching the loaded k |
+| `get_batch_rows` | Paginated complete-library or anomaly/status selections from the completed main-process batch cache |
+
+The main process validates exact argument fields, integer ranges, DNA strings, and dataset/batch versions before execution and after asynchronous work. The model cannot supply paths, shell commands, new read files, trimming parameters, or exports. Loading, recounting, filtering, changing parameters, and saving files remain user-operated controls, not approval-gated model tools.
+
+Per request, limits are six tool calls, five model turns, 120 seconds, 4,096 output tokens per model turn, 4,096 bases per cached profile, 128 coverage positions per page, 25 batch rows per page, and neighborhood depth two. History, initial context, and each tool result have respective 48,000-, 12,000-, and 24,000-UTF-16-unit budgets. Provider requests have a separate 256,000-unit serialized-body cap and 1-MiB response cap. These are application limits, not a guarantee of low total RAM: the full read index remains unchanged.
+
+The cache holds at most 250,000 batch rows and 40 million eligible sequence bases. Profiles outside those limits require manual selection. Each turn records snapshot/version identifiers, supplied context and omissions, effective model settings, tool arguments/results, timestamps, and completion status. Eight recent records are retained per window for budgeted follow-up context; this is not a durable research archive. Expand the tool-call record to inspect it and use its download control for an explicit JSON export. Export records omit API keys and retain only the endpoint origin, not a full URL or provider-private reasoning continuation.
+
+Stop cancels provider work and subsequent agent dispatch. A query already written to the C kernel is drained without adopting its result or shifting FIFO attribution; it does not interrupt C computation. A query timeout or uncertain write stops that kernel session and rejects all queued requests. Restarting, stopping, adding reads, or replacing the batch snapshot invalidates active agent requests. Report interpretation remains a separate text-only request, now bound to its originating report and canceled when a new report starts.
+
+Native Responses, compatible Chat Completions, Anthropic Messages, and Gemini protocol adapters are tested with deterministic fixtures. Those tests do not establish live model availability, factual interpretation quality, prompt-injection resistance, privacy guarantees, or user benefit. Sending a request to a remote endpoint can transmit questions, selected context, k-mer strings, reference identifiers, retrieved measurements, and budgeted earlier evidence. A provider called Local is local only when its actual configured endpoint is local.
 
 ```bash
 cd desktop
