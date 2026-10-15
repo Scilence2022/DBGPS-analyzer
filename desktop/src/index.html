@@ -368,7 +368,11 @@
               <h2>AI ChatBox</h2>
             </div>
             <div class="chat-header-actions">
-              <span id="aiProvider" class="provider-pill">local</span>
+              <div id="chatProviderSwitch" class="chat-provider-switch">
+                <select id="chatProviderSelect" title="Chat provider" aria-label="Chat provider"></select>
+                <select id="chatModelSelect" title="Chat model" aria-label="Chat model"></select>
+              </div>
+              <span id="aiProvider" class="provider-pill" hidden>local</span>
               <button id="exportChatButton" class="icon-only ghost" title="Export conversation as Markdown" aria-label="Export conversation as Markdown">
                 <i data-lucide="download"></i>
               </button>
@@ -389,12 +393,18 @@
             aria-relevant="additions text"
             aria-label="Conversation with the AI assistant"
           >
-            <div class="message assistant">
-              <div class="message-body">Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</div>
+            <div class="chat-welcome">
+              <h3>Ask about your analysis</h3>
+              <p>Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</p>
+              <div class="chat-suggestions">
+                <button type="button" class="chat-suggestion" data-chat-suggest="What do Sm, Kd and Kn mean?">What do Sm, Kd and Kn mean?</button>
+                <button type="button" class="chat-suggestion" data-chat-suggest="How do I run a query or batch scan?">How do I run a query or batch scan?</button>
+                <button type="button" class="chat-suggestion" data-chat-suggest="What are cross-links and entanglement?">What are cross-links and entanglement?</button>
+              </div>
             </div>
           </div>
           <div class="chat-input-row">
-            <textarea id="chatInput" spellcheck="false" rows="1" aria-label="Message the AI assistant" placeholder="Ask about the current result… (Enter to send, Shift+Enter for newline)"></textarea>
+            <textarea id="chatInput" spellcheck="false" rows="1" aria-label="Message the AI assistant" placeholder="Enter or ⌘↵ to send, Shift+Enter for newline"></textarea>
             <button id="sendChatButton" class="icon-only" title="Send (Enter)" aria-label="Send message">
               <i data-lucide="send"></i>
             </button>

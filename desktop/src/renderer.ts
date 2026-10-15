@@ -120,6 +120,7 @@ type AnalyzerResult = KmerResult | IndexResult | SequenceResult | SummaryResult 
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
+  ts?: number;
 };
 
 type ProviderId =
@@ -178,6 +179,7 @@ type AppSettings = {
   sequenceChartSeries: "coverage" | "ratio" | "both";
   primerFront: number;
   primerBack: number;
+  agentTools?: boolean;
 };
 
 const SETTINGS_STORAGE_KEY = "dbgps-settings-v3";
@@ -364,6 +366,9 @@ const elements = {
   exportChatButton: $("exportChatButton") as HTMLButtonElement,
   chatContextChip: $("chatContextChip"),
   aiProvider: $("aiProvider"),
+  chatProviderSwitch: $("chatProviderSwitch"),
+  chatProviderSelect: $("chatProviderSelect") as HTMLSelectElement,
+  chatModelSelect: $("chatModelSelect") as HTMLSelectElement,
   agentToolsToggle: $("agentToolsToggle") as HTMLInputElement,
   settingsPanel: $("settingsPanel"),
   saveSettingsButton: $("saveSettingsButton") as HTMLButtonElement,
@@ -440,7 +445,8 @@ function createDefaultSettings(): AppSettings {
     sequenceChartType: "bar",
     sequenceChartSeries: "both",
     primerFront: DEFAULT_PRIMER,
-    primerBack: DEFAULT_PRIMER
+    primerBack: DEFAULT_PRIMER,
+    agentTools: false
   };
 }
 
@@ -492,7 +498,8 @@ function mergeSettings(input: unknown): AppSettings {
     sequenceChartType,
     sequenceChartSeries,
     primerFront: normalizePrimer(stored.primerFront, defaults.primerFront),
-    primerBack: normalizePrimer(stored.primerBack, defaults.primerBack)
+    primerBack: normalizePrimer(stored.primerBack, defaults.primerBack),
+    agentTools: typeof stored.agentTools === "boolean" ? stored.agentTools : Boolean(defaults.agentTools)
   };
 }
 
@@ -609,6 +616,17 @@ function updateProviderBadge() {
   elements.aiProvider.title = settings.model;
 }
 
+// The chat header mirrors the Settings modal's provider routing: same appSettings
+// fields, same PROVIDERS catalog, same model list source as modelAssignmentList.
+function renderChatProviderSwitch() {
+  ensureActiveProvider();
+  const active = appSettings.activeProvider;
+  elements.chatProviderSelect.innerHTML = enabledProviders()
+    .map((provider) => `<option value="${provider.id}" ${provider.id === active ? "selected" : ""}>${escapeHtml(provider.label)}</option>`)
+    .join("");
+  elements.chatModelSelect.innerHTML = modelOptions(active, appSettings.providers[active].selectedModel);
+}
+
 function appendLog(text: string) {
   const normalized = text.trim();
   if (!normalized) return;
@@ -701,6 +719,7 @@ function renderSettings() {
   renderModelSelection();
   applyAppearance();
   updateProviderBadge();
+  renderChatProviderSwitch();
 }
 
 function openSettings(tab = "providers") {
@@ -1714,7 +1733,10 @@ function renderMarkdownToHtml(src: string): string {
       i++;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
       i++;
-      out.push(`<pre class="md-code"><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+      out.push(
+        `<div class="md-code-wrap"><button type="button" class="md-code-copy" aria-label="Copy code block">Copy</button>` +
+        `<pre class="md-code"><code>${escapeHtml(code.join("\n"))}</code></pre></div>`
+      );
       continue;
     }
 
@@ -1930,15 +1952,43 @@ function buildChatContext(): { label: string; data: unknown } | null {
   }
 }
 
+function contextPayloadSize(data: unknown): string {
+  try {
+    const text = typeof data === "string" ? data : JSON.stringify(data);
+    if (!text) return "";
+    return text.length < 1000 ? `${text.length} chars` : `${(text.length / 1000).toFixed(1)}k chars`;
+  } catch {
+    // Circular or otherwise unserializable context: show the chip without a size.
+    return "";
+  }
+}
+
 function updateChatContextChip() {
   const context = buildChatContext();
   if (!elements.chatContextChip) return;
   if (context) {
-    elements.chatContextChip.textContent = `Context: ${context.label}`;
+    const size = contextPayloadSize(context.data);
+    elements.chatContextChip.textContent = `Context: ${context.label}${size ? ` · ${size}` : ""}`;
     elements.chatContextChip.hidden = false;
   } else {
     elements.chatContextChip.hidden = true;
   }
+}
+
+// Delegated "Copy" for fenced code blocks. Both Markdown hosts (chat transcript
+// and report narrative) attach this to their container, so re-renders never
+// need per-button wiring.
+function handleMarkdownCopyClick(event: Event) {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>(".md-code-copy");
+  if (!button) return;
+  const code = button.closest(".md-code-wrap")?.querySelector("code")?.textContent ?? "";
+  void navigator.clipboard.writeText(code).then(() => {
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = "Copy"; }, 1200);
+  }, () => {
+    button.textContent = "Copy failed";
+    setTimeout(() => { button.textContent = "Copy"; }, 1600);
+  });
 }
 
 // --- Streaming chat state + DOM ---
@@ -1962,6 +2012,47 @@ const retainedAgentRuns: AgentRun[] = [];
 let chatStreamCounter = 0;
 let chatRenderScheduled = false;
 
+// Report-side streaming: mirrors the chat stream so "Interpret with AI" renders
+// incrementally into the report's own narrative element. Stream ids share
+// chatStreamCounter with chat replies, so an incoming chunk routes to exactly
+// one of the two and a new chat never disturbs a running report stream.
+type ActiveReportStream = {
+  id: string;
+  body: HTMLElement;
+  text: string;
+  stableEl: HTMLElement | null;
+  liveEl: HTMLElement | null;
+  stableLen: number;
+  raf: boolean;
+};
+let activeReportStream: ActiveReportStream | null = null;
+
+function scheduleReportStreamRender() {
+  const stream = activeReportStream;
+  if (!stream || stream.raf) return;
+  stream.raf = true;
+  requestAnimationFrame(() => {
+    stream.raf = false;
+    if (activeReportStream !== stream) return;
+    if (!stream.stableEl || !stream.liveEl) {
+      // First chunk: swap the placeholder for the stable/live containers.
+      stream.body.textContent = "";
+      stream.stableEl = document.createElement("div");
+      stream.liveEl = document.createElement("div");
+      stream.body.append(stream.stableEl, stream.liveEl);
+    }
+    const boundary = stableMarkdownBoundary(stream.text);
+    if (boundary > stream.stableLen) {
+      stream.stableEl.insertAdjacentHTML(
+        "beforeend",
+        renderMarkdownToHtml(stream.text.slice(stream.stableLen, boundary))
+      );
+      stream.stableLen = boundary;
+    }
+    stream.liveEl.innerHTML = renderMarkdownToHtml(stream.text.slice(stream.stableLen));
+  });
+}
+
 function createMessageBubble(role: "user" | "assistant"): { bubble: HTMLElement; body: HTMLElement } {
   const bubble = document.createElement("div");
   bubble.className = `message ${role}`;
@@ -1972,9 +2063,14 @@ function createMessageBubble(role: "user" | "assistant"): { bubble: HTMLElement;
   return { bubble, body };
 }
 
+function formatChatTime(ts: number): string {
+  const date = new Date(ts);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
 // Copy / retry live in a footer row that is only attached once a message is
 // final, so the controls never appear on a half-streamed reply.
-function attachMessageActions(bubble: HTMLElement, text: string, opts: { retry?: boolean } = {}) {
+function attachMessageActions(bubble: HTMLElement, text: string, opts: { retry?: boolean; ts?: number } = {}) {
   bubble.querySelector(".message-actions")?.remove();
   if (!text.trim()) return;
   const row = document.createElement("div");
@@ -2005,6 +2101,13 @@ function attachMessageActions(bubble: HTMLElement, text: string, opts: { retry?:
     retry.setAttribute("aria-label", "Retry this question");
     retry.addEventListener("click", () => { void retryLastQuestion(bubble); });
     row.appendChild(retry);
+  }
+
+  if (opts.ts != null && Number.isFinite(opts.ts)) {
+    const time = document.createElement("span");
+    time.className = "message-time";
+    time.textContent = formatChatTime(opts.ts);
+    row.appendChild(time);
   }
 
   bubble.appendChild(row);
@@ -2061,11 +2164,51 @@ function stableMarkdownBoundary(text: string): number {
   return boundary;
 }
 
+// --- Welcome empty-state: shown only while the transcript is empty. Chips send
+// their text through the normal sendChat path; context-aware prompts appear once
+// the active view has a result worth asking about. ---
+function chatSuggestions(): string[] {
+  return buildChatContext()
+    ? [
+        "Summarize the current result",
+        "Any dropout or low-coverage regions?",
+        "What do Sm, Kd and Kn mean?",
+        "What should I check next?"
+      ]
+    : [
+        "What do Sm, Kd and Kn mean?",
+        "How do I run a query or batch scan?",
+        "What are cross-links and entanglement?"
+      ];
+}
+
+function removeChatWelcome() {
+  elements.chatMessages.querySelector(".chat-welcome")?.remove();
+}
+
+function renderChatWelcome() {
+  removeChatWelcome();
+  if (chatMessages.length > 0) return;
+  const welcome = document.createElement("div");
+  welcome.className = "chat-welcome";
+  welcome.innerHTML = `
+    <h3>Ask about your analysis</h3>
+    <p>${escapeHtml(CHAT_GREETING)}</p>
+    <div class="chat-suggestions">
+      ${chatSuggestions()
+        .map((text) => `<button type="button" class="chat-suggestion" data-chat-suggest="${escapeHtml(text)}">${escapeHtml(text)}</button>`)
+        .join("")}
+    </div>`;
+  elements.chatMessages.appendChild(welcome);
+}
+
 function pushUserMessage(content: string) {
-  chatMessages.push({ role: "user", content });
+  removeChatWelcome();
+  const ts = Date.now();
+  chatMessages.push({ role: "user", content, ts });
   const { bubble, body } = createMessageBubble("user");
   body.textContent = content;
-  attachMessageActions(bubble, content);
+  attachMessageActions(bubble, content, { ts });
   saveChatTranscript();
   scrollChatToBottom();
 }
@@ -2078,6 +2221,9 @@ function setChatBusy(busy: boolean) {
   if (busy) elements.stopChatButton.disabled = false;
   elements.clearChatButton.disabled = busy;
   elements.agentToolsToggle.disabled = busy;
+  // Provider must not change mid-stream: swap the quick switcher for the pill.
+  elements.chatProviderSwitch.hidden = busy;
+  elements.aiProvider.hidden = !busy;
 }
 
 function scheduleAssistantRender() {
@@ -2118,13 +2264,38 @@ function finalizeAssistant(content: string, opts: { persist: boolean; error?: bo
   if (opts.error) activeChat.bubble.classList.add("error");
   // Collapse the incremental stable/live containers into one authoritative render.
   activeChat.body.innerHTML = renderMarkdownToHtml(content);
+  const ts = Date.now();
   const persisted = opts.persistContent ?? content;
-  if (opts.persist && persisted.trim()) chatMessages.push({ role: "assistant", content: persisted });
-  attachMessageActions(activeChat.bubble, content, { retry: Boolean(opts.error) });
+  if (opts.persist && persisted.trim()) chatMessages.push({ role: "assistant", content: persisted, ts });
+  attachMessageActions(activeChat.bubble, content, { retry: Boolean(opts.error), ts });
   activeChat = null;
   setChatBusy(false);
   saveChatTranscript();
   if (pinned) scrollChatToBottom();
+}
+
+function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+// Wall time of a run: from the first tool's start to the last tool's finish.
+function traceWallTime(trace: AgentToolTrace[]): string {
+  let minStart = Infinity;
+  let maxEnd = -Infinity;
+  for (const item of trace) {
+    const start = Date.parse(item.startedAt);
+    const end = item.finishedAt ? Date.parse(item.finishedAt) : NaN;
+    if (Number.isFinite(start)) minStart = Math.min(minStart, start);
+    if (Number.isFinite(end)) maxEnd = Math.max(maxEnd, end);
+  }
+  if (!Number.isFinite(minStart) || !Number.isFinite(maxEnd)) return "";
+  return formatDurationMs(maxEnd - minStart);
+}
+
+function traceStatusIcon(status: AgentToolTrace["status"]): string {
+  if (status === "running") return '<span class="trace-spinner" role="status" aria-label="running"></span>';
+  return `<i data-lucide="${status === "ok" ? "check" : "x"}" class="trace-icon ${status === "ok" ? "ok" : "err"}"></i>`;
 }
 
 function renderAgentTrace(bubble: HTMLElement, trace: AgentToolTrace[], run?: AgentRun): HTMLElement {
@@ -2137,14 +2308,31 @@ function renderAgentTrace(bubble: HTMLElement, trace: AgentToolTrace[], run?: Ag
   const open = container.hasAttribute("open");
   const expanded = new Set(Array.from(container.querySelectorAll<HTMLElement>("details[open]")).map((item) => item.dataset.callId));
   const summary = run ? `${trace.length} tool calls · ${run.stopReason} · ${run.snapshot.id.slice(0, 8)}` : `${trace.length} tool calls`;
-  container.innerHTML = `<summary>${escapeHtml(summary)}</summary><ol>${trace.map((item) =>
-    `<li><strong>${escapeHtml(item.name)}</strong> · ${escapeHtml(item.status)}<div><code>${escapeHtml(JSON.stringify(item.arguments))}</code></div>` +
-    `<details data-call-id="${escapeHtml(item.callId)}" ${expanded.has(item.callId) ? "open" : ""}><summary>Evidence</summary><pre>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre></details></li>`
-  ).join("")}</ol>`;
+  container.innerHTML = `<summary>${escapeHtml(summary)}</summary><ol>${trace.map((item) => {
+    const duration = item.finishedAt ? formatDurationMs(Date.parse(item.finishedAt) - Date.parse(item.startedAt)) : "";
+    return `<li><span class="trace-line">${traceStatusIcon(item.status)}<strong>${escapeHtml(item.name)}</strong>` +
+      `<span class="trace-status">${escapeHtml(item.status)}</span>${duration ? `<span class="trace-duration">${escapeHtml(duration)}</span>` : ""}</span>` +
+      `<div><code>${escapeHtml(JSON.stringify(item.arguments))}</code></div>` +
+      `<details data-call-id="${escapeHtml(item.callId)}" ${expanded.has(item.callId) ? "open" : ""}><summary>Evidence</summary><pre>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre></details></li>`;
+  }).join("")}</ol>`;
   if (open) container.setAttribute("open", "");
   if (run) {
+    const footer = document.createElement("div");
+    footer.className = "agent-trace-footer";
+    const total = traceWallTime(trace);
+    if (total) {
+      const wall = document.createElement("span");
+      wall.className = "trace-total";
+      wall.textContent = `total ${total}`;
+      footer.appendChild(wall);
+    }
+    const badge = document.createElement("span");
+    badge.className = `stop-badge ${run.stopReason}`;
+    badge.textContent = run.stopReason.replaceAll("_", " ");
+    badge.title = `Stop reason: ${run.stopReason}`;
+    footer.appendChild(badge);
     const button = document.createElement("button");
-    button.className = "icon-only ghost";
+    button.className = "icon-only ghost trace-export";
     button.title = "Export evidence and tool-call record";
     button.setAttribute("aria-label", button.title);
     button.innerHTML = '<i data-lucide="download"></i>';
@@ -2153,9 +2341,10 @@ function renderAgentTrace(bubble: HTMLElement, trace: AgentToolTrace[], run?: Ag
         await window.dbgps.saveFile({ defaultName: `DBGPS-agent-${run.snapshot.id}.json`, content: JSON.stringify(run, null, 2) });
       } catch (error) { appendLog(`Evidence export failed: ${errMessage(error)}`); }
     });
-    container.appendChild(button);
-    renderIcons();
+    footer.appendChild(button);
+    container.appendChild(footer);
   }
+  renderIcons();
   return container;
 }
 
@@ -2246,7 +2435,8 @@ function clearChat() {
   chatMessages.length = 0;
   retainedAgentRuns.length = 0;
   void window.dbgps.clearAiEvidence();
-  elements.chatMessages.innerHTML = `<div class="message assistant"><div class="message-body">${escapeHtml(CHAT_GREETING)}</div></div>`;
+  elements.chatMessages.innerHTML = "";
+  renderChatWelcome();
   saveChatTranscript();
 }
 
@@ -2269,27 +2459,34 @@ function restoreChatTranscript() {
   let stored: unknown;
   try {
     const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!raw) return;
-    stored = JSON.parse(raw);
+    stored = raw ? JSON.parse(raw) : null;
   } catch {
-    return;
+    stored = null;
   }
-  if (!Array.isArray(stored)) return;
 
   const restored: ChatMessage[] = [];
-  for (const entry of stored) {
-    const role = (entry as ChatMessage)?.role === "assistant" ? "assistant" : "user";
-    const content = typeof (entry as ChatMessage)?.content === "string" ? (entry as ChatMessage).content : "";
-    if (content.trim()) restored.push({ role, content });
+  if (Array.isArray(stored)) {
+    for (const entry of stored) {
+      const role = (entry as ChatMessage)?.role === "assistant" ? "assistant" : "user";
+      const content = typeof (entry as ChatMessage)?.content === "string" ? (entry as ChatMessage).content : "";
+      // Older transcripts have no ts; they simply render without a timestamp.
+      const rawTs = Number((entry as ChatMessage)?.ts);
+      const ts = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : undefined;
+      if (content.trim()) restored.push(ts ? { role, content, ts } : { role, content });
+    }
   }
-  if (!restored.length) return;
+  if (!restored.length) {
+    renderChatWelcome();
+    return;
+  }
 
   chatMessages.push(...restored);
+  removeChatWelcome();
   for (const message of restored) {
     const { bubble, body } = createMessageBubble(message.role);
     if (message.role === "user") body.textContent = message.content;
     else body.innerHTML = renderMarkdownToHtml(message.content);
-    attachMessageActions(bubble, message.content);
+    attachMessageActions(bubble, message.content, { ts: message.ts });
   }
   scrollChatToBottom();
 }
@@ -2366,15 +2563,32 @@ elements.sendChatButton.addEventListener("click", sendChat);
 elements.stopChatButton.addEventListener("click", stopChat);
 elements.clearChatButton.addEventListener("click", clearChat);
 elements.exportChatButton.addEventListener("click", () => { void exportChat(); });
+elements.chatMessages.addEventListener("click", (event) => {
+  const suggestion = (event.target as HTMLElement).closest<HTMLButtonElement>(".chat-suggestion");
+  if (suggestion?.dataset.chatSuggest) {
+    if (activeChat) return;
+    elements.chatInput.value = suggestion.dataset.chatSuggest;
+    autoGrowChatInput();
+    void sendChat();
+    return;
+  }
+  handleMarkdownCopyClick(event);
+});
 restoreChatTranscript();
 
-// Live token stream: append each delta to the in-flight assistant bubble and
-// re-render its Markdown on the next animation frame.
+// Live token stream: append each delta to the in-flight assistant bubble (or the
+// report's narrative element) and re-render its Markdown on the next animation frame.
 window.dbgps.onAiChatChunk((chunk) => {
-  if (!activeChat || chunk.id !== activeChat.id) return;
-  if (!activeChat.text) activeChat.bubble.classList.remove("streaming");
-  activeChat.text += chunk.delta;
-  scheduleAssistantRender();
+  if (activeChat && chunk.id === activeChat.id) {
+    if (!activeChat.text) activeChat.bubble.classList.remove("streaming");
+    activeChat.text += chunk.delta;
+    scheduleAssistantRender();
+    return;
+  }
+  if (activeReportStream && chunk.id === activeReportStream.id) {
+    activeReportStream.text += chunk.delta;
+    scheduleReportStreamRender();
+  }
 });
 window.dbgps.onAiTool(({ id, trace }) => {
   if (!activeChat || activeChat.id !== id) return;
@@ -2427,6 +2641,22 @@ elements.activeProviderSelect.addEventListener("change", () => {
   saveSettings();
   renderSettings();
 });
+// The chat-header quick switcher writes through the same settings fields and
+// re-renders everything, so it and the Settings modal never drift apart.
+elements.chatProviderSelect.addEventListener("change", () => {
+  appSettings.activeProvider = elements.chatProviderSelect.value as ProviderId;
+  saveSettings();
+  renderSettings();
+});
+elements.chatModelSelect.addEventListener("change", () => {
+  appSettings.providers[appSettings.activeProvider].selectedModel = elements.chatModelSelect.value;
+  saveSettings();
+  renderSettings();
+});
+elements.agentToolsToggle.addEventListener("change", () => {
+  appSettings.agentTools = elements.agentToolsToggle.checked;
+  saveSettings();
+});
 elements.modelAssignmentList.addEventListener("change", (event) => {
   const select = event.target as HTMLSelectElement;
   const providerId = select.dataset.modelAssignment as ProviderId | undefined;
@@ -2473,8 +2703,14 @@ elements.queryInput.addEventListener("keydown", (event) => {
 });
 
 elements.chatInput.addEventListener("keydown", (event) => {
-  // Enter sends; Shift+Enter inserts a newline.
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  // Enter or Cmd/Ctrl+Enter sends; Shift+Enter inserts a newline. The composing
+  // guard keeps IME confirmation Enter from firing a send.
+  if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.isComposing) {
+    event.preventDefault();
+    sendChat();
+    return;
+  }
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
     event.preventDefault();
     sendChat();
     return;
@@ -2801,6 +3037,7 @@ async function generateReport() {
   if (reportAiRequest) {
     void window.dbgps.cancelAiChat(reportAiRequest.id);
     reportAiRequest = null;
+    activeReportStream = null;
   }
   latestReport = null;
   ui.reportAiButton.disabled = true;
@@ -2948,6 +3185,12 @@ async function interpretReport() {
   ui.reportAiButton.disabled = true;
   reportNarrative = "Generating AI interpretation…";
   renderReport(report);
+  // Stream into the narrative element renderReport just produced; it stays in
+  // place until the authoritative re-render in `finally`.
+  const narrativeEl = ui.reportResult.querySelector<HTMLElement>(".narrative-body");
+  if (narrativeEl) {
+    activeReportStream = { id, body: narrativeEl, text: "", stableEl: null, liveEl: null, stableLen: 0, raf: false };
+  }
   try {
     const instruction =
       "You are given a DBGPS DNA data-storage diagnostics report (JSON) combining strand recovery (Sm), " +
@@ -2962,11 +3205,20 @@ async function interpretReport() {
       contextLabel: "Diagnostics report",
       settings: currentAiSettings()
     });
-    if (reportAiRequest?.id === id && latestReport === report) reportNarrative = result.content;
+    if (reportAiRequest?.id === id && latestReport === report) {
+      if (result.canceled) {
+        // Like the chat's cancel path: keep whatever streamed in, marked stopped.
+        const partial = activeReportStream?.id === id ? activeReportStream.text : "";
+        reportNarrative = partial.trim() ? `${partial}\n\n_(stopped)_` : "_(stopped)_";
+      } else {
+        reportNarrative = result.content;
+      }
+    }
   } catch (error) {
     if (reportAiRequest?.id === id && latestReport === report) reportNarrative = `AI interpretation failed: ${errMessage(error)}`;
   } finally {
     if (reportAiRequest?.id === id) reportAiRequest = null;
+    if (activeReportStream?.id === id) activeReportStream = null;
     if (latestReport === report) renderReport(report);
   }
 }
@@ -3443,11 +3695,13 @@ ui.reportRefButton.addEventListener("click", selectReportRef);
 ui.reportNgsButton.addEventListener("click", selectReportNgs);
 ui.reportRunButton.addEventListener("click", generateReport);
 ui.reportAiButton.addEventListener("click", interpretReport);
+ui.reportResult.addEventListener("click", handleMarkdownCopyClick);
 ui.reportExportHtmlButton.addEventListener("click", () => exportReport("html"));
 ui.reportExportMdButton.addEventListener("click", () => exportReport("md"));
 
 loadSettings();
 renderSettings();
+elements.agentToolsToggle.checked = Boolean(appSettings.agentTools);
 syncBatchPrimerInputs();
 updateQueryModeControls();
 renderFileList();
