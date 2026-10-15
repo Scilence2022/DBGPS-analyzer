@@ -80,15 +80,34 @@
                 <span>Start kernel</span>
               </button>
             </div>
+            <div class="bloom-config">
+              <label class="checkbox-label bloom-toggle">
+                <input id="bloomInput" type="checkbox" />
+                <span>Bloom reference mode</span>
+              </label>
+              <div id="bloomOptions" class="bloom-options" hidden>
+                <div class="file-picker bloom-reference">
+                  <button id="selectBloomReferenceButton" class="ghost-button" disabled>
+                    <i data-lucide="folder-open"></i>
+                    <span>Select reference</span>
+                  </button>
+                  <div id="bloomReferenceFile" class="file-list">No reference selected</div>
+                </div>
+                <label>
+                  <span>Min. bits per key</span>
+                  <input id="bloomBitsInput" type="number" min="4" max="64" step="1" value="16" disabled />
+                </label>
+              </div>
+            </div>
           </section>
 
           <section id="summaryBand" class="summary-band">
             <div class="metric">
-              <span>Distinct k-mers</span>
+              <span id="distinctKmersLabel">Distinct k-mers</span>
               <strong id="distinctKmers">-</strong>
             </div>
             <div class="metric">
-              <span>Total coverage</span>
+              <span id="totalCoverageLabel">Total coverage</span>
               <strong id="totalCoverage">-</strong>
             </div>
             <div class="metric">
@@ -99,6 +118,7 @@
               <span>Files</span>
               <strong id="summaryFiles">-</strong>
             </div>
+            <p id="summaryScope" class="index-scope" hidden></p>
           </section>
 
           <section class="query-band">

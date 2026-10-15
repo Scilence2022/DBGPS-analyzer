@@ -1,3 +1,5 @@
+import type { AnalyzerScope } from "./analyzer-config";
+
 export type AgentApiStyle = "openai-responses" | "openai-compatible" | "anthropic-messages" | "google-gemini";
 
 export type AgentProviderSettings = {
@@ -35,7 +37,7 @@ export type AgentProviderRequest = {
 
 export type AgentProvider = (request: AgentProviderRequest) => Promise<AgentProviderReply>;
 
-export type AgentSnapshot = {
+export type AgentSnapshot = AnalyzerScope & {
   id: string;
   datasetVersion: string | null;
   batchVersion: string | null;

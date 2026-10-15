@@ -24,8 +24,8 @@ endif
 all:$(PROG)
 
 # DBGPS-analyzer: Analyzer tool for calculating Sm, Kn, Kd values
-DBGPS-analyzer:DBGPS-analyzer.c $(CORE)
-	$(CC) $(CFLAGS) -o $@ DBGPS-analyzer.c kthread.c $(LIBS) -lpthread
+DBGPS-analyzer:DBGPS-analyzer.c $(CORE) vendor/bfc/bbf.h vendor/bfc/bbf.c
+	$(CC) $(CFLAGS) -o $@ DBGPS-analyzer.c kthread.c vendor/bfc/bbf.c $(LIBS) -lpthread
 
 # DBGPS-links: count cross-links (k-mers shared between strands)
 DBGPS-links:DBGPS-links.c $(CORE)
@@ -40,7 +40,7 @@ test:
 	./tests/run.sh
 
 clean:
-	rm -fr *.dSYM $(PROG) tests/unit_core tests/unit_core.dSYM
+	rm -fr *.dSYM $(PROG) tests/unit_core tests/unit_core.dSYM tests/unit_bloom tests/unit_bloom.dSYM
 
 # Build a specific version: make VERSION=DBGPS-analyzer
 VERSION?=all

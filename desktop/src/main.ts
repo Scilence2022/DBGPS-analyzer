@@ -9,13 +9,7 @@ import { AgentEvidenceStore } from "./agent-evidence";
 import { AGENT_LIMITS, runReadOnlyAgent } from "./agent";
 import { requestAgentTurn } from "./agent-providers";
 import type { AgentRun } from "./agent-types";
-
-type AnalyzerConfig = {
-  files: string[];
-  k: number;
-  threads: number;
-  readLength: number;
-};
+import { adoptSequenceSummary, analyzerScope, prepareBloomReference, type AnalyzerConfig, type AnalyzerScope, type AnalyzerSummaryResult, type SequenceSummaryResult } from "./analyzer-config";
 
 type ProviderId =
   | "openai"
@@ -71,28 +65,6 @@ type ProviderDefinition = {
   modelEnv?: string;
   baseUrlEnv?: string;
   apiKeyRequired: boolean;
-};
-
-type SequenceSummaryResult = {
-  type: "sequenceSummary";
-  length: number;
-  k: number;
-  kmerCount: number;
-  observed: number;
-  missing: number;
-  complete: boolean;
-  minCoverage: number;
-  maxCoverage: number;
-  meanCoverage: number;
-  maxAdjacentRatio: number;
-};
-
-type AnalyzerSummaryResult = {
-  type: "ready" | "summary";
-  k: number;
-  distinctKmers: number;
-  totalKmerCoverage: number;
-  files?: string[];
 };
 
 type InteractiveBatchRow = {
@@ -396,8 +368,9 @@ function runMake(target = "DBGPS-analyzer"): Promise<string> {
 
 function toolSources(binName: string) {
   const cSource = `${binName}.c`;
-  const shared = ["dbgps_core.h", "kseq.h", "ketopt.h", "kthread.c", "kthread.h", "Makefile"];
-  return [cSource, ...shared].map((file) => path.join(repoRoot, file));
+  const shared = ["dbgps_core.h", "khashl.h", "kseq.h", "ketopt.h", "kthread.c", "kthread.h", "Makefile"];
+  const backend = binName === "DBGPS-analyzer" ? ["vendor/bfc/bbf.c", "vendor/bfc/bbf.h"] : [];
+  return [cSource, ...shared, ...backend].map((file) => path.join(repoRoot, file));
 }
 
 function needsBuild(binName: string) {
@@ -488,6 +461,7 @@ class AnalyzerSession {
   private queue = new AnalyzerQueryQueue(() => this.stop());
   private ready = false;
   private k = 31;
+  private scope: AnalyzerScope = {};
 
   async start(config: AnalyzerConfig) {
     await ensureAnalyzerBuilt(false);
@@ -498,7 +472,8 @@ class AnalyzerSession {
     const files = Array.isArray(config.files) ? config.files.filter((file) => typeof file === "string" && file.length > 0) : [];
     if (files.length === 0) throw new Error("Select at least one NGS FASTA/FASTQ file.");
 
-    const args = ["-i", "-k", String(k), "-t", String(threads), "-L", String(readLength), ...files];
+    const reference = prepareBloomReference(config, normalizeToFasta);
+    const args = ["-i", ...reference.args, "-k", String(k), "-t", String(threads), "-L", String(readLength), ...files];
     this.k = k;
 
     return new Promise((resolve, reject) => {
@@ -521,7 +496,14 @@ class AnalyzerSession {
         this.stop();
       };
 
-      this.child = spawn(analyzerPath, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
+      try {
+        this.child = spawn(analyzerPath, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
+      } catch (error) {
+        clearTimeout(timeout);
+        reference.cleanup();
+        reject(error);
+        return;
+      }
       this.stdout = createBoundedLineReader(this.child.stdout, MAX_ANALYZER_STDOUT_LINE_BYTES, (line) => {
         let payload: unknown;
         try {
@@ -534,6 +516,9 @@ class AnalyzerSession {
         const typed = payload as { type?: string; message?: string; k?: number };
         if (!this.ready) {
           if (typed.type === "ready") {
+            this.scope = analyzerScope(payload as AnalyzerScope);
+            if (this.scope.indexScope === "reference") this.scope.referenceFile = reference.referenceFile;
+            payload = { ...(payload as object), ...this.scope };
             this.ready = true;
             if (Number.isFinite(Number(typed.k))) this.k = Number(typed.k);
             clearTimeout(timeout);
@@ -554,6 +539,7 @@ class AnalyzerSession {
           }
         }
 
+        if (payload && typeof payload === "object") payload = { ...payload, ...this.scope };
         if (!this.queue.complete(payload)) {
           sendWindow("analyzer:event", { kind: "data", payload });
         }
@@ -573,6 +559,7 @@ class AnalyzerSession {
       });
 
       this.child.on("close", (code) => {
+        reference.cleanup();
         this.ready = false;
         clearTimeout(timeout);
         sendWindow("analyzer:event", { kind: "exit", code });
@@ -653,6 +640,10 @@ class AnalyzerSession {
 
   getK() {
     return this.k;
+  }
+
+  getScope() {
+    return analyzerScope(this.scope);
   }
 
   private rejectPending(error: Error) {
@@ -784,6 +775,7 @@ function assistantSystemPrompt() {
     "Rules:",
     "- Ground every claim in the Analyzer context block when one is present, and name the specific numbers that support each conclusion.",
     "- Never invent, estimate, or extrapolate a number that is not in the context. If the evidence needed to answer is absent, say exactly what is missing and which view would supply it, rather than guessing.",
+    "- indexScope=reference means an immutable full-reference canonical key set. distinctKmers and totalKmerCoverage count only observed reference keys. Global Kn, off-target coverage, and unrestricted graph queries are unavailable, not zero. A query outside that key set is an error, not dropout. Keep separately generated full-mode reports in their own scope.",
     "- The context may be truncated. If it is, say so instead of drawing conclusions from what happens to be visible.",
     "- Researchers may put your wording into a paper, so distinguish clearly between what the data shows and what you are inferring.",
     "- When no context is relevant, just answer the question directly and helpfully.",
@@ -1553,15 +1545,6 @@ function invalidDnaBase(seq: string) {
   return match ? { base: match[0], position: match.index + 1 } : null;
 }
 
-function isSequenceSummary(payload: unknown): payload is SequenceSummaryResult {
-  return Boolean(
-    payload &&
-    typeof payload === "object" &&
-    (payload as { type?: string }).type === "sequenceSummary" &&
-    Number.isFinite(Number((payload as { kmerCount?: unknown }).kmerCount))
-  );
-}
-
 async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
@@ -1643,14 +1626,7 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
 
     payloads.forEach((payload, offset) => {
       const row = chunk[offset].row;
-      if (isSequenceSummary(payload)) {
-        row.summary = payload;
-      } else {
-        row.status = "error";
-        row.message = payload && typeof payload === "object" && "message" in payload
-          ? String((payload as { message?: unknown }).message || "sequence summary failed")
-          : "sequence summary failed";
-      }
+      Object.assign(row, adoptSequenceSummary(payload));
       completed += 1;
     });
     sendWindow("analyzer:event", { kind: "batchProgress", done: completed, total: rows.length });
@@ -1664,7 +1640,7 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
   }
   abortAgentRuns();
   agentEvidence.cacheBatch(datasetVersion, primerFront, primerBack, rows, new Map(queries.filter((item) => item.row.status === "ok").map((item) => [item.row.index, item.seq])));
-  return { type: "batch", datasetVersion, file: req.file, k, primerFront, primerBack, total: rows.length, ok, skipped, errors, rows };
+  return { type: "batch", ...currentSession.getScope(), datasetVersion, file: req.file, k, primerFront, primerBack, total: rows.length, ok, skipped, errors, rows };
 }
 
 async function loadBatchSequence(req: BatchSequenceRequest) {
@@ -1814,8 +1790,8 @@ app.whenReady().then(() => {
     try {
       const result = await started.start(config);
       if (session !== started) throw new Error("Analyzer start was superseded.");
-      const ready = result as { k: number; threads: number; readLength: number };
-      const datasetVersion = agentEvidence.activate({ k: ready.k, threads: ready.threads, readLength: ready.readLength });
+      const ready = result as AnalyzerSummaryResult;
+      const datasetVersion = agentEvidence.activate({ k: ready.k, threads: ready.threads, readLength: ready.readLength, ...analyzerScope(ready) });
       return { ...ready, datasetVersion };
     } catch (error) {
       started.stop();
@@ -1844,8 +1820,8 @@ app.whenReady().then(() => {
     try {
       const result = await current.addFiles(Array.isArray(files) ? files : []);
       if (session !== current) throw new Error("Analyzer changed while adding reads.");
-      const loaded = result as AnalyzerSummaryResult & { threads: number; readLength: number };
-      const datasetVersion = agentEvidence.activate({ k: loaded.k, threads: loaded.threads, readLength: loaded.readLength });
+      const loaded = result as AnalyzerSummaryResult;
+      const datasetVersion = agentEvidence.activate({ k: loaded.k, threads: loaded.threads, readLength: loaded.readLength, ...analyzerScope(loaded) });
       return { ...loaded, datasetVersion };
     } catch (error) {
       current.stop();

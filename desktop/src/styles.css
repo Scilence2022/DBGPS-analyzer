@@ -354,6 +354,56 @@ body[data-status="error"] #statusText::before {
   font-size: 12px;
 }
 
+.bloom-config {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+}
+
+.bloom-toggle {
+  display: flex;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.bloom-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.bloom-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.bloom-options[hidden],
+.index-scope[hidden] {
+  display: none;
+}
+
+.bloom-reference {
+  flex: 1;
+}
+
+.bloom-options > label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.index-scope {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 input,
 select,
 textarea {

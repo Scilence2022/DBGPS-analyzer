@@ -1,6 +1,7 @@
 import { createIcons, icons } from "lucide";
 import type { DbgpsApi } from "./preload";
 import type { AgentRun, AgentToolTrace } from "./agent-types";
+import { analyzerScope, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
 declare global {
   interface Window {
@@ -96,7 +97,7 @@ type SequenceCoverage = {
   coverage: number;
 };
 
-type SequenceResult = {
+type SequenceResult = AnalyzerScope & {
   type: "sequence";
   length: number;
   k: number;
@@ -112,15 +113,9 @@ type SequenceResult = {
   ratios: Array<{ position: number; ratio: number }>;
 };
 
-type SummaryResult = {
-  type: "ready" | "summary";
-  k: number;
-  files?: string[];
-  distinctKmers: number;
-  totalKmerCoverage: number;
-};
+type SummaryResult = AnalyzerSummaryResult;
 
-type AnalyzerResult = KmerResult | IndexResult | SequenceResult | SummaryResult | { type: "error"; message: string };
+type AnalyzerResult = KmerResult | IndexResult | SequenceResult | SummaryResult | (AnalyzerScope & { type: "error"; message: string });
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -338,6 +333,11 @@ const elements = {
   kInput: $("kInput") as HTMLInputElement,
   threadsInput: $("threadsInput") as HTMLInputElement,
   readLengthInput: $("readLengthInput") as HTMLInputElement,
+  bloomInput: $("bloomInput") as HTMLInputElement,
+  bloomOptions: $("bloomOptions"),
+  selectBloomReferenceButton: $("selectBloomReferenceButton") as HTMLButtonElement,
+  bloomReferenceFile: $("bloomReferenceFile"),
+  bloomBitsInput: $("bloomBitsInput") as HTMLInputElement,
   startButton: $("startButton") as HTMLButtonElement,
   queryButton: $("queryButton") as HTMLButtonElement,
   queryOptions: $("queryOptions"),
@@ -350,7 +350,10 @@ const elements = {
   diagnosticsSettingsButton: $("diagnosticsSettingsButton") as HTMLButtonElement,
   logView: $("logView"),
   distinctKmers: $("distinctKmers"),
+  distinctKmersLabel: $("distinctKmersLabel"),
   totalCoverage: $("totalCoverage"),
+  totalCoverageLabel: $("totalCoverageLabel"),
+  summaryScope: $("summaryScope"),
   summaryK: $("summaryK"),
   summaryFiles: $("summaryFiles"),
   chatMessages: $("chatMessages"),
@@ -377,6 +380,9 @@ const elements = {
 
 let selectedFiles: string[] = [];
 let analyzerReady = false;
+let analyzerLoading = false;
+let bloomReferenceFile = "";
+let loadedScope: AnalyzerScope = {};
 let queryMode: "kmer" | "index" | "sequence" = "kmer";
 let latestResult: AnalyzerResult | null = null;
 const chatMessages: ChatMessage[] = [];
@@ -792,6 +798,14 @@ function renderFileList() {
 }
 
 function renderSummary(data: SummaryResult) {
+  loadedScope = analyzerScope(data);
+  const reference = data.indexScope === "reference";
+  elements.distinctKmersLabel.textContent = reference ? "Observed reference k-mers" : "Distinct k-mers";
+  elements.totalCoverageLabel.textContent = reference ? "Reference coverage" : "Total coverage";
+  elements.summaryScope.hidden = !reference;
+  elements.summaryScope.textContent = reference
+    ? `Reference scope: ${data.referenceFile || bloomReferenceFile}; ${formatNumber(data.targetKmers)} target keys; minimum ${formatNumber(data.bloom?.bitsPerKey)} bits/key. Global noise (Kn), off-target coverage and graph queries: unavailable.`
+    : "";
   elements.distinctKmers.textContent = formatNumber(data.distinctKmers);
   elements.totalCoverage.textContent = formatNumber(data.totalKmerCoverage);
   elements.summaryK.textContent = formatNumber(data.k);
@@ -1374,6 +1388,7 @@ function renderSequenceTable(data: SequenceResult) {
 
 function sequenceResultHtml(data: SequenceResult) {
   return `
+    ${data.indexScope === "reference" ? `<p class="index-scope">Reference scope: ${escapeHtml(data.referenceFile)}. Only full-reference keys are indexed; global noise (Kn) and off-target coverage are unavailable.</p>` : ""}
     <div class="result-grid">
       <div class="metric ${data.complete ? "metric-ok" : "metric-alert"}">
         <span>Path</span>
@@ -1427,6 +1442,24 @@ function setAnalyzerReady(ready: boolean) {
   elements.kInput.disabled = ready;
   elements.threadsInput.disabled = ready;
   elements.readLengthInput.disabled = ready;
+  updateBloomControls();
+  updateQueryModeControls();
+}
+
+function updateBloomControls() {
+  const locked = analyzerReady || analyzerLoading;
+  elements.bloomInput.disabled = locked;
+  elements.bloomOptions.hidden = !elements.bloomInput.checked;
+  elements.selectBloomReferenceButton.disabled = locked || !elements.bloomInput.checked;
+  elements.bloomBitsInput.disabled = locked || !elements.bloomInput.checked;
+}
+
+async function selectBloomReference() {
+  if (analyzerReady || analyzerLoading) return;
+  const files = await window.dbgps.selectFiles();
+  if (!files[0]) return;
+  bloomReferenceFile = files[0];
+  elements.bloomReferenceFile.innerHTML = `<span title="${escapeHtml(bloomReferenceFile)}">${escapeHtml(compactPath(bloomReferenceFile))}</span>`;
 }
 
 async function selectFiles() {
@@ -1484,6 +1517,7 @@ async function buildAnalyzer() {
 }
 
 async function startAnalyzer() {
+  if (analyzerLoading) return;
   if (selectedFiles.length === 0) await selectFiles();
   if (selectedFiles.length === 0) return;
 
@@ -1495,13 +1529,20 @@ async function startAnalyzer() {
   elements.kInput.disabled = true;
   elements.threadsInput.disabled = true;
   elements.readLengthInput.disabled = true;
+  analyzerLoading = true;
+  updateBloomControls();
 
   try {
     const ready = (await window.dbgps.startAnalyzer({
       files: selectedFiles,
       k: Number(elements.kInput.value),
       threads: Number(elements.threadsInput.value),
-      readLength: Number(elements.readLengthInput.value)
+      readLength: Number(elements.readLengthInput.value),
+      ...(elements.bloomInput.checked ? {
+        bloom: true,
+        bloomReference: bloomReferenceFile,
+        bloomBits: Number(elements.bloomBitsInput.value)
+      } : {})
     })) as SummaryResult;
     if (ready.files?.length) {
       selectedFiles = ready.files;
@@ -1518,6 +1559,9 @@ async function startAnalyzer() {
     setStatus("Kernel failed to start", "error");
     setAnalyzerReady(false);
     elements.startButton.disabled = false;
+  } finally {
+    analyzerLoading = false;
+    updateBloomControls();
   }
 }
 
@@ -1542,6 +1586,14 @@ function indexBaseLengthValue() {
 }
 
 function updateQueryModeControls() {
+  const reference = analyzerReady ? loadedScope.indexScope === "reference" : elements.bloomInput.checked;
+  if (reference) queryMode = "sequence";
+  document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => {
+    button.disabled = reference && button.dataset.mode !== "sequence";
+    button.title = button.disabled ? "Unavailable in reference mode" : "";
+    button.classList.toggle("active", button.dataset.mode === queryMode);
+    button.setAttribute("aria-selected", String(button.dataset.mode === queryMode));
+  });
   elements.queryOptions.classList.toggle("hidden", queryMode === "sequence");
   elements.indexBaseLengthOption.classList.toggle("hidden", queryMode !== "index");
   if (queryMode === "kmer") {
@@ -1819,6 +1871,7 @@ function compactInteractive(result: AnalyzerResult): unknown {
 
 function compactBatch(batch: InteractiveBatchResult): unknown {
   return {
+    ...analyzerScope(batch),
     datasetVersion: batch.datasetVersion,
     file: compactPath(batch.file),
     k: batch.k,
@@ -1857,7 +1910,7 @@ function reportContext(report: ReportResult): unknown {
 function buildChatContext(): { label: string; data: unknown } | null {
   switch (currentViewName()) {
     case "interactive":
-      return latestResult && latestResult.type !== "error"
+      return latestResult && (latestResult.type !== "error" || latestResult.indexScope === "reference")
         ? { label: "Interactive result", data: compactInteractive(latestResult) }
         : null;
     case "report":
@@ -2274,6 +2327,11 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
 });
 
 elements.selectFilesButton.addEventListener("click", selectFiles);
+elements.selectBloomReferenceButton.addEventListener("click", selectBloomReference);
+elements.bloomInput.addEventListener("change", () => {
+  updateBloomControls();
+  updateQueryModeControls();
+});
 elements.addFilesButton.addEventListener("click", addSequencingFiles);
 elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
@@ -3050,13 +3108,14 @@ function renderBatchTable() {
   const analyzed = batchRows.filter((r) => r.status === "ok" && r.summary);
   const complete = analyzed.filter((r) => r.summary!.complete).length;
   const broken = analyzed.length - complete;
-  const skipped = batchRows.filter((r) => r.status !== "ok").length;
+  const skipped = batchRows.filter((r) => r.status === "skipped").length;
+  const errors = batchRows.filter((r) => r.status === "error").length;
   const totalPages = Math.max(1, Math.ceil(batchRows.length / BATCH_PAGE_SIZE));
   batchPage = Math.min(Math.max(0, batchPage), totalPages - 1);
   const pageStart = batchPage * BATCH_PAGE_SIZE;
   const pageRows = batchRows.slice(pageStart, pageStart + BATCH_PAGE_SIZE);
   const pageEnd = pageStart + pageRows.length;
-  ui.batchSaveButton.disabled = analyzed.length === 0;
+  ui.batchSaveButton.disabled = batchRows.length === 0;
 
   const summary = `
     <div class="report-metrics">
@@ -3064,7 +3123,10 @@ function renderBatchTable() {
       <div class="metric-card"><span>Complete path</span><strong>${formatNumber(complete)}</strong></div>
       <div class="metric-card"><span>Broken path</span><strong>${formatNumber(broken)}</strong></div>
       <div class="metric-card"><span>Skipped</span><strong>${formatNumber(skipped)}</strong></div>
-    </div>`;
+      <div class="metric-card"><span>Errors</span><strong>${formatNumber(errors)}</strong></div>
+    </div>` + (latestBatch?.indexScope === "reference"
+      ? `<p class="index-scope">Reference scope: ${escapeHtml(latestBatch.referenceFile)}. Out-of-reference keys are errors, not dropout; global noise (Kn) and off-target coverage are unavailable.</p>`
+      : "");
 
   if (batchRows.length === 0) {
     ui.batchResult.classList.remove("empty-state");
@@ -3233,6 +3295,8 @@ async function runBatchAnalysis() {
 
 function buildBatchCsv() {
   const header = ["index", "name", "raw_length", "analyzed_length", "status", "observed_kmers", "total_kmers", "path_complete", "min_cov", "mean_cov", "max_cov", "max_adjacent_ratio"];
+  const scope = latestBatch?.indexScope === "reference" ? latestBatch : null;
+  if (scope) header.push("message", "index_scope", "reference_file", "target_kmers", "global_noise_available", "unrestricted_queries_available", "bloom_backend", "bloom_bytes", "bloom_bits_per_key", "bloom_hashes");
   const lines = [header.join(",")];
   for (const row of batchRows) {
     const r = row.summary;
@@ -3244,14 +3308,16 @@ function buildBatchCsv() {
       row.index + 1, row.name, row.rawLength, row.analyzedLength, row.status,
       r ? r.observed : "", r ? r.kmerCount : "", r ? (r.complete ? "yes" : "no") : "",
       r ? r.minCoverage : "", r ? r.meanCoverage : "", r ? r.maxCoverage : "",
-      r ? r.maxAdjacentRatio : ""
+      r ? r.maxAdjacentRatio : "",
+      ...(scope ? [row.message, scope.indexScope, scope.referenceFile, scope.targetKmers, false, false,
+        scope.bloom?.backend, scope.bloom?.bytes, scope.bloom?.bitsPerKey, scope.bloom?.hashes] : [])
     ].map(cell).join(","));
   }
   return lines.join("\n") + "\n";
 }
 
 async function saveBatchCsv() {
-  if (!batchRows.some((r) => r.summary)) return;
+  if (!batchRows.length) return;
   try {
     const res = await window.dbgps.saveFile({ defaultName: "batch-qc.csv", content: buildBatchCsv() });
     if (res.saved) appendLog(`Saved Batch QC table to ${res.path}`);

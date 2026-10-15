@@ -91,6 +91,9 @@ DBGPS-analyzer -i [options] <NGS files>
 | `-k` | `INT` | k-mer size | `31` |
 | `-t` | `INT` | Number of threads for multi-threading | `3` |
 | `-L` | `INT` | Maximum read length for k-mer counting | `200` |
+| `--bloom` | | Optional exact reference-only counting with a blocked Bloom prefilter; global Noise/Kn unavailable | off |
+| `--bloom-bits` | `INT` | Minimum allocated filter bits per target key (4-64; power-of-two allocation) | `16` |
+| `--bloom-reference` | `FILE` | Reference FASTA/FASTQ required for interactive `-i --bloom`; standalone uses its positional reference | none |
 | `-r` | `FLOAT` | Maximum coverage ratio (0 = no limitation) | `0.0` |
 | `-R` | `FLOAT` | Upper bound for coverage ratio range iteration | `0.0` |
 | `-I` | `FLOAT` | Step size for coverage ratio iteration | `0.20` |
@@ -108,6 +111,13 @@ DBGPS-analyzer -i [options] <NGS files>
 #### Interactive Kernel Protocol
 
 Interactive mode builds the sequencing k-mer coverage table from one or more NGS files, then accepts one command per line on stdin and writes one JSON object per line on stdout.
+
+Optional low-memory counting: use `DBGPS-analyzer --bloom reference.fa reads.fq.gz`,
+or `DBGPS-analyzer -i --bloom --bloom-reference reference.fa reads.fq.gz` for the
+kernel. Target coverage, Sm and Kd remain exact up to the existing count cap;
+global Noise/Kn and graph queries are unavailable. Out-of-reference sequence
+queries return errors rather than false dropout. The desktop exposes the same
+opt-in mode before kernel startup. See [Bloom backend selection, scope and validation](docs/bloom-filter.md).
 
 ```bash
 make DBGPS-analyzer

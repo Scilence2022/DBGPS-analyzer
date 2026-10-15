@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AGENT_LIMITS, compactAgentContext, type AgentBackend } from "./agent";
 import type { AgentSnapshot } from "./agent-types";
+import { analyzerScope, type AnalyzerScope } from "./analyzer-config";
 
 export const EVIDENCE_LIMITS = Object.freeze({ batchRows: 250000, cachedSequenceBases: 40000000 });
 
@@ -17,7 +18,8 @@ export type EvidenceRow = {
   };
 };
 
-type Dataset = { id: string; k: number; threads: number; readLength: number };
+type DatasetConfig = AnalyzerScope & { k: number; threads: number; readLength: number };
+type Dataset = DatasetConfig & { id: string };
 type Batch = {
   id: string;
   datasetVersion: string;
@@ -41,9 +43,9 @@ export class AgentEvidenceStore {
     this.activeSequence = null;
   }
 
-  activate(config: { k: number; threads: number; readLength: number }) {
+  activate(config: DatasetConfig) {
     this.invalidate();
-    this.dataset = { id: randomUUID(), ...config };
+    this.dataset = { id: randomUUID(), k: config.k, threads: config.threads, readLength: config.readLength, ...analyzerScope(config) };
     return this.dataset.id;
   }
 
@@ -81,11 +83,13 @@ export class AgentEvidenceStore {
     const dataset = this.dataset;
     const batch = this.batch;
     const sequence = this.activeSequence;
+    const scope = dataset ? analyzerScope(dataset) : {};
     const input = context && typeof context === "object" ? context as Record<string, unknown> : {};
     const active = input.activeView && typeof input.activeView === "object" ? input.activeView as Record<string, unknown> : null;
     const stale = typeof active?.datasetVersion === "string" && active.datasetVersion !== dataset?.id;
     const accepted = stale ? { ...input, activeView: { unavailable: true, reason: "Active-view result belongs to an older index version." } } : context;
     const snapshot: AgentSnapshot = {
+      ...scope,
       id: randomUUID(), datasetVersion: dataset?.id || null, batchVersion: batch?.id || null,
       createdAt: new Date().toISOString(), context: compactAgentContext(accepted)
     };
@@ -109,10 +113,14 @@ export class AgentEvidenceStore {
         const result = await query("summary", signal);
         if (result.type !== "summary") throw new Error("Unexpected analyzer summary response.");
         return {
+          ...analyzerScope(result), ...scope,
           type: result.type, k: result.k, distinctKmers: result.distinctKmers,
           totalKmerCoverage: result.totalKmerCoverage,
           threads: dataset?.threads, readLength: dataset?.readLength,
-          countSaturation: 16383, exactness: "exact canonical membership and saturated counts",
+          countSaturation: 16383,
+          exactness: scope.indexScope === "reference"
+            ? "exact canonical membership and saturated counts within the immutable full-reference key set; totals count only observed reference keys, not off-target keys"
+            : "exact canonical membership and saturated counts",
           batch: batch ? { id: batch.id, primerFront: batch.primerFront, primerBack: batch.primerBack, ...batch.aggregates, cachedProfiles: batch.sequences.size } : null,
           selectedSequenceAvailable: Boolean(sequence)
         };
@@ -125,10 +133,12 @@ export class AgentEvidenceStore {
         const result = await query(`sequence ${selected}`, signal);
         return {
           reference: row ? { index: row.index, name: row.name.slice(0, 200), batchVersion: batch?.id, primerFront: batch?.primerFront, primerBack: batch?.primerBack } : { source: "user-selected Interactive sequence", primerScope: "as queried by user" },
-          result
+          result: { ...result, ...scope }
         };
       },
       queryKmer: async (kmer, depth, signal) => {
+        assertCurrent();
+        if (scope.indexScope === "reference") throw new Error("Graph k-mer queries are unavailable in reference mode; use a cached reference sequence profile.");
         const result = await query(`kmer ${kmer} ${depth} ${depth}`, signal);
         if (result.type !== "kmer") throw new Error("Unexpected k-mer response.");
         return { ...result, graphSemantics: "membership-derived overlaps, not read-supported transitions" };
@@ -138,6 +148,7 @@ export class AgentEvidenceStore {
         if (!batch) throw new Error("No completed Batch QC snapshot is available in the bounded cache.");
         const matching = batch.rows.filter((row) => status === "all" || (status === "incomplete" ? row.status === "ok" && row.summary && !row.summary.complete : row.status === status));
         return {
+          ...scope,
           batchVersion: batch.id, k: dataset?.k, primerFront: batch.primerFront, primerBack: batch.primerBack,
           aggregates: batch.aggregates, selection: { status, order: "processing order", offset, limit, matchedTotal: matching.length, truncated: offset > 0 || offset + limit < matching.length },
           rows: matching.slice(offset, offset + limit).map((row) => ({ ...row, name: row.name.slice(0, 200), message: row.message?.slice(0, 200), profileCached: batch.sequences.has(row.index) }))

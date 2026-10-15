@@ -4,6 +4,7 @@ DBGPS-links
 DBGPS-seq-filter
 *.dSYM/
 tests/unit_core
+tests/unit_bloom
 desktop/dist/
 desktop/node_modules/
 desktop/release/

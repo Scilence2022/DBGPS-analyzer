@@ -27,8 +27,14 @@ else
 fi
 
 echo
+echo "==> Building and running blocked Bloom filter unit tests"
+"$CC" -g -Wall -Wextra -Werror -O2 -o tests/unit_bloom tests/unit_bloom.c vendor/bfc/bbf.c
+./tests/unit_bloom
+
+echo
 echo "==> Running Python end-to-end functional tests"
 python3 tests/test_cli.py
+python3 tests/test_bloom.py
 
 echo
 echo "All tests passed."

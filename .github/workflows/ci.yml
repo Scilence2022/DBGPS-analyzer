@@ -28,6 +28,7 @@ jobs:
           make clean
           make asan=1
           timeout 180 python3 tests/test_cli.py
+          timeout 180 python3 tests/test_bloom.py
 
   desktop:
     name: Desktop (typecheck + build)
