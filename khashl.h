@@ -159,8 +159,8 @@ static kh_inline khint_t __kh_h2b(khint_t hash, khint_t bits) { return hash * 26
 		new_n_buckets = 1U << new_bits; \
 		if (h->count > (new_n_buckets>>1) + (new_n_buckets>>2)) return 0; /* requested size is too small */ \
 		new_used = (khint32_t*)kmalloc(__kh_fsize(new_n_buckets) * sizeof(khint32_t)); \
-		memset(new_used, 0, __kh_fsize(new_n_buckets) * sizeof(khint32_t)); \
 		if (!new_used) return -1; /* not enough memory */ \
+		memset(new_used, 0, __kh_fsize(new_n_buckets) * sizeof(khint32_t)); \
 		n_buckets = h->keys? 1U<<h->bits : 0U; \
 		if (n_buckets < new_n_buckets) { /* expand */ \
 			khkey_t *new_keys = (khkey_t*)krealloc((void*)h->keys, new_n_buckets * sizeof(khkey_t)); \

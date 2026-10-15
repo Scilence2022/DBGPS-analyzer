@@ -1,20 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AgentRun, AgentTraceEvent } from "./agent-types";
-
-type AnalyzerConfig = {
-  files: string[];
-  k: number;
-  threads: number;
-  readLength: number;
-};
-
-type AnalyzerSummaryResult = {
-  type: "ready" | "summary";
-  k: number;
-  distinctKmers: number;
-  totalKmerCoverage: number;
-  files?: string[];
-};
+import type { AnalyzerConfig, AnalyzerScope, AnalyzerSummaryResult, SequenceSummaryResult } from "./analyzer-config";
 
 type ProviderId =
   | "openai"
@@ -95,19 +81,6 @@ type AnalyzerBatchResult = {
 };
 type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
 type BatchSequenceRequest = { file: string; index: number; primerFront?: number; primerBack?: number };
-type SequenceSummary = {
-  type: "sequenceSummary";
-  length: number;
-  k: number;
-  kmerCount: number;
-  observed: number;
-  missing: number;
-  complete: boolean;
-  minCoverage: number;
-  maxCoverage: number;
-  meanCoverage: number;
-  maxAdjacentRatio: number;
-};
 type InteractiveBatchRow = {
   index: number;
   name: string;
@@ -115,9 +88,9 @@ type InteractiveBatchRow = {
   analyzedLength: number;
   status: "ok" | "skipped" | "error";
   message?: string;
-  summary?: SequenceSummary;
+  summary?: SequenceSummaryResult;
 };
-type InteractiveBatchResult = {
+type InteractiveBatchResult = AnalyzerScope & {
   type: "batch";
   datasetVersion: string;
   file: string;

@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <sys/types.h>
 #include <limits.h>
+#include <errno.h>
 
 #include "ketopt.h" // command-line argument parser
 #include "kthread.h" // multi-threading models: pipeline and multi-threaded for loop
@@ -18,6 +19,7 @@ KSEQ_INIT(gzFile, gzread)
 
 #define DBGPS_KC_BITS 14
 #include "dbgps_core.h" // shared k-mer / hash-table core
+#include "vendor/bfc/bbf.h"
 
 #define Max_Path_Num 10000
 #define Max_Path_Len 300
@@ -49,6 +51,109 @@ typedef struct {
 static int clamp_tree_depth(int depth);
 
 typedef struct {
+    const char *file;
+    bfc_bf_t *bloom;
+    uint64_t target_keys;
+    int bits_per_key;
+} reference_index_t;
+
+/* Preload every reference key with count zero. The table's structure stays
+ * immutable during read counting; each shard has just one counter writer. */
+static kc_c4x_t *load_reference_index(const char *file, int k, int p,
+                                     int bits_per_key, reference_index_t *ref)
+{
+    gzFile fp = gzopen(file, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Error: could not open Bloom reference file %s\n", file);
+        return NULL;
+    }
+    kc_c4x_t *h = calloc(1, sizeof(*h));
+    if (h == NULL) { gzclose(fp); return NULL; }
+    h->p = p;
+    h->h = calloc((size_t)1 << p, sizeof(*h->h));
+    if (h->h == NULL) { free(h); gzclose(fp); return NULL; }
+    for (int j = 0; j < 1 << p; ++j) {
+        h->h[j] = kc_c4_init();
+        if (h->h[j] == NULL) {
+            fprintf(stderr, "Error: allocating Bloom reference index\n");
+            c4x_destroy(h);
+            gzclose(fp);
+            return NULL;
+        }
+    }
+    kseq_t *ks = kseq_init(fp);
+    uint64_t mask = (1ULL << (k * 2)) - 1;
+    uint64_t shift = (k - 1) * 2;
+    int ret, failed = 0;
+    while ((ret = kseq_read(ks)) >= 0) {
+        uint64_t x[2] = {0, 0};
+        int l = 0;
+        for (size_t i = 0; i < ks->seq.l; ++i) {
+            int c = seq_nt4_table[(uint8_t)ks->seq.s[i]];
+            if (c >= 4) { l = 0; x[0] = x[1] = 0; continue; }
+            x[0] = (x[0] << 2 | c) & mask;
+            x[1] = x[1] >> 2 | (uint64_t)(3 - c) << shift;
+            if (l < k) ++l;
+            if (l < k) continue;
+            uint64_t key = hash64(x[0] < x[1] ? x[0] : x[1], mask);
+            int absent;
+            kc_c4_put(h->h[key & ((1 << p) - 1)], key >> p << KC_BITS, &absent);
+            if (absent < 0) { failed = 1; break; }
+            if (absent) ++ref->target_keys;
+        }
+        if (failed) break;
+    }
+    int zerr = Z_OK;
+    gzerror(fp, &zerr);
+    kseq_destroy(ks);
+    gzclose(fp);
+    if (failed || ret < -1 || (zerr != Z_OK && zerr != Z_STREAM_END) || ref->target_keys == 0) {
+        fprintf(stderr, "Error: Bloom reference is empty, malformed, unreadable, or could not be indexed: %s\n", file);
+        c4x_destroy(h);
+        return NULL;
+    }
+    if (ref->target_keys > (1ULL << 55) / (unsigned)bits_per_key) {
+        fprintf(stderr, "Error: Bloom reference filter is too large\n");
+        c4x_destroy(h);
+        return NULL;
+    }
+    uint64_t bits = ref->target_keys * (unsigned)bits_per_key;
+    int n_shift = BFC_BLK_SHIFT;
+    while ((1ULL << n_shift) < bits) ++n_shift;
+    ref->bloom = bfc_bf_init(n_shift, 6);
+    if (ref->bloom == NULL) {
+        fprintf(stderr, "Error: could not allocate Bloom filter\n");
+        c4x_destroy(h);
+        return NULL;
+    }
+    ref->file = file;
+    ref->bits_per_key = bits_per_key;
+    for (int j = 0; j < 1 << p; ++j) {
+        kc_c4_t *g = h->h[j];
+        for (khint_t i = 0; i < kh_end(g); ++i) {
+            if (!kh_exist(g, i)) continue;
+            uint64_t hash = ((kh_key(g, i) >> KC_BITS) << p) | (uint64_t)j;
+            bfc_bf_insert(ref->bloom, kmer_mix(hash));
+        }
+    }
+    fprintf(stderr, "Bloom reference mode: %" PRIu64 " target keys, %" PRIu64 " filter bytes; global Noise/Kn and graph queries unavailable\n",
+            ref->target_keys, (uint64_t)1 << (n_shift - 3));
+    return h;
+}
+
+static int reference_contains_sequence(kc_c4x_t *h, int k, const char *seq, int len)
+{
+    uint64_t mask = (1ULL << (k * 2)) - 1;
+    for (int i = 0; i <= len - k; ++i) {
+        uint64_t key = actgkmer_hashkey((unsigned char *)seq + i, (unsigned char)k);
+        uint64_t hash = hash64(key, mask);
+        kc_c4_t *g = h->h[hash & ((1 << h->p) - 1)];
+        if (kc_c4_get(g, hash >> h->p << KC_BITS) == kh_end(g)) return 0;
+    }
+    return 1;
+}
+
+typedef struct {
     int n, m;
     uint64_t *a;
 } buf_c4_t;
@@ -65,7 +170,7 @@ static inline void c4x_insert_buf(buf_c4_t *buf, int p, uint64_t y) // insert a 
     b->a[b->n++] = y;
 }
 
-static void count_seq_buf(buf_c4_t *buf, int k, int p, int len, const char *seq) // insert k-mers in $seq to linear buffer $buf
+static void count_seq_buf(buf_c4_t *buf, int k, int p, int len, const char *seq)
 {
     int i, l;
     uint64_t x[2], mask = (1ULL<<k*2) - 1, shift = (k - 1) * 2;
@@ -86,6 +191,7 @@ typedef struct { // global data structure for kt_pipeline()
     int k, block_len, n_thread, read_len;
     kseq_t *ks;
     kc_c4x_t *h;
+    const reference_index_t *reference;
 } pldat_t;
 
 typedef struct { // data structure for each step in kt_pipeline()
@@ -107,7 +213,14 @@ static void worker_for(void *data, long i, int tid) // callback for kt_for()
     for (j = 0; j < b->n; ++j) {
         khint_t k;
         int absent;
-        k = kc_c4_put(h, b->a[j]>>p<<KC_BITS, &absent);
+        if (s->p->reference) {
+            const bfc_bf_t *bloom = s->p->reference->bloom;
+            if (bfc_bf_get(bloom, kmer_mix(b->a[j])) != bloom->n_hashes) continue;
+            k = kc_c4_get(h, b->a[j] >> p << KC_BITS);
+            if (k == kh_end(h)) continue; /* Bloom false positive, not a target */
+        } else {
+            k = kc_c4_put(h, b->a[j] >> p << KC_BITS, &absent);
+        }
         if ((kh_key(h, k)&KC_MAX) < KC_MAX) ++kh_key(h, k);
     }
 }
@@ -175,7 +288,7 @@ static void *worker_pipeline(void *data, int step, void *in) // callback for kt_
  * otherwise the existing table is extended in place (incremental counting of
  * additional files). Returns the table, or NULL if $fn cannot be opened. */
 static kc_c4x_t *count_file_into(const char *fn, kc_c4x_t *h, int k, int p,
-                                 int block_size, int n_thread, int read_len)
+                                 int block_size, int n_thread, int read_len, const reference_index_t *reference)
 {
     pldat_t pl;
     gzFile fp;
@@ -185,6 +298,7 @@ static kc_c4x_t *count_file_into(const char *fn, kc_c4x_t *h, int k, int p,
     pl.read_len = read_len > k ? read_len : k;
     pl.n_thread = n_thread;
     pl.h = h ? h : c4x_init(p);
+    pl.reference = reference;
     pl.block_len = block_size;
     kt_pipeline(3, worker_pipeline, &pl, 3);
     kseq_destroy(pl.ks);
@@ -307,7 +421,7 @@ static double coverage_ratio(int a, int b);
 // ratio_range outputs. Returns 0 on success, -1 if $fn cannot be opened.
 static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t *h,
                             int skip_ratios, FILE *cov_details_fp, FILE *cov_ratios_fp,
-                            ratio_range_t *ratio_range)
+                            ratio_range_t *ratio_range, const reference_index_t *reference)
 {
     gzFile fp;
     if ((fp = gzopen(fn, "r")) == 0) return -1;
@@ -322,7 +436,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
     CALLOC(cache->target_hist, KC_MAX + 1);
     CALLOC(cache->seq_hist, KC_MAX + 1);
 
-    kc_c4x_t *tracker = c4x_init(KC_BITS); // global k-mer dedup, built once
+    kc_c4x_t *tracker = reference ? NULL : c4x_init(KC_BITS);
     int *coverages = NULL;
     int coverages_cap = 0;
     kmer_set_t seen = {0}; // reusable per-strand dedup scratch (O(n) vs O(n^2))
@@ -387,7 +501,7 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
             free(ratios);
         }
 
-        for (int j = 0; j < km_num; j++) {
+        for (int j = 0; tracker && j < km_num; j++) {
             if (kc_c4x_mark(kms[j], mask, tracker)) { // new distinct target k-mer
                 int c = coverages[j];
                 if (c > KC_MAX) c = KC_MAX;
@@ -409,7 +523,10 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
         for (khint_t kk = 0; kk < kh_end(g); ++kk)
             if (kh_exist(g, kk)) {
                 int c = kh_key(g, kk) & KC_MAX;
-                if (c >= 1) cache->seq_hist[c]++;
+                if (reference) {
+                    cache->target_hist[c]++;
+                    cache->target_total++;
+                } else if (c >= 1) cache->seq_hist[c]++;
             }
     }
     return 0;
@@ -674,7 +791,12 @@ static char *index_token_to_dna(const char *token, int *out_len, char *err, size
         return 0;
     }
 
-    MALLOC(digits, strlen(token) + 1);
+    size_t token_len = strlen(token);
+    if (token_len > (size_t)(INT_MAX - 2) / 2) {
+        snprintf(err, err_len, "index argument is too long");
+        return 0;
+    }
+    MALLOC(digits, token_len + 1);
     for (const unsigned char *p = (const unsigned char*)token; *p; ++p) {
         if (isspace(*p)) continue;
         if (!isdigit(*p)) {
@@ -685,8 +807,14 @@ static char *index_token_to_dna(const char *token, int *out_len, char *err, size
         digits[digit_count++] = (unsigned char)(*p - '0');
     }
 
-    if (digit_count == 0) {
+    if (digit_count < 1) {
         snprintf(err, err_len, "empty index argument");
+        free(digits);
+        return 0;
+    }
+    /* Decimal-to-base-4 expansion uses fewer than two bases per digit. */
+    if (digit_count > (INT_MAX - 2) / 2) {
+        snprintf(err, err_len, "index argument is too long");
         free(digits);
         return 0;
     }
@@ -932,36 +1060,62 @@ static void emit_file_array(int file_count, char **files)
     fprintf(stdout, "]");
 }
 
-static void emit_summary_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files)
+static void emit_reference_metadata(FILE *fp, const reference_index_t *reference)
+{
+    if (reference == NULL) return;
+    fprintf(fp, ",\"indexScope\":\"reference\",\"referenceFile\":");
+    json_string(fp, reference->file);
+    fprintf(fp, ",\"targetKmers\":%" PRIu64 ",\"globalNoiseAvailable\":false,\"unrestrictedQueriesAvailable\":false,",
+            reference->target_keys);
+    fprintf(fp, "\"bloom\":{\"backend\":\"bfc-blocked\",\"bytes\":%" PRIu64 ",\"bitsPerKey\":%d,\"hashes\":%d}",
+            (uint64_t)1 << (reference->bloom->n_shift - 3), reference->bits_per_key, reference->bloom->n_hashes);
+}
+
+static uint64_t reference_observed_keys(kc_c4x_t *h)
+{
+    uint64_t total = 0;
+    for (int j = 0; j < 1 << h->p; ++j) {
+        kc_c4_t *g = h->h[j];
+        for (khint_t i = 0; i < kh_end(g); ++i)
+            if (kh_exist(g, i) && (kh_key(g, i) & KC_MAX)) ++total;
+    }
+    return total;
+}
+
+static void emit_summary_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files, const reference_index_t *reference)
 {
     fprintf(stdout, "{\"type\":\"summary\",\"k\":%d,\"threads\":%d,\"readLength\":%d,", k, n_thread, read_len);
-    fprintf(stdout, "\"distinctKmers\":%d,", kc_c4x_t_size(h, h->p));
+    fprintf(stdout, "\"distinctKmers\":%" PRIu64 ",", reference ? reference_observed_keys(h) : (uint64_t)kc_c4x_t_size(h, h->p));
     fprintf(stdout, "\"totalKmerCoverage\":%llu,", kc_c4x_total_abundance(h));
     emit_file_array(file_count, files);
+    emit_reference_metadata(stdout, reference);
     fprintf(stdout, "}\n");
     fflush(stdout);
 }
 
-static void emit_ready_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files)
+static void emit_ready_json(kc_c4x_t *h, int k, int n_thread, int read_len, int file_count, char **files, const reference_index_t *reference)
 {
     fprintf(stdout, "{\"type\":\"ready\",\"mode\":\"interactive\",\"k\":%d,\"threads\":%d,\"readLength\":%d,", k, n_thread, read_len);
-    fprintf(stdout, "\"distinctKmers\":%d,\"totalKmerCoverage\":%llu,", kc_c4x_t_size(h, h->p), kc_c4x_total_abundance(h));
+    fprintf(stdout, "\"distinctKmers\":%" PRIu64 ",\"totalKmerCoverage\":%llu,", reference ? reference_observed_keys(h) : (uint64_t)kc_c4x_t_size(h, h->p), kc_c4x_total_abundance(h));
     emit_file_array(file_count, files);
+    emit_reference_metadata(stdout, reference);
     fprintf(stdout, "}\n");
     fflush(stdout);
 }
 
-static void emit_help_json(void)
+static void emit_help_json(const reference_index_t *reference)
 {
     fprintf(stdout, "{\"type\":\"help\",\"commands\":[");
     json_string(stdout, "summary");
     fprintf(stdout, ",");
     json_string(stdout, "addFile <NGS file>");
     fprintf(stdout, ",");
-    json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
-    fprintf(stdout, ",");
-    json_string(stdout, "index <decimalInteger> <baseLength> [upstreamDepth] [downstreamDepth]");
-    fprintf(stdout, ",");
+    if (reference == NULL) {
+        json_string(stdout, "kmer <ACGT...> [upstreamDepth] [downstreamDepth]");
+        fprintf(stdout, ",");
+        json_string(stdout, "index <decimalInteger> <baseLength> [upstreamDepth] [downstreamDepth]");
+        fprintf(stdout, ",");
+    }
     json_string(stdout, "sequence <ACGT...>");
     fprintf(stdout, ",");
     json_string(stdout, "sequenceSummary <ACGT...>");
@@ -969,7 +1123,9 @@ static void emit_help_json(void)
     json_string(stdout, "batch <primerFront> <primerBack> <reference.fasta>");
     fprintf(stdout, ",");
     json_string(stdout, "exit");
-    fprintf(stdout, "]}\n");
+    fprintf(stdout, "]");
+    emit_reference_metadata(stdout, reference);
+    fprintf(stdout, "}\n");
     fflush(stdout);
 }
 
@@ -1271,7 +1427,7 @@ static double coverage_ratio(int a, int b)
     return 0.0;
 }
 
-static void write_sequence_result_json(FILE *fp, kc_c4x_t *h, int k, const char *seq, int len)
+static void write_sequence_result_json(FILE *fp, kc_c4x_t *h, int k, const char *seq, int len, const reference_index_t *reference)
 {
     uint64_t mask = (1ULL<<k*2) - 1;
     int km_num = len - k + 1;
@@ -1320,14 +1476,16 @@ static void write_sequence_result_json(FILE *fp, kc_c4x_t *h, int k, const char 
         if (i) fputc(',', fp);
         fprintf(fp, "{\"position\":%d,\"ratio\":%.3f}", i, coverage_ratio(coverages[i], coverages[i + 1]));
     }
-    fprintf(fp, "]}");
+    fprintf(fp, "]");
+    emit_reference_metadata(fp, reference);
+    fprintf(fp, "}");
 
     free(canonical);
     free(coverages);
     free(kms);
 }
 
-static void write_sequence_summary_json(FILE *fp, kc_c4x_t *h, int k, const char *seq, int len)
+static void write_sequence_summary_json(FILE *fp, kc_c4x_t *h, int k, const char *seq, int len, const reference_index_t *reference)
 {
     uint64_t mask = (1ULL<<k*2) - 1;
     int km_num = len - k + 1;
@@ -1357,38 +1515,48 @@ static void write_sequence_summary_json(FILE *fp, kc_c4x_t *h, int k, const char
 
     fprintf(fp, "{\"type\":\"sequenceSummary\",\"length\":%d,\"k\":%d,\"kmerCount\":%d,", len, k, km_num);
     fprintf(fp, "\"observed\":%d,\"missing\":%d,\"complete\":%s,", observed, missing, missing == 0 ? "true" : "false");
-    fprintf(fp, "\"minCoverage\":%d,\"maxCoverage\":%d,\"meanCoverage\":%.3f,\"maxAdjacentRatio\":%.3f}",
+    fprintf(fp, "\"minCoverage\":%d,\"maxCoverage\":%d,\"meanCoverage\":%.3f,\"maxAdjacentRatio\":%.3f",
             min_cov, max_cov, km_num > 0 ? (double)cov_sum / km_num : 0.0, max_ratio);
+    emit_reference_metadata(fp, reference);
+    fprintf(fp, "}");
 
     free(coverages);
     free(kms);
 }
 
-static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int len)
+static void emit_sequence_query_json(kc_c4x_t *h, int k, const char *seq, int len, const reference_index_t *reference)
 {
     if (len < k) {
         emit_error_json("sequence length must be at least k");
         return;
     }
 
-    write_sequence_result_json(stdout, h, k, seq, len);
+    if (reference && !reference_contains_sequence(h, k, seq, len)) {
+        emit_error_json("sequence contains k-mers outside the indexed Bloom reference; coverage is unavailable");
+        return;
+    }
+    write_sequence_result_json(stdout, h, k, seq, len, reference);
     fputc('\n', stdout);
     fflush(stdout);
 }
 
-static void emit_sequence_summary_query_json(kc_c4x_t *h, int k, const char *seq, int len)
+static void emit_sequence_summary_query_json(kc_c4x_t *h, int k, const char *seq, int len, const reference_index_t *reference)
 {
     if (len < k) {
         emit_error_json("sequence length must be at least k");
         return;
     }
 
-    write_sequence_summary_json(stdout, h, k, seq, len);
+    if (reference && !reference_contains_sequence(h, k, seq, len)) {
+        emit_error_json("sequence contains k-mers outside the indexed Bloom reference; coverage is unavailable");
+        return;
+    }
+    write_sequence_summary_json(stdout, h, k, seq, len, reference);
     fputc('\n', stdout);
     fflush(stdout);
 }
 
-static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int primer_front, int primer_back)
+static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int primer_front, int primer_back, const reference_index_t *reference)
 {
     gzFile fp;
     kseq_t *ks;
@@ -1409,7 +1577,9 @@ static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int prim
         json_string(stdout, file);
         fprintf(stdout, ",\"k\":%d,\"primerFront\":%d,\"primerBack\":%d,\"rows\":[", k, primer_front, primer_back);
         fprintf(stdout, "{\"index\":0,\"name\":\"\",\"rawLength\":0,\"analyzedLength\":0,\"status\":\"error\",\"message\":\"could not open reference file\"}],");
-        fprintf(stdout, "\"total\":0,\"ok\":0,\"skipped\":0,\"errors\":1}\n");
+        fprintf(stdout, "\"total\":0,\"ok\":0,\"skipped\":0,\"errors\":1");
+        emit_reference_metadata(stdout, reference);
+        fprintf(stdout, "}\n");
         fflush(stdout);
         return;
     }
@@ -1458,16 +1628,21 @@ static void emit_batch_query_json(kc_c4x_t *h, int k, const char *file, int prim
             json_string(stdout, message);
             fputc('}', stdout);
             ++errors;
+        } else if (reference && !reference_contains_sequence(h, k, ks->seq.s + start, analyzed_len)) {
+            fprintf(stdout, "\"status\":\"error\",\"message\":\"sequence contains k-mers outside the indexed Bloom reference; coverage is unavailable\"}");
+            ++errors;
         } else {
             fprintf(stdout, "\"status\":\"ok\",\"summary\":");
-            write_sequence_summary_json(stdout, h, k, ks->seq.s + start, analyzed_len);
+            write_sequence_summary_json(stdout, h, k, ks->seq.s + start, analyzed_len, reference);
             fputc('}', stdout);
             ++ok;
         }
         ++index;
     }
 
-    fprintf(stdout, "],\"total\":%d,\"ok\":%d,\"skipped\":%d,\"errors\":%d}\n", index, ok, skipped, errors);
+    fprintf(stdout, "],\"total\":%d,\"ok\":%d,\"skipped\":%d,\"errors\":%d", index, ok, skipped, errors);
+    emit_reference_metadata(stdout, reference);
+    fprintf(stdout, "}\n");
     fflush(stdout);
     kseq_destroy(ks);
     gzclose(fp);
@@ -1477,7 +1652,10 @@ static void write_smkdkn_row(FILE *fp, double ratio, int cov, int total, int pat
                              long long noise, long long exist, long long lost,
                              double sm, double kd)
 {
-    if (exist == 0) {
+    if (noise < 0) {
+        fprintf(fp, "%.2f\t%d\t%d\t%d\tnan\t%lld\t%lld\t%f\t%f\tnan\n",
+                ratio, cov, total, paths, exist, lost, sm, kd);
+    } else if (exist == 0) {
         fprintf(fp, "%.2f\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%f\t%f\tnan\n",
                 ratio, cov, total, paths, noise, exist, lost, sm, kd);
     } else {
@@ -1497,9 +1675,9 @@ static int cmp_strand_rc(const void *a, const void *b)
     return (ra < rb) ? -1 : (ra > rb) ? 1 : 0;
 }
 
-static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len)
+static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len,
+                                  kc_c4x_t *h, const reference_index_t *reference)
 {
-    kc_c4x_t *h;
     char *line = 0;
     size_t line_cap = 0;
     ssize_t line_len;
@@ -1522,18 +1700,20 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
     }
 
     fprintf(stderr, "Counting NGS file 1 ......\n");
-    h = count_file_into(argv[first_file], NULL, k, p, block_size, n_thread, read_len);
-    if (h == 0) {
+    kc_c4x_t *first = count_file_into(argv[first_file], h, k, p, block_size, n_thread, read_len, reference);
+    if (first == NULL) {
         fprintf(stderr, "Error: could not open NGS file %s\n", argv[first_file]);
+        c4x_destroy(h);
         for (int i = 0; i < file_count; ++i) free(loaded_files[i]);
         free(loaded_files);
         return 1;
     }
+    h = first;
 
     for (int i = first_file + 1; i < argc; ++i) {
         kc_c4x_t *next;
         fprintf(stderr, "Counting NGS file %d ......\n", i - first_file + 1);
-        next = count_file_into(argv[i], h, k, p, block_size, n_thread, read_len);
+        next = count_file_into(argv[i], h, k, p, block_size, n_thread, read_len, reference);
         if (next == 0) {
             fprintf(stderr, "Error: could not open NGS file %s\n", argv[i]);
             c4x_destroy(h);
@@ -1544,7 +1724,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
         h = next;
     }
 
-    emit_ready_json(h, k, n_thread, read_len, file_count, loaded_files);
+    emit_ready_json(h, k, n_thread, read_len, file_count, loaded_files, reference);
 
     while ((line_len = getline(&line, &line_cap, stdin)) >= 0) {
         char *cmd;
@@ -1570,9 +1750,9 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
             fflush(stdout);
             break;
         } else if (command_equals(cmd, "help")) {
-            emit_help_json();
+            emit_help_json(reference);
         } else if (command_equals(cmd, "summary")) {
-            emit_summary_json(h, k, n_thread, read_len, file_count, loaded_files);
+            emit_summary_json(h, k, n_thread, read_len, file_count, loaded_files, reference);
         } else if (command_equals(cmd, "addFile") || command_equals(cmd, "add") || command_equals(cmd, "countFile")) {
             kc_c4x_t *next;
             char *file_arg = trim_left(arg);
@@ -1581,7 +1761,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 emit_error_json("addFile requires an NGS FASTA/FASTQ file path");
             } else {
                 fprintf(stderr, "Counting NGS file %d ......\n", file_count + 1);
-                next = count_file_into(file_arg, h, k, p, block_size, n_thread, read_len);
+                next = count_file_into(file_arg, h, k, p, block_size, n_thread, read_len, reference);
                 if (next == 0) {
                     snprintf(err, sizeof(err), "could not open NGS file %s", file_arg);
                     emit_error_json(err);
@@ -1592,9 +1772,11 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                         REALLOC(loaded_files, file_cap);
                     }
                     loaded_files[file_count++] = copy_string(file_arg);
-                    emit_summary_json(h, k, n_thread, read_len, file_count, loaded_files);
+                    emit_summary_json(h, k, n_thread, read_len, file_count, loaded_files, reference);
                 }
             }
+        } else if (reference && (command_equals(cmd, "kmer") || command_equals(cmd, "index"))) {
+            emit_error_json("graph queries are unavailable in Bloom reference mode; use a reference sequence query or restart in full mode");
         } else if (command_equals(cmd, "kmer")) {
             char *depth_arg = arg;
             int upstream_depth = 1;
@@ -1649,7 +1831,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
             } else {
                 file_arg = trim_left(file_arg);
                 trim_right(file_arg);
-                emit_batch_query_json(h, k, file_arg, primer_front, primer_back);
+                emit_batch_query_json(h, k, file_arg, primer_front, primer_back, reference);
             }
         } else if (command_equals(cmd, "sequenceSummary") || command_equals(cmd, "seqSummary") || command_equals(cmd, "summarySequence")) {
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
@@ -1659,7 +1841,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 snprintf(err, sizeof(err), "sequence length is %d, but k is %d", seq_len, k);
                 emit_error_json(err);
             } else {
-                emit_sequence_summary_query_json(h, k, seq, seq_len);
+                emit_sequence_summary_query_json(h, k, seq, seq_len, reference);
             }
             free(seq);
         } else if (command_equals(cmd, "sequence") || command_equals(cmd, "seq") || command_equals(cmd, "path")) {
@@ -1670,7 +1852,7 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 snprintf(err, sizeof(err), "sequence length is %d, but k is %d", seq_len, k);
                 emit_error_json(err);
             } else {
-                emit_sequence_query_json(h, k, seq, seq_len);
+                emit_sequence_query_json(h, k, seq, seq_len, reference);
             }
             free(seq);
         } else {
@@ -1692,14 +1874,43 @@ int main(int argc, char *argv[])
     int i, c, k = 31, p = KC_BITS, block_size = 10000000, n_thread = 3, min_cov_cut = 0, max_cov_cut=0;
     int read_len = 200;
     int interactive = 0;
+    int bloom_enabled = 0, bloom_bits = 16, bloom_bits_set = 0;
+    const char *bloom_reference = NULL;
+    reference_index_t reference = {0};
     double max_cov_ratio = 0.0; // No limitation on ratio by default
     double max_R = 0.0; // Upper bound for ratio range iteration
     double step_size = 0.20; // Default step size for ratio iteration
     int skip_ratios = 0; // Default: skip the first N ratio values
     char *output_prefix = NULL;
 
+    static const ko_longopt_t long_options[] = {
+        {"bloom", 0, 300},
+        {"bloom-reference", 1, 301},
+        {"bloom-bits", 1, 302},
+        {0, 0, 0}
+    };
     ketopt_t o = KETOPT_INIT;
-    while ((c = ketopt(&o, argc, argv, 1, "ik:t:c:C:L:o:r:s:R:I:", 0)) >= 0) {
+    while ((c = ketopt(&o, argc, argv, 1, "ik:t:c:C:L:o:r:s:R:I:", long_options)) >= 0) {
+        if (c == '?' || c == ':') {
+            fprintf(stderr, "Error: unknown option or missing option argument\n");
+            return 1;
+        }
+        if (c == 300) {
+            if (o.arg != NULL) { fprintf(stderr, "Error: --bloom takes no argument\n"); return 1; }
+            bloom_enabled = 1;
+        } else if (c == 301) {
+            bloom_reference = o.arg;
+        } else if (c == 302) {
+            char *end;
+            errno = 0;
+            long parsed = strtol(o.arg, &end, 10);
+            if (errno || end == o.arg || *end || parsed < 4 || parsed > 64) {
+                fprintf(stderr, "Error: --bloom-bits must be an integer in [4, 64]\n");
+                return 1;
+            }
+            bloom_bits = (int)parsed;
+            bloom_bits_set = 1;
+        }
         if (c == 'i') interactive = 1;
         if (c == 'k') k = atoi(o.arg);
         //else if (c == 'p') p = atoi(o.arg);
@@ -1736,13 +1947,25 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  -C INT     max_cov_cut [%d]\n", max_cov_cut);
         fprintf(stderr, "  -o STR     output prefix for additional files [none]\n");
         fprintf(stderr, "  -s INT     Number of initial ratio values to ignore [%d]\n", skip_ratios);
+        fprintf(stderr, "  --bloom                 count reference k-mers only (default: off); Noise/Kn and graph queries unavailable\n");
+        fprintf(stderr, "  --bloom-reference FILE  reference FASTA/FASTQ required with -i --bloom\n");
+        fprintf(stderr, "  --bloom-bits INT        minimum allocated filter bits per target key [16], range 4-64\n");
         
         fprintf(stderr, "\n");
         return 1;
     }
 
-    if (interactive) {
-        return run_interactive_kernel(argc, argv, o.ind, k, p, block_size, n_thread, read_len);
+    if (!bloom_enabled && (bloom_reference || bloom_bits_set)) {
+        fprintf(stderr, "Error: --bloom-reference and --bloom-bits require --bloom\n");
+        return 1;
+    }
+    if (bloom_enabled && interactive && (!bloom_reference || !*bloom_reference)) {
+        fprintf(stderr, "Error: -i --bloom requires --bloom-reference FILE\n");
+        return 1;
+    }
+    if (bloom_enabled && !interactive && bloom_reference) {
+        fprintf(stderr, "Error: standalone --bloom uses the positional strand file, not --bloom-reference\n");
+        return 1;
     }
 
     if (k < 1 || k > 31) {
@@ -1753,34 +1976,55 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: -t must be at least 1 (got %d)\n", n_thread);
         return 1;
     }
-    if (step_size <= 0.0) {
+    if (!interactive && step_size <= 0.0) {
         fprintf(stderr, "Error: -I step size must be positive (got %g)\n", step_size);
         return 1;
     }
 
+    kc_c4x_t *h = NULL;
+    const reference_index_t *ref = NULL;
+    if (bloom_enabled) {
+        h = load_reference_index(interactive ? bloom_reference : argv[o.ind], k, p, bloom_bits, &reference);
+        if (h == NULL) return 1;
+        ref = &reference;
+    }
+    if (interactive) {
+        int result = run_interactive_kernel(argc, argv, o.ind, k, p, block_size, n_thread, read_len, h, ref);
+        bfc_bf_destroy(reference.bloom);
+        return result;
+    }
+
     if(max_cov_cut < min_cov_cut){max_cov_cut = min_cov_cut;}
 
-    kc_c4x_t *h;
     fprintf(stdout, ">> Settings:\nk-mer size = %d\n", k);
     fprintf(stdout, "Read length = %d\n", read_len);
     fprintf(stdout, "Maximum coverage ratio = %.1f\n", max_cov_ratio);
     fprintf(stdout, "Ignore initial ratios = %d\n", skip_ratios);
     fprintf(stdout, "Upper bound for ratio range iteration = %.1f\n", max_R);
+    if (ref) {
+        fprintf(stdout, "Index scope = reference; global Noise/Kn unavailable (nan)\n");
+        fprintf(stdout, "Bloom target keys = %" PRIu64 "; filter bytes = %" PRIu64 "; bits per key >= %d\n",
+                reference.target_keys, (uint64_t)1 << (reference.bloom->n_shift - 3), bloom_bits);
+    }
    
     fprintf(stderr, "Counting NGS file 1 ......\n");
-    h = count_file_into(argv[o.ind + 1], NULL, k, p, block_size, n_thread, read_len);
-    if (h == 0) {
+    kc_c4x_t *first = count_file_into(argv[o.ind + 1], h, k, p, block_size, n_thread, read_len, ref);
+    if (first == NULL) {
         fprintf(stderr, "Error: could not open NGS file %s\n", argv[o.ind + 1]);
+        c4x_destroy(h);
+        bfc_bf_destroy(reference.bloom);
         return 1;
     }
+    h = first;
 
     int f_num = argc - o.ind, c_f_n = 3;
     while(c_f_n <= f_num) {
         fprintf(stderr, "Counting NGS file %d ......\n", c_f_n-1);
-        kc_c4x_t *next = count_file_into(argv[o.ind + c_f_n - 1], h, k, p, block_size, n_thread, read_len);
+        kc_c4x_t *next = count_file_into(argv[o.ind + c_f_n - 1], h, k, p, block_size, n_thread, read_len, ref);
         if (next == 0) {
             fprintf(stderr, "Error: could not open NGS file %s\n", argv[o.ind + c_f_n - 1]);
             c4x_destroy(h);
+            bfc_bf_destroy(reference.bloom);
             return 1;
         }
         h = next;
@@ -1845,7 +2089,7 @@ int main(int argc, char *argv[])
     // One pass over the strand file collects everything the grid needs.
     eval_cache_t cache;
     if (build_eval_cache(&cache, argv[o.ind], k, h, skip_ratios,
-                         cov_details_fp, cov_ratios_fp, ratio_range) != 0) {
+                         cov_details_fp, cov_ratios_fp, ratio_range, ref) != 0) {
         fprintf(stderr, "Error: could not open strand file %s\n", argv[o.ind]);
         return 1;
     }
@@ -1939,7 +2183,7 @@ int main(int argc, char *argv[])
 
             long long exist_km = suffix_at(tg_suffix, (long)cov + 1);
             long long lose_km = cache.target_total - exist_km;
-            long long noise_km = suffix_at(seq_suffix, (long)cov + 1) - exist_km;
+            long long noise_km = ref ? -1 : suffix_at(seq_suffix, (long)cov + 1) - exist_km;
 
             double sm = (double)exist_strand_num / cache.strand_num;
             double kd = (double)lose_km / (lose_km + exist_km);
@@ -1985,5 +2229,6 @@ int main(int argc, char *argv[])
     }
 
     free(h->h); free(h);
+    bfc_bf_destroy(reference.bloom);
     return 0;
 }

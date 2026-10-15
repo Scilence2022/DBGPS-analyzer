@@ -39,7 +39,7 @@ export const AGENT_TOOLS: AgentToolDefinition[] = [
   },
   {
     name: "query_kmer",
-    description: "Read the stored count and membership-derived neighborhood of one canonicalizable ACGT k-mer. Length must equal the loaded k; inferred graph edges are not read-supported transitions.",
+    description: "Read the stored count and membership-derived neighborhood of one canonicalizable ACGT k-mer. Unavailable in reference mode. Length must equal the loaded k; inferred graph edges are not read-supported transitions.",
     parameters: parameters({
       kmer: { type: "string", pattern: "^[ACGTacgt]+$", minLength: 1, maxLength: 31 },
       depth: { type: "integer", minimum: 0, maximum: AGENT_LIMITS.neighborhoodDepth }
@@ -65,6 +65,7 @@ export const AGENT_SYSTEM_PROMPT = [
   "Cite snapshot ID, tool name, record index or slice, and supporting numbers for dataset-specific conclusions. Explicitly distinguish measured facts, hypotheses, omitted evidence, and recommended manual checks.",
   "Path completeness is pooled positional k-mer support, not molecule reconstruction or payload decoding. Sm is accepted reference records / all reference records under the stated standalone criterion.",
   "Kd is lost distinct target keys / all distinct target keys. Kn is distinct off-target keys / supported target keys, not a per-base sequencing error probability.",
+  "When indexScope=reference, the immutable index contains full-reference canonical keys only. distinctKmers and totalKmerCoverage count observed reference keys only. Global Kn and off-target coverage cannot be measured; globalNoiseAvailable=false and unrestrictedQueriesAvailable=false mean unavailable, not zero. Graph k-mer/index queries are forbidden. Out-of-reference sequence errors are not dropout or zero coverage. Preserve this scope in every conclusion, including captured evidence.",
   "Ordered positional ratios and first-occurrence distinct-key ratios differ. Links is excess sharing, not a pairwise edge count or physical-chimera assay.",
   "Counts saturate at 16383 in the analyzer; neighborhood edges arise from overlap and membership. Preserve primer, cutoff, saturation, and exactness scopes.",
   "At most six tool calls and five model turns are available. Give concise Markdown; do not present internal reasoning or claim an unperformed action occurred."
@@ -179,7 +180,7 @@ export function compactAgentContext(input: unknown) {
     if (typeof value !== "object") return null;
     const result: Record<string, unknown> = Object.create(null);
     for (const [key, child] of Object.entries(value)) {
-      if (/command|path|file|api.?key|secret|token/i.test(key)) { omitted.push(`${location}.${key}`); continue; }
+      if (key !== "referenceFile" && /command|path|file|api.?key|secret|token/i.test(key)) { omitted.push(`${location}.${key}`); continue; }
       result[key] = visit(child, `${location}.${key}`, depth + 1);
       if (JSON.stringify(result).length > AGENT_LIMITS.contextChars / 2) {
         delete result[key];

@@ -126,6 +126,30 @@ def test_interactive_validation():
     check(len(errors) >= 1, "invalid base produces an error")
 
 
+def test_decimal_index_conversion():
+    print("test_decimal_index_conversion")
+    tokens = ["0", "00015", "18446744073709551616", "9" * 256]
+    commands = "".join(f"index {token} 4 0 0\n" for token in tokens)
+    proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")],
+               stdin=commands + "index 12x 4 0 0\nsummary\nexit\n")
+    check(proc.returncode == 0, "decimal conversion kernel exits normally")
+    events = jsonl(proc.stdout)
+    indexes = [event for event in events if event.get("type") == "index"]
+    check(len(indexes) == len(tokens), "zero, leading-zero, 65-bit and long indexes are accepted")
+    for token, event in zip(tokens, indexes):
+        number = int(token)
+        bases = []
+        while number:
+            number, remainder = divmod(number, 4)
+            bases.append("ACGT"[remainder])
+        decoded = "".join(reversed(bases)) or "A"
+        check(event["decoded"] == decoded.rjust(4, "A"), f"index {token[:20]} decodes to exact base-4 DNA")
+        check(event["encodedLength"] == len(decoded), "encoded length precedes A-padding")
+    check(any(event.get("type") == "error" and "invalid decimal" in event.get("message", "")
+              for event in events), "nondigit index is rejected")
+    check(any(event.get("type") == "summary" for event in events), "kernel remains usable after invalid index")
+
+
 def test_interactive_batch_qc():
     print("test_interactive_batch_qc")
     commands = f"batch 0 0 {data('strands.fa')}\nexit\n"
@@ -316,6 +340,7 @@ def main():
     tests = [
         test_interactive_kernel,
         test_interactive_validation,
+        test_decimal_index_conversion,
         test_interactive_batch_qc,
         test_batch_metrics,
         test_batch_output_files,
