@@ -791,7 +791,12 @@ static char *index_token_to_dna(const char *token, int *out_len, char *err, size
         return 0;
     }
 
-    MALLOC(digits, strlen(token) + 1);
+    size_t token_len = strlen(token);
+    if (token_len > (size_t)(INT_MAX - 2) / 2) {
+        snprintf(err, err_len, "index argument is too long");
+        return 0;
+    }
+    MALLOC(digits, token_len + 1);
     for (const unsigned char *p = (const unsigned char*)token; *p; ++p) {
         if (isspace(*p)) continue;
         if (!isdigit(*p)) {
@@ -802,8 +807,14 @@ static char *index_token_to_dna(const char *token, int *out_len, char *err, size
         digits[digit_count++] = (unsigned char)(*p - '0');
     }
 
-    if (digit_count == 0) {
+    if (digit_count < 1) {
         snprintf(err, err_len, "empty index argument");
+        free(digits);
+        return 0;
+    }
+    /* Decimal-to-base-4 expansion uses fewer than two bases per digit. */
+    if (digit_count > (INT_MAX - 2) / 2) {
+        snprintf(err, err_len, "index argument is too long");
         free(digits);
         return 0;
     }
