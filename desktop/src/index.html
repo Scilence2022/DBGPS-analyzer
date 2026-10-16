@@ -37,6 +37,60 @@
         </div>
       </header>
 
+      <section id="inputsBar" class="inputs-bar" aria-label="Shared inputs">
+        <div class="inputs-head">
+          <button id="inputsToggle" class="inputs-toggle" aria-expanded="true" aria-controls="inputsBody" title="Collapse inputs">
+            <i data-lucide="chevron-down"></i>
+            <strong>Inputs</strong>
+            <span id="inputsSummary" class="inputs-summary"></span>
+          </button>
+          <span id="kernelPill" class="kernel-pill" role="status">Kernel not started</span>
+        </div>
+        <div id="inputsBody" class="inputs-body">
+          <div class="input-sources">
+            <div class="input-source" data-views="interactive batch links filter report">
+              <span class="input-label">Reference</span>
+              <button id="referenceSelectButton" class="ghost-button input-pick" title="Reference strands: FASTA or Head-Index&#9;DNA table">
+                <i data-lucide="folder-open"></i><span>Select</span>
+              </button>
+              <div id="referenceFile" class="input-chips"></div>
+            </div>
+            <div class="input-source" data-views="interactive report">
+              <span class="input-label">Reads</span>
+              <button id="readsSelectButton" class="ghost-button input-pick" title="Sequencing reads (FASTA/FASTQ, optionally gzip)">
+                <i data-lucide="folder-open"></i><span>Select</span>
+              </button>
+              <div id="readsFiles" class="input-chips"></div>
+            </div>
+          </div>
+          <div class="input-params">
+            <label class="input-field" data-views="interactive links filter report">
+              <span>k-mer</span>
+              <input id="kInput" type="number" min="1" max="31" value="31" />
+            </label>
+            <label class="input-field" data-views="interactive report">
+              <span>Threads</span>
+              <input id="threadsInput" type="number" min="1" max="64" value="3" />
+            </label>
+            <label class="input-field" data-views="interactive report">
+              <span>Read length</span>
+              <input id="readLengthInput" type="number" min="1" value="200" />
+            </label>
+            <div class="input-field primer-field" data-views="batch links filter report">
+              <span>Primer trim (bp)</span>
+              <div class="primer-pair">
+                <input id="primerFrontInput" type="number" min="0" value="18" aria-label="Front primer length" title="Front primer (bp)" />
+                <button id="primerLinkButton" class="primer-link" type="button" aria-pressed="true" title="Front and back are linked">
+                  <i data-lucide="link"></i>
+                </button>
+                <input id="primerBackInput" type="number" min="0" value="18" aria-label="Back primer length" title="Back primer (bp)" />
+              </div>
+            </div>
+          </div>
+          <p id="inputsNotice" class="inputs-notice" hidden></p>
+        </div>
+      </section>
+
       <nav class="view-nav" aria-label="Workbench views">
         <button class="view-tab active" data-view="interactive"><i data-lucide="activity"></i><span>Interactive</span></button>
         <button class="view-tab" data-view="batch"><i data-lucide="layers"></i><span>Batch QC</span></button>
@@ -47,38 +101,15 @@
 
       <main class="layout">
         <section class="workspace">
+
           <div id="view-interactive" class="view active">
-          <section class="config-band">
-            <div class="file-picker">
-              <div class="file-actions">
-                <button id="selectFilesButton" class="primary-button">
-                  <i data-lucide="folder-open"></i>
-                  <span>Select sequencing files</span>
-                </button>
-                <button id="addFilesButton" class="ghost-button" disabled>
-                  <i data-lucide="plus"></i>
-                  <span>Add sequencing files</span>
-                </button>
-              </div>
-              <div id="fileList" class="file-list">No files selected</div>
-            </div>
-            <div class="config-grid">
-              <label>
-                <span>k-mer</span>
-                <input id="kInput" type="number" min="1" max="31" value="31" />
-              </label>
-              <label>
-                <span>Threads</span>
-                <input id="threadsInput" type="number" min="1" max="64" value="3" />
-              </label>
-              <label>
-                <span>Read length limit</span>
-                <input id="readLengthInput" type="number" min="1" value="200" />
-              </label>
+          <section class="config-band kernel-band">
+            <div class="kernel-row">
               <button id="startButton" class="primary-button">
                 <i data-lucide="play"></i>
                 <span>Start kernel</span>
               </button>
+              <p class="kernel-hint">Loads the <strong>Reads</strong> and <strong>k-mer</strong> from Inputs into the C kernel. Batch QC and the AI agent reuse it.</p>
             </div>
             <div class="bloom-config">
               <label class="checkbox-label bloom-toggle">
@@ -86,13 +117,7 @@
                 <span>Bloom reference mode</span>
               </label>
               <div id="bloomOptions" class="bloom-options" hidden>
-                <div class="file-picker bloom-reference">
-                  <button id="selectBloomReferenceButton" class="ghost-button" disabled>
-                    <i data-lucide="folder-open"></i>
-                    <span>Select reference</span>
-                  </button>
-                  <div id="bloomReferenceFile" class="file-list">No reference selected</div>
-                </div>
+                <p class="kernel-hint">Indexes only the k-mers of the <strong>Reference</strong> from Inputs.</p>
                 <label>
                   <span>Min. bits per key</span>
                   <input id="bloomBitsInput" type="number" min="4" max="64" step="1" value="16" disabled />
@@ -174,22 +199,7 @@
 
           <div id="view-batch" class="view">
             <section class="config-band tool-band batch-config">
-              <div class="file-picker">
-                <button id="batchSelectButton" class="primary-button">
-                  <i data-lucide="folder-open"></i>
-                  <span>Reference sequences</span>
-                </button>
-                <div id="batchFile" class="file-list">No reference selected</div>
-              </div>
-              <div class="config-grid batch-grid">
-                <label>
-                  <span>Front primer (bp)</span>
-                  <input id="batchPrimerFront" type="number" min="0" value="18" />
-                </label>
-                <label>
-                  <span>Back primer (bp)</span>
-                  <input id="batchPrimerBack" type="number" min="0" value="18" />
-                </label>
+              <div class="tool-row">
                 <button id="batchRunButton" class="primary-button">
                   <i data-lucide="play"></i>
                   <span>Analyze all</span>
@@ -198,12 +208,10 @@
                   <i data-lucide="download"></i>
                   <span>Save CSV</span>
                 </button>
+                <p class="batch-hint muted">
+                  Scores every <strong>Reference</strong> strand against the loaded sequencing k-mer table, after trimming the <strong>Primer</strong> regions. Start the kernel in <strong>Interactive</strong> first.
+                </p>
               </div>
-              <p class="batch-hint muted">
-                Accepts FASTA or tab-delimited (<code>Head-Index&#9;DNA</code>) files. Each reference
-                strand is scored against the loaded sequencing k-mer table. Start the kernel in the
-                <strong>Interactive</strong> tab first; front/back primer regions are trimmed before analysis.
-              </p>
             </section>
             <section class="result-band">
               <div class="section-title">
@@ -213,37 +221,23 @@
                 </div>
                 <div id="batchProgress" class="batch-progress"></div>
               </div>
-              <div id="batchResult" class="result-view empty-state">Select a reference file and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
+              <div id="batchResult" class="result-view empty-state">Choose a Reference in Inputs and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
               <div id="batchDetail" class="batch-detail"></div>
             </section>
           </div>
 
           <div id="view-links" class="view">
             <section class="config-band tool-band">
-              <div class="file-picker">
-                <button id="linksSelectButton" class="primary-button">
-                  <i data-lucide="folder-open"></i>
-                  <span>Select Reference</span>
-                </button>
-                <div id="linksFile" class="file-list">No file selected</div>
-              </div>
-              <div class="config-grid">
-                <label>
-                  <span>k-mer</span>
-                  <input id="linksK" type="number" min="1" max="31" value="31" />
-                </label>
-                <label>
+              <div class="tool-row">
+                <label class="inline-field">
                   <span>Min shared strands (m)</span>
                   <input id="linksM" type="number" min="0" value="1" />
-                </label>
-                <label>
-                  <span>Primer length (bp)</span>
-                  <input id="linksPrimer" type="number" min="0" value="18" />
                 </label>
                 <button id="linksRunButton" class="primary-button">
                   <i data-lucide="play"></i>
                   <span>Count cross-links</span>
                 </button>
+                <p class="muted tool-hint">Uses the Reference, k-mer, and Primer from Inputs.</p>
               </div>
             </section>
             <section class="result-band">
@@ -253,31 +247,16 @@
                   <h2>Cross-link analysis</h2>
                 </div>
               </div>
-              <div id="linksResult" class="result-view empty-state">Select a reference file (FASTA or tab-delimited) and run to count k-mers shared across strands. Set the primer length to trim primer regions before counting.</div>
+              <div id="linksResult" class="result-view empty-state">Choose a Reference in Inputs and run to count k-mers shared across strands. The Primer trim removes primer regions before counting.</div>
             </section>
           </div>
 
           <div id="view-filter" class="view">
             <section class="config-band tool-band">
-              <div class="file-picker">
-                <button id="filterSelectButton" class="primary-button">
-                  <i data-lucide="folder-open"></i>
-                  <span>Select Reference</span>
-                </button>
-                <div id="filterFile" class="file-list">No file selected</div>
-              </div>
-              <div class="config-grid">
-                <label>
-                  <span>k-mer</span>
-                  <input id="filterK" type="number" min="1" max="31" value="31" />
-                </label>
-                <label>
+              <div class="tool-row">
+                <label class="inline-field">
                   <span>Max cross-links (m)</span>
                   <input id="filterM" type="number" min="0" value="0" />
-                </label>
-                <label>
-                  <span>Primer length (p)</span>
-                  <input id="filterPrimer" type="number" min="0" value="18" />
                 </label>
                 <label class="checkbox-label">
                   <input id="filterListFiltered" type="checkbox" />
@@ -287,6 +266,7 @@
                   <i data-lucide="play"></i>
                   <span>Run filter</span>
                 </button>
+                <p class="muted tool-hint">Uses the Reference, k-mer, and Primer from Inputs.</p>
               </div>
             </section>
             <section class="result-band">
@@ -300,40 +280,31 @@
                   <span>Save output</span>
                 </button>
               </div>
-              <div id="filterResult" class="result-view empty-state">Screen out entangled strands. Default emits passed strands as FASTA; toggle "List filtered names" to emit the names of removed strands instead.</div>
+              <div id="filterResult" class="result-view empty-state">Choose a Reference in Inputs, then screen out entangled strands. Default emits passed strands as FASTA; toggle "List filtered names" to emit the names of removed strands instead.</div>
             </section>
           </div>
 
           <div id="view-report" class="view">
             <section class="config-band tool-band report-config">
-              <div class="report-files">
-                <div class="file-picker">
-                  <button id="reportRefButton" class="primary-button">
-                    <i data-lucide="folder-open"></i>
-                    <span>Reference strands</span>
-                  </button>
-                  <div id="reportRefFile" class="file-list">No reference selected</div>
-                </div>
-                <div class="file-picker">
-                  <button id="reportNgsButton" class="ghost-button">
-                    <i data-lucide="folder-open"></i>
-                    <span>NGS reads (optional)</span>
-                  </button>
-                  <div id="reportNgsFiles" class="file-list">No reads selected</div>
-                </div>
-              </div>
-              <div class="config-grid report-grid">
-                <label><span>k-mer</span><input id="reportK" type="number" min="1" max="31" value="31" /></label>
-                <label><span>Threads</span><input id="reportThreads" type="number" min="1" max="64" value="3" /></label>
-                <label><span>Read length</span><input id="reportReadLength" type="number" min="1" value="200" /></label>
-                <label><span>Primer length</span><input id="reportPrimer" type="number" min="0" value="18" /></label>
-                <label><span>Links m</span><input id="reportLinksM" type="number" min="0" value="1" /></label>
-                <label><span>Filter m</span><input id="reportFilterM" type="number" min="0" value="0" /></label>
+              <div class="tool-row">
+                <label class="inline-field">
+                  <span>Links m</span>
+                  <input id="reportLinksM" type="number" min="0" value="1" />
+                </label>
+                <label class="inline-field">
+                  <span>Filter m</span>
+                  <input id="reportFilterM" type="number" min="0" value="0" />
+                </label>
+                <label class="checkbox-label">
+                  <input id="reportIncludeReads" type="checkbox" checked />
+                  <span>Include sequencing reads</span>
+                </label>
                 <button id="reportRunButton" class="primary-button">
                   <i data-lucide="file-text"></i>
                   <span>Generate report</span>
                 </button>
               </div>
+              <p id="reportInputsHint" class="muted tool-hint">Uses the Reference, Reads, k-mer, Threads, Read length, and Primer from Inputs.</p>
             </section>
             <section class="result-band">
               <div class="section-title">
@@ -356,7 +327,7 @@
                   </button>
                 </div>
               </div>
-              <div id="reportResult" class="result-view empty-state">Select a reference strand FASTA (and optional NGS reads), then generate a combined coverage, cross-link, and entanglement report.</div>
+              <div id="reportResult" class="result-view empty-state">Choose a Reference (and optionally Reads) in Inputs, then generate a combined coverage, cross-link, and entanglement report.</div>
             </section>
           </div>
         </section>
