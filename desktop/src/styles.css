@@ -4082,17 +4082,17 @@ textarea:focus-visible {
 }
 
 /* ===== Shared inputs bar ===== */
+/* Global strip between the top bar and the tabs: the inputs belong to the whole
+   workbench, not to any one view, so they sit outside the tab content. */
 .inputs-bar {
   container-type: inline-size;
-  position: sticky;
-  top: 0;
-  z-index: 5;
   flex-shrink: 0;
+  margin: 12px 18px 0;
   padding: 8px 14px 10px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow);
 }
 
 .inputs-head {

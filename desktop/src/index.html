@@ -37,6 +37,60 @@
         </div>
       </header>
 
+      <section id="inputsBar" class="inputs-bar" aria-label="Shared inputs">
+        <div class="inputs-head">
+          <button id="inputsToggle" class="inputs-toggle" aria-expanded="true" aria-controls="inputsBody" title="Collapse inputs">
+            <i data-lucide="chevron-down"></i>
+            <strong>Inputs</strong>
+            <span id="inputsSummary" class="inputs-summary"></span>
+          </button>
+          <span id="kernelPill" class="kernel-pill" role="status">Kernel not started</span>
+        </div>
+        <div id="inputsBody" class="inputs-body">
+          <div class="input-sources">
+            <div class="input-source" data-views="interactive batch links filter report">
+              <span class="input-label">Reference</span>
+              <button id="referenceSelectButton" class="ghost-button input-pick" title="Reference strands: FASTA or Head-Index&#9;DNA table">
+                <i data-lucide="folder-open"></i><span>Select</span>
+              </button>
+              <div id="referenceFile" class="input-chips"></div>
+            </div>
+            <div class="input-source" data-views="interactive report">
+              <span class="input-label">Reads</span>
+              <button id="readsSelectButton" class="ghost-button input-pick" title="Sequencing reads (FASTA/FASTQ, optionally gzip)">
+                <i data-lucide="folder-open"></i><span>Select</span>
+              </button>
+              <div id="readsFiles" class="input-chips"></div>
+            </div>
+          </div>
+          <div class="input-params">
+            <label class="input-field" data-views="interactive links filter report">
+              <span>k-mer</span>
+              <input id="kInput" type="number" min="1" max="31" value="31" />
+            </label>
+            <label class="input-field" data-views="interactive report">
+              <span>Threads</span>
+              <input id="threadsInput" type="number" min="1" max="64" value="3" />
+            </label>
+            <label class="input-field" data-views="interactive report">
+              <span>Read length</span>
+              <input id="readLengthInput" type="number" min="1" value="200" />
+            </label>
+            <div class="input-field primer-field" data-views="batch links filter report">
+              <span>Primer trim (bp)</span>
+              <div class="primer-pair">
+                <input id="primerFrontInput" type="number" min="0" value="18" aria-label="Front primer length" title="Front primer (bp)" />
+                <button id="primerLinkButton" class="primer-link" type="button" aria-pressed="true" title="Front and back are linked">
+                  <i data-lucide="link"></i>
+                </button>
+                <input id="primerBackInput" type="number" min="0" value="18" aria-label="Back primer length" title="Back primer (bp)" />
+              </div>
+            </div>
+          </div>
+          <p id="inputsNotice" class="inputs-notice" hidden></p>
+        </div>
+      </section>
+
       <nav class="view-nav" aria-label="Workbench views">
         <button class="view-tab active" data-view="interactive"><i data-lucide="activity"></i><span>Interactive</span></button>
         <button class="view-tab" data-view="batch"><i data-lucide="layers"></i><span>Batch QC</span></button>
@@ -47,59 +101,6 @@
 
       <main class="layout">
         <section class="workspace">
-          <section id="inputsBar" class="inputs-bar" aria-label="Shared inputs">
-            <div class="inputs-head">
-              <button id="inputsToggle" class="inputs-toggle" aria-expanded="true" aria-controls="inputsBody" title="Collapse inputs">
-                <i data-lucide="chevron-down"></i>
-                <strong>Inputs</strong>
-                <span id="inputsSummary" class="inputs-summary"></span>
-              </button>
-              <span id="kernelPill" class="kernel-pill" role="status">Kernel not started</span>
-            </div>
-            <div id="inputsBody" class="inputs-body">
-              <div class="input-sources">
-                <div class="input-source" data-views="interactive batch links filter report">
-                  <span class="input-label">Reference</span>
-                  <button id="referenceSelectButton" class="ghost-button input-pick" title="Reference strands: FASTA or Head-Index&#9;DNA table">
-                    <i data-lucide="folder-open"></i><span>Select</span>
-                  </button>
-                  <div id="referenceFile" class="input-chips"></div>
-                </div>
-                <div class="input-source" data-views="interactive report">
-                  <span class="input-label">Reads</span>
-                  <button id="readsSelectButton" class="ghost-button input-pick" title="Sequencing reads (FASTA/FASTQ, optionally gzip)">
-                    <i data-lucide="folder-open"></i><span>Select</span>
-                  </button>
-                  <div id="readsFiles" class="input-chips"></div>
-                </div>
-              </div>
-              <div class="input-params">
-                <label class="input-field" data-views="interactive links filter report">
-                  <span>k-mer</span>
-                  <input id="kInput" type="number" min="1" max="31" value="31" />
-                </label>
-                <label class="input-field" data-views="interactive report">
-                  <span>Threads</span>
-                  <input id="threadsInput" type="number" min="1" max="64" value="3" />
-                </label>
-                <label class="input-field" data-views="interactive report">
-                  <span>Read length</span>
-                  <input id="readLengthInput" type="number" min="1" value="200" />
-                </label>
-                <div class="input-field primer-field" data-views="batch links filter report">
-                  <span>Primer trim (bp)</span>
-                  <div class="primer-pair">
-                    <input id="primerFrontInput" type="number" min="0" value="18" aria-label="Front primer length" title="Front primer (bp)" />
-                    <button id="primerLinkButton" class="primer-link" type="button" aria-pressed="true" title="Front and back are linked">
-                      <i data-lucide="link"></i>
-                    </button>
-                    <input id="primerBackInput" type="number" min="0" value="18" aria-label="Back primer length" title="Back primer (bp)" />
-                  </div>
-                </div>
-              </div>
-              <p id="inputsNotice" class="inputs-notice" hidden></p>
-            </div>
-          </section>
 
           <div id="view-interactive" class="view active">
           <section class="config-band kernel-band">
