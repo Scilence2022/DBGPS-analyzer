@@ -228,7 +228,7 @@ The Electron desktop app lives in [`desktop/`](desktop). It is organized into fi
 | **Interactive** | Start/stop the `dstoreqc kernel` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees. |
 | **Batch QC** | Load a reference set (FASTA **or** tab-delimited) and automatically score **every** strand against the loaded sequencing k-mer table — one row per strand showing observed/total k-mers, path completeness, and min/mean/max coverage. Front/back primer regions are trimmed first; click any strand to drill into its full coverage profile, and export the whole table as CSV. Reuses the kernel started in the Interactive tab. |
 | **Cross-links** | Run `dstoreqc links` on a reference library and report cross-link contributions from shared k-mers, with k and minimum-shared-strands controls. |
-| **Seq-Filter** | Run `dstoreqc filter --json` to screen entangled strands; choose k, max cross-links, primer length, and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
+| **Seq-Filter** | Run `dstoreqc filter --json` to screen entangled strands; choose max cross-links and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
 | **Report** | Generate a **comprehensive diagnostics report** over a reference strand set: run `dstoreqc report` (including batch metrics when NGS reads are supplied), with headline metrics, rule-based verdicts, the Sm/Kd/Kn table, cross-link and entanglement summaries, an optional AI interpretation, and one-click export to HTML or Markdown. |
 
 The desktop calls `dstoreqc` subcommands and packages a single executable. Report
@@ -240,7 +240,7 @@ records separately from passed and entangled records.
 
 #### Input formats
 
-Every reference picker in the desktop app accepts two formats and auto-detects which one a file uses:
+The Reference picker in the desktop app accepts two formats and auto-detects which one a file uses:
 
 1. **FASTA** (`>name` headers followed by sequence lines), optionally gzip-compressed.
 2. **Tab-delimited** index tables — one record per line as `Head-Index<TAB>DNA`, with an optional header row (e.g. `Head-Index   DNA`) that is skipped automatically:
@@ -253,9 +253,24 @@ Every reference picker in the desktop app accepts two formats and auto-detects w
 
    The first column becomes the strand name and the DNA column its sequence. Because the C tools read FASTA/FASTQ, tab-delimited inputs are converted to a temporary FASTA in the Electron main process before a tool runs.
 
+#### Shared inputs
+
+The **Inputs** bar above the views is shared by every tab, so each file and parameter is chosen once:
+
+| Input | Used by |
+|:---|:---|
+| **Reference** (FASTA or tab-delimited) | Batch QC, Cross-links, Seq-Filter, Report, and Bloom reference mode |
+| **Reads** (FASTA/FASTQ, optionally gzip) | The Interactive kernel and the Report (optional there). While the kernel runs, the same control adds files to the loaded index. |
+| **k-mer, Threads, Read length** | The Interactive kernel and the Report (k-mer also Cross-links and Seq-Filter) |
+| **Primer trim** (front / back) | Batch QC, Cross-links, Seq-Filter, Report |
+
+Inputs a view does not use are dimmed but stay editable, and the bar collapses to a one-line summary. Parameters (not file paths) persist across sessions. The kernel pill shows what the running kernel was loaded with; if k, threads, or read length are changed afterwards it turns amber, because Interactive and Batch QC keep using the loaded index until the kernel is restarted. A result becomes stale when the inputs it depends on change after it ran, and its panel says so.
+
+Each view keeps only its own options: cross-link threshold `m`, filter threshold and output mode, and whether the Report includes the reads.
+
 #### Primer trimming
 
-The Batch QC view exposes separate **front** and **back** primer lengths (default **18 bp** each, persisted across sessions). The configured number of bases is removed from each end of every reference strand before it is scored, so adapter/primer regions do not distort coverage or path-completeness. Strands shorter than `k` after trimming are reported as skipped. (`dstoreqc filter` and the Report view keep their own symmetric primer length `-p`.)
+**Primer trim** has separate **front** and **back** lengths (default **18 bp** each, persisted across sessions), linked by default so they stay equal. The configured number of bases is removed from each end of every reference strand before it is scored, so adapter/primer regions do not distort coverage or path-completeness. Strands shorter than `k` after trimming are reported as skipped. Batch QC accepts different front and back values. `dstoreqc links`, `filter`, and `report` take a single symmetric `-p`, so those views ask you to link the two values (or set them equal) before running.
 
 The Settings workspace is organized into four tabs:
 

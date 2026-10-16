@@ -184,6 +184,11 @@ type AppSettings = {
   chatWidth: number;
   chatCollapsed: boolean;
   chatExpanded: boolean;
+  k: number;
+  threads: number;
+  readLength: number;
+  primerLinked: boolean;
+  inputsCollapsed: boolean;
 };
 
 // Keep the existing storage key when reusing a profile from before the rename.
@@ -334,16 +339,24 @@ const elements = {
   buildButton: $("buildButton") as HTMLButtonElement,
   stopButton: $("stopButton") as HTMLButtonElement,
   settingsButton: $("settingsButton") as HTMLButtonElement,
-  selectFilesButton: $("selectFilesButton") as HTMLButtonElement,
-  addFilesButton: $("addFilesButton") as HTMLButtonElement,
-  fileList: $("fileList"),
+  inputsBar: $("inputsBar"),
+  inputsToggle: $("inputsToggle") as HTMLButtonElement,
+  inputsSummary: $("inputsSummary"),
+  inputsBody: $("inputsBody"),
+  inputsNotice: $("inputsNotice"),
+  kernelPill: $("kernelPill"),
+  referenceSelectButton: $("referenceSelectButton") as HTMLButtonElement,
+  referenceFile: $("referenceFile"),
+  readsSelectButton: $("readsSelectButton") as HTMLButtonElement,
+  readsFiles: $("readsFiles"),
+  primerFrontInput: $("primerFrontInput") as HTMLInputElement,
+  primerBackInput: $("primerBackInput") as HTMLInputElement,
+  primerLinkButton: $("primerLinkButton") as HTMLButtonElement,
   kInput: $("kInput") as HTMLInputElement,
   threadsInput: $("threadsInput") as HTMLInputElement,
   readLengthInput: $("readLengthInput") as HTMLInputElement,
   bloomInput: $("bloomInput") as HTMLInputElement,
   bloomOptions: $("bloomOptions"),
-  selectBloomReferenceButton: $("selectBloomReferenceButton") as HTMLButtonElement,
-  bloomReferenceFile: $("bloomReferenceFile"),
   bloomBitsInput: $("bloomBitsInput") as HTMLInputElement,
   startButton: $("startButton") as HTMLButtonElement,
   queryButton: $("queryButton") as HTMLButtonElement,
@@ -425,10 +438,15 @@ const elements = {
   maxTokensInput: $("maxTokensInput") as HTMLInputElement
 };
 
+// Shared inputs: one reference library and one set of sequencing reads for every
+// view. Per-tool options (links m, filter m, ...) stay with their tool.
 let selectedFiles: string[] = [];
+let referenceFile = "";
+// What the running (or last-started) kernel was actually loaded with, so the bar
+// can say when the shared k / threads / read length no longer match it.
+let kernelLoaded: { k: number; threads: number; readLength: number; files: number } | null = null;
 let analyzerReady = false;
 let analyzerLoading = false;
-let bloomReferenceFile = "";
 let loadedScope: AnalyzerScope = {};
 let queryMode: "kmer" | "index" | "sequence" = "kmer";
 let latestResult: AnalyzerResult | null = null;
@@ -490,8 +508,19 @@ function createDefaultSettings(): AppSettings {
     agentTools: false,
     chatWidth: 400,
     chatCollapsed: false,
-    chatExpanded: false
+    chatExpanded: false,
+    k: 31,
+    threads: 3,
+    readLength: 200,
+    primerLinked: true,
+    inputsCollapsed: false
   };
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
 function normalizePrimer(value: unknown, fallback: number) {
@@ -546,7 +575,14 @@ function mergeSettings(input: unknown): AppSettings {
     agentTools: typeof stored.agentTools === "boolean" ? stored.agentTools : Boolean(defaults.agentTools),
     chatWidth: Number.isFinite(Number(stored.chatWidth)) ? Math.min(760, Math.max(320, Math.trunc(Number(stored.chatWidth)))) : defaults.chatWidth,
     chatCollapsed: stored.chatCollapsed === true,
-    chatExpanded: stored.chatExpanded === true
+    chatExpanded: stored.chatExpanded === true,
+    k: clampInt(stored.k, 1, 31, defaults.k),
+    threads: clampInt(stored.threads, 1, 64, defaults.threads),
+    readLength: clampInt(stored.readLength, 1, 1_000_000, defaults.readLength),
+    primerLinked: typeof stored.primerLinked === "boolean"
+      ? stored.primerLinked
+      : normalizePrimer(stored.primerFront, defaults.primerFront) === normalizePrimer(stored.primerBack, defaults.primerBack),
+    inputsCollapsed: stored.inputsCollapsed === true
   };
 }
 
@@ -893,14 +929,131 @@ async function refreshEnabledProviders() {
   }
 }
 
-function renderFileList() {
-  if (selectedFiles.length === 0) {
-    elements.fileList.textContent = "No files selected";
-    return;
+// ---- Shared inputs bar ----------------------------------------------------------
+// The reference library, the sequencing reads, and the k / threads / read length /
+// primer parameters are chosen once here and used by every view; each view keeps
+// only its own tool options. appSettings is the source of truth for parameters.
+function sharedPrimers() {
+  return {
+    front: normalizePrimer(appSettings.primerFront, DEFAULT_PRIMER),
+    back: normalizePrimer(appSettings.primerBack, DEFAULT_PRIMER)
+  };
+}
+
+function syncParamInputs() {
+  elements.kInput.value = String(appSettings.k);
+  elements.threadsInput.value = String(appSettings.threads);
+  elements.readLengthInput.value = String(appSettings.readLength);
+  elements.primerFrontInput.value = String(appSettings.primerFront);
+  elements.primerBackInput.value = String(appSettings.primerBack);
+}
+
+function fileChip(file: string, removeAttr: string, index: number | null) {
+  const remove = removeAttr
+    ? `<button type="button" class="chip-remove" ${removeAttr}${index == null ? "" : `="${index}"`} title="Remove" aria-label="Remove ${escapeHtml(compactPath(file))}"><i data-lucide="x"></i></button>`
+    : "";
+  return `<span class="input-chip" title="${escapeHtml(file)}"><span class="chip-name">${escapeHtml(compactPath(file))}</span>${remove}</span>`;
+}
+
+function kernelMismatch() {
+  if (!kernelLoaded) return [] as string[];
+  const out: string[] = [];
+  if (kernelLoaded.k !== appSettings.k) out.push(`k ${kernelLoaded.k} → ${appSettings.k}`);
+  if (kernelLoaded.threads !== appSettings.threads) out.push(`threads ${kernelLoaded.threads} → ${appSettings.threads}`);
+  if (kernelLoaded.readLength !== appSettings.readLength) out.push(`read length ${kernelLoaded.readLength} → ${appSettings.readLength}`);
+  return out;
+}
+
+function renderInputsBar() {
+  const editableReads = !analyzerReady && !analyzerLoading;
+  elements.referenceFile.innerHTML = referenceFile
+    ? fileChip(referenceFile, "data-clear-reference", null)
+    : '<span class="input-empty">Not selected</span>';
+  elements.referenceSelectButton.querySelector("span")!.textContent = referenceFile ? "Change" : "Select";
+  elements.readsFiles.innerHTML = selectedFiles.length
+    ? selectedFiles.map((file, i) => fileChip(file, editableReads ? "data-remove-read" : "", i)).join("")
+    : '<span class="input-empty">Not selected</span>';
+  elements.readsSelectButton.querySelector("span")!.textContent = analyzerReady ? "Add" : selectedFiles.length ? "Change" : "Select";
+  elements.readsSelectButton.title = analyzerReady
+    ? "Count additional sequencing files into the running kernel"
+    : "Sequencing reads (FASTA/FASTQ, optionally gzip)";
+  elements.readsSelectButton.disabled = analyzerLoading;
+  elements.referenceSelectButton.disabled = false;
+
+  const { front, back } = sharedPrimers();
+  elements.primerLinkButton.setAttribute("aria-pressed", String(appSettings.primerLinked));
+  elements.primerLinkButton.title = appSettings.primerLinked ? "Front and back are linked — click to set them separately" : "Front and back are separate — click to link them";
+  elements.primerLinkButton.innerHTML = `<i data-lucide="${appSettings.primerLinked ? "link" : "unlink"}"></i>`;
+  elements.primerBackInput.disabled = false;
+
+  const parts = [
+    referenceFile ? compactPath(referenceFile) : "no reference",
+    selectedFiles.length ? `${formatNumber(selectedFiles.length)} read file${selectedFiles.length === 1 ? "" : "s"}` : "no reads",
+    `k ${appSettings.k}`,
+    `primer ${front === back ? front : `${front}/${back}`}`
+  ];
+  elements.inputsSummary.textContent = parts.join(" · ");
+  elements.inputsBar.classList.toggle("collapsed", appSettings.inputsCollapsed);
+  elements.inputsToggle.setAttribute("aria-expanded", String(!appSettings.inputsCollapsed));
+  elements.inputsToggle.title = appSettings.inputsCollapsed ? "Expand inputs" : "Collapse inputs";
+
+  const mismatch = kernelMismatch();
+  elements.kernelPill.className = "kernel-pill";
+  if (analyzerLoading) {
+    elements.kernelPill.classList.add("loading");
+    elements.kernelPill.textContent = "Loading reads…";
+  } else if (analyzerReady && kernelLoaded) {
+    elements.kernelPill.classList.add(mismatch.length ? "stale" : "ready");
+    elements.kernelPill.textContent = `Kernel · k=${kernelLoaded.k} · ${formatNumber(kernelLoaded.files)} read file${kernelLoaded.files === 1 ? "" : "s"}`;
+  } else {
+    elements.kernelPill.textContent = "Kernel not started";
   }
-  elements.fileList.innerHTML = selectedFiles
-    .map((file) => `<span title="${escapeHtml(file)}">${escapeHtml(compactPath(file))}</span>`)
-    .join("");
+  elements.inputsNotice.hidden = !(analyzerReady && mismatch.length);
+  elements.inputsNotice.textContent = mismatch.length
+    ? `The running kernel was loaded with different values (${mismatch.join(", ")}). Interactive and Batch QC keep using the loaded index until you stop and restart the kernel.`
+    : "";
+  updateStaleNotes();
+  renderIcons();
+}
+
+// A result is stale when the shared inputs it depends on changed after it ran.
+// The banner is CSS-only (.result-band.stale::before), so no per-view markup.
+const runSignatures: Partial<Record<ViewName, string>> = {};
+
+function inputSignature(view: ViewName): string {
+  const { front, back } = sharedPrimers();
+  switch (view) {
+    case "batch": return JSON.stringify([referenceFile, front, back]);
+    case "links":
+    case "filter": return JSON.stringify([referenceFile, appSettings.k, front, back]);
+    case "report": return JSON.stringify([referenceFile, ui.reportIncludeReads.checked ? selectedFiles : [], appSettings.k, appSettings.threads, appSettings.readLength, front, back]);
+    default: return "";
+  }
+}
+
+function updateStaleNotes() {
+  for (const view of ["batch", "links", "filter", "report"] as ViewName[]) {
+    const stale = runSignatures[view] !== undefined && runSignatures[view] !== inputSignature(view);
+    document.querySelector(`#view-${view} .result-band`)?.classList.toggle("stale", stale);
+  }
+}
+
+async function selectReference() {
+  const file = await pickOneFile();
+  if (file) {
+    referenceFile = file;
+    renderInputsBar();
+  }
+  return referenceFile;
+}
+
+// Both CLI paths that only support a symmetric -p trim need equal front/back values.
+function symmetricPrimerOrError(target: HTMLElement, tool: string): number | null {
+  const { front, back } = sharedPrimers();
+  if (front === back) return front;
+  target.classList.remove("empty-state");
+  target.innerHTML = `<div class="error-card">${escapeHtml(tool)} trims both ends equally, but the front (${front}) and back (${back}) primer lengths in Inputs differ. Link them (chain icon) or set them equal to run it.</div>`;
+  return null;
 }
 
 function renderSummary(data: SummaryResult) {
@@ -910,7 +1063,7 @@ function renderSummary(data: SummaryResult) {
   elements.totalCoverageLabel.textContent = reference ? "Reference coverage" : "Total coverage";
   elements.summaryScope.hidden = !reference;
   elements.summaryScope.textContent = reference
-    ? `Reference scope: ${data.referenceFile || bloomReferenceFile}; ${formatNumber(data.targetKmers)} target keys; minimum ${formatNumber(data.bloom?.bitsPerKey)} bits/key. Global noise (Kn), off-target coverage and graph queries: unavailable.`
+    ? `Reference scope: ${data.referenceFile || referenceFile}; ${formatNumber(data.targetKmers)} target keys; minimum ${formatNumber(data.bloom?.bitsPerKey)} bits/key. Global noise (Kn), off-target coverage and graph queries: unavailable.`
     : "";
   elements.distinctKmers.textContent = formatNumber(data.distinctKmers);
   elements.totalCoverage.textContent = formatNumber(data.totalKmerCoverage);
@@ -1501,16 +1654,13 @@ function renderResult(result: AnalyzerResult) {
 
 function setAnalyzerReady(ready: boolean) {
   analyzerReady = ready;
+  if (!ready) kernelLoaded = null;
   elements.queryButton.disabled = !ready;
   elements.stopButton.disabled = !ready;
   elements.startButton.disabled = ready;
-  elements.addFilesButton.disabled = !ready;
-  elements.selectFilesButton.disabled = ready;
-  elements.kInput.disabled = ready;
-  elements.threadsInput.disabled = ready;
-  elements.readLengthInput.disabled = ready;
   updateBloomControls();
   updateQueryModeControls();
+  renderInputsBar();
   refreshAgentStatus();
 }
 
@@ -1518,22 +1668,16 @@ function updateBloomControls() {
   const locked = analyzerReady || analyzerLoading;
   elements.bloomInput.disabled = locked;
   elements.bloomOptions.hidden = !elements.bloomInput.checked;
-  elements.selectBloomReferenceButton.disabled = locked || !elements.bloomInput.checked;
   elements.bloomBitsInput.disabled = locked || !elements.bloomInput.checked;
 }
 
-async function selectBloomReference() {
+// Choose the read set before the kernel starts; once it runs, the same control adds
+// files to the loaded index instead.
+async function selectFiles() {
   if (analyzerReady || analyzerLoading) return;
   const files = await window.dstoreqc.selectFiles();
-  if (!files[0]) return;
-  bloomReferenceFile = files[0];
-  elements.bloomReferenceFile.innerHTML = `<span title="${escapeHtml(bloomReferenceFile)}">${escapeHtml(compactPath(bloomReferenceFile))}</span>`;
-}
-
-async function selectFiles() {
-  if (analyzerReady) return;
-  selectedFiles = await window.dstoreqc.selectFiles();
-  renderFileList();
+  if (files.length) selectedFiles = files;
+  renderInputsBar();
 }
 
 async function addSequencingFiles() {
@@ -1545,14 +1689,14 @@ async function addSequencingFiles() {
     return;
   }
 
-  elements.addFilesButton.disabled = true;
+  elements.readsSelectButton.disabled = true;
   elements.queryButton.disabled = true;
   setStatus(`Counting ${formatNumber(newFiles.length)} additional NGS file${newFiles.length === 1 ? "" : "s"}`, "running");
 
   try {
     const summary = (await window.dstoreqc.addAnalyzerFiles(newFiles)) as SummaryResult;
     selectedFiles = summary.files?.length ? summary.files : [...selectedFiles, ...newFiles];
-    renderFileList();
+    if (kernelLoaded) kernelLoaded.files = selectedFiles.length;
     renderSummary(summary);
     latestResult = summary;
     updateChatContextChip();
@@ -1563,8 +1707,8 @@ async function addSequencingFiles() {
     appendLog(message);
     setStatus("Failed to add sequencing files", "error");
   } finally {
-    elements.addFilesButton.disabled = !analyzerReady;
     elements.queryButton.disabled = !analyzerReady;
+    renderInputsBar();
   }
 }
 
@@ -1589,33 +1733,36 @@ async function startAnalyzer() {
   if (selectedFiles.length === 0) await selectFiles();
   if (selectedFiles.length === 0) return;
 
+  if (elements.bloomInput.checked && !referenceFile) {
+    await selectReference();
+    if (!referenceFile) {
+      setStatus("Bloom reference mode needs a Reference", "error");
+      appendLog("Bloom reference mode indexes the Reference from Inputs; select one first.");
+      return;
+    }
+  }
+
   setAnalyzerReady(false);
   setStatus("Loading sequencing k-mer table", "running");
   elements.startButton.disabled = true;
-  elements.selectFilesButton.disabled = true;
-  elements.addFilesButton.disabled = true;
-  elements.kInput.disabled = true;
-  elements.threadsInput.disabled = true;
-  elements.readLengthInput.disabled = true;
   analyzerLoading = true;
   updateBloomControls();
+  renderInputsBar();
 
   try {
     const ready = (await window.dstoreqc.startAnalyzer({
       files: selectedFiles,
-      k: Number(elements.kInput.value),
-      threads: Number(elements.threadsInput.value),
-      readLength: Number(elements.readLengthInput.value),
+      k: appSettings.k,
+      threads: appSettings.threads,
+      readLength: appSettings.readLength,
       ...(elements.bloomInput.checked ? {
         bloom: true,
-        bloomReference: bloomReferenceFile,
+        bloomReference: referenceFile,
         bloomBits: Number(elements.bloomBitsInput.value)
       } : {})
     })) as SummaryResult;
-    if (ready.files?.length) {
-      selectedFiles = ready.files;
-      renderFileList();
-    }
+    if (ready.files?.length) selectedFiles = ready.files;
+    kernelLoaded = { k: ready.k, threads: ready.threads, readLength: ready.readLength, files: selectedFiles.length };
     renderSummary(ready);
     latestResult = ready;
     updateChatContextChip();
@@ -1630,6 +1777,7 @@ async function startAnalyzer() {
   } finally {
     analyzerLoading = false;
     updateBloomControls();
+    renderInputsBar();
   }
 }
 
@@ -1648,7 +1796,7 @@ function depthInputValue(input: HTMLInputElement) {
 
 function indexBaseLengthValue() {
   const parsed = Number(elements.indexBaseLengthInput.value);
-  const fallback = Number(elements.kInput.value) || 31;
+  const fallback = kernelLoaded?.k ?? appSettings.k;
   if (!Number.isFinite(parsed)) return Math.min(300, Math.max(1, Math.trunc(fallback)));
   return Math.min(300, Math.max(1, Math.trunc(parsed)));
 }
@@ -2705,7 +2853,7 @@ function toggleTimeline(container: HTMLElement) {
 // ---- Jumps from the conversation into the workbench ------------------------------
 function openInInteractive(dna: string) {
   setView("interactive");
-  const k = Number(elements.kInput.value) || 31;
+  const k = kernelLoaded?.k ?? appSettings.k;
   queryMode = dna.length > k ? "sequence" : "kmer";
   updateQueryModeControls();
   elements.queryInput.value = dna;
@@ -3196,13 +3344,10 @@ document.querySelectorAll<HTMLButtonElement>(".segmented button").forEach((butto
   });
 });
 
-elements.selectFilesButton.addEventListener("click", selectFiles);
-elements.selectBloomReferenceButton.addEventListener("click", selectBloomReference);
 elements.bloomInput.addEventListener("change", () => {
   updateBloomControls();
   updateQueryModeControls();
 });
-elements.addFilesButton.addEventListener("click", addSequencingFiles);
 elements.buildButton.addEventListener("click", buildAnalyzer);
 elements.startButton.addEventListener("click", startAnalyzer);
 elements.stopButton.addEventListener("click", stopAnalyzer);
@@ -3598,40 +3743,21 @@ type Verdict = { level: "ok" | "warn" | "bad"; text: string };
 
 const ui = {
   viewTabs: Array.from(document.querySelectorAll<HTMLButtonElement>(".view-tab")),
-  batchSelectButton: $("batchSelectButton") as HTMLButtonElement,
-  batchFile: $("batchFile"),
-  batchPrimerFront: $("batchPrimerFront") as HTMLInputElement,
-  batchPrimerBack: $("batchPrimerBack") as HTMLInputElement,
   batchRunButton: $("batchRunButton") as HTMLButtonElement,
   batchSaveButton: $("batchSaveButton") as HTMLButtonElement,
   batchProgress: $("batchProgress"),
   batchResult: $("batchResult"),
   batchDetail: $("batchDetail"),
-  linksSelectButton: $("linksSelectButton") as HTMLButtonElement,
-  linksFile: $("linksFile"),
-  linksK: $("linksK") as HTMLInputElement,
   linksM: $("linksM") as HTMLInputElement,
-  linksPrimer: $("linksPrimer") as HTMLInputElement,
   linksRunButton: $("linksRunButton") as HTMLButtonElement,
   linksResult: $("linksResult"),
-  filterSelectButton: $("filterSelectButton") as HTMLButtonElement,
-  filterFile: $("filterFile"),
-  filterK: $("filterK") as HTMLInputElement,
   filterM: $("filterM") as HTMLInputElement,
-  filterPrimer: $("filterPrimer") as HTMLInputElement,
   filterListFiltered: $("filterListFiltered") as HTMLInputElement,
   filterRunButton: $("filterRunButton") as HTMLButtonElement,
   filterSaveButton: $("filterSaveButton") as HTMLButtonElement,
   filterResult: $("filterResult"),
-  reportRefButton: $("reportRefButton") as HTMLButtonElement,
-  reportRefFile: $("reportRefFile"),
-  reportNgsButton: $("reportNgsButton") as HTMLButtonElement,
-  reportNgsFiles: $("reportNgsFiles"),
-  reportK: $("reportK") as HTMLInputElement,
-  reportThreads: $("reportThreads") as HTMLInputElement,
-  reportReadLength: $("reportReadLength") as HTMLInputElement,
-  reportPrimer: $("reportPrimer") as HTMLInputElement,
   reportLinksM: $("reportLinksM") as HTMLInputElement,
+  reportIncludeReads: $("reportIncludeReads") as HTMLInputElement,
   reportFilterM: $("reportFilterM") as HTMLInputElement,
   reportRunButton: $("reportRunButton") as HTMLButtonElement,
   reportAiButton: $("reportAiButton") as HTMLButtonElement,
@@ -3640,13 +3766,9 @@ const ui = {
   reportResult: $("reportResult")
 };
 
-let linksFile = "";
-let filterFile = "";
 let filterOutput = "";
 let filterSaveOutput = "";
 let filterSaveDefaultName = "passed.fa";
-let reportRefFile = "";
-let reportNgsFiles: string[] = [];
 let latestReport: ReportResult | null = null;
 let reportAiRequest: { id: string; report: ReportResult } | null = null;
 let reportNarrative = "";
@@ -3674,7 +3796,9 @@ type BatchRow = {
   detail?: SequenceResult;
 };
 
-let batchFile = "";
+// Reference the current Batch QC table was scored from; detail lookups must use this,
+// not whatever the shared Reference points at now.
+let batchFileUsed = "";
 let batchRows: BatchRow[] = [];
 let batchRunning = false;
 let batchDetailIndex: number | null = null;
@@ -3703,18 +3827,12 @@ function setView(view: ViewName) {
     el.classList.toggle("active", el.id === `view-${view}`);
   });
   ui.viewTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
+  // Inputs the active view does not use stay visible (they are shared) but recede.
+  document.querySelectorAll<HTMLElement>("#inputsBar [data-views]").forEach((el) => {
+    el.classList.toggle("unused", !(el.dataset.views || "").split(" ").includes(view));
+  });
   updateChatContextChip();
   renderIcons();
-}
-
-function renderPathChip(target: HTMLElement, files: string[], empty: string) {
-  if (!files.length) {
-    target.textContent = empty;
-    return;
-  }
-  target.innerHTML = files
-    .map((file) => `<span title="${escapeHtml(file)}">${escapeHtml(compactPath(file))}</span>`)
-    .join("");
 }
 
 async function pickOneFile(): Promise<string> {
@@ -3723,30 +3841,27 @@ async function pickOneFile(): Promise<string> {
 }
 
 // ---- Cross-links view ----
-async function selectLinksFile() {
-  const file = await pickOneFile();
-  if (file) {
-    linksFile = file;
-    renderPathChip(ui.linksFile, [file], "No file selected");
-  }
-}
-
 async function runLinksTool() {
-  if (!linksFile) {
-    await selectLinksFile();
-    if (!linksFile) return;
+  if (!referenceFile) {
+    await selectReference();
+    if (!referenceFile) return;
   }
+  const primerLen = symmetricPrimerOrError(ui.linksResult, "Cross-links");
+  if (primerLen == null) return;
   ui.linksRunButton.disabled = true;
   ui.linksResult.classList.remove("empty-state");
   ui.linksResult.innerHTML = `<div class="tool-loading">Counting cross-links…</div>`;
+  const signature = inputSignature("links");
   try {
     const result = await window.dstoreqc.runLinks({
-      file: linksFile,
-      k: Number(ui.linksK.value),
+      file: referenceFile,
+      k: appSettings.k,
       m: Number(ui.linksM.value),
-      primerLen: Number(ui.linksPrimer.value)
+      primerLen
     });
     renderLinksResult(result);
+    runSignatures.links = signature;
+    updateStaleNotes();
   } catch (error) {
     ui.linksResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
   } finally {
@@ -3776,31 +3891,28 @@ function renderLinksResult(result: LinksResult) {
 }
 
 // ---- Seq-Filter view ----
-async function selectFilterFile() {
-  const file = await pickOneFile();
-  if (file) {
-    filterFile = file;
-    renderPathChip(ui.filterFile, [file], "No file selected");
-  }
-}
-
 async function runFilterTool() {
-  if (!filterFile) {
-    await selectFilterFile();
-    if (!filterFile) return;
+  if (!referenceFile) {
+    await selectReference();
+    if (!referenceFile) return;
   }
+  const primerLen = symmetricPrimerOrError(ui.filterResult, "Seq-Filter");
+  if (primerLen == null) return;
   ui.filterRunButton.disabled = true;
   ui.filterResult.classList.remove("empty-state");
   ui.filterResult.innerHTML = `<div class="tool-loading">Filtering…</div>`;
   try {
+    const signature = inputSignature("filter");
     const result = await window.dstoreqc.runFilter({
-      file: filterFile,
-      k: Number(ui.filterK.value),
+      file: referenceFile,
+      k: appSettings.k,
       m: Number(ui.filterM.value),
-      primerLen: Number(ui.filterPrimer.value),
+      primerLen,
       listFiltered: ui.filterListFiltered.checked
     });
     renderFilterResult(result);
+    runSignatures.filter = signature;
+    updateStaleNotes();
   } catch (error) {
     filterOutput = "";
     filterSaveOutput = "";
@@ -3855,25 +3967,13 @@ async function saveFilterOutput() {
 }
 
 // ---- Report view ----
-async function selectReportRef() {
-  const file = await pickOneFile();
-  if (file) {
-    reportRefFile = file;
-    renderPathChip(ui.reportRefFile, [file], "No reference selected");
-  }
-}
-
-async function selectReportNgs() {
-  const files = await window.dstoreqc.selectFiles();
-  reportNgsFiles = files;
-  renderPathChip(ui.reportNgsFiles, files, "No reads selected");
-}
-
 async function generateReport() {
-  if (!reportRefFile) {
-    await selectReportRef();
-    if (!reportRefFile) return;
+  if (!referenceFile) {
+    await selectReference();
+    if (!referenceFile) return;
   }
+  const primerLen = symmetricPrimerOrError(ui.reportResult, "The report");
+  if (primerLen == null) return;
   ui.reportRunButton.disabled = true;
   if (reportAiRequest) {
     void window.dstoreqc.cancelAiChat(reportAiRequest.id);
@@ -3888,17 +3988,20 @@ async function generateReport() {
   ui.reportResult.classList.remove("empty-state");
   ui.reportResult.innerHTML = `<div class="tool-loading">Generating diagnostics report…</div>`;
   try {
+    const signature = inputSignature("report");
     const result = await window.dstoreqc.runReport({
-      referenceFile: reportRefFile,
-      ngsFiles: reportNgsFiles,
-      k: Number(ui.reportK.value),
-      threads: Number(ui.reportThreads.value),
-      readLength: Number(ui.reportReadLength.value),
-      primerLen: Number(ui.reportPrimer.value),
+      referenceFile,
+      ngsFiles: ui.reportIncludeReads.checked ? selectedFiles : [],
+      k: appSettings.k,
+      threads: appSettings.threads,
+      readLength: appSettings.readLength,
+      primerLen,
       linksM: Number(ui.reportLinksM.value),
       filterM: Number(ui.reportFilterM.value)
     });
     renderReport(result);
+    runSignatures.report = signature;
+    updateStaleNotes();
   } catch (error) {
     latestReport = null;
     ui.reportAiButton.disabled = true;
@@ -4159,19 +4262,6 @@ async function exportReport(format: "html" | "md") {
 }
 
 // ---- Batch QC view: per-strand analysis of a reference file ----
-function syncBatchPrimerInputs() {
-  ui.batchPrimerFront.value = String(appSettings.primerFront);
-  ui.batchPrimerBack.value = String(appSettings.primerBack);
-}
-
-async function selectBatchFile() {
-  const file = await pickOneFile();
-  if (file) {
-    batchFile = file;
-    renderPathChip(ui.batchFile, [file], "No reference selected");
-  }
-}
-
 function batchCoverageClass(row: BatchRow) {
   if (row.status !== "ok" || !row.summary) return "warn";
   return row.summary.complete ? "ok" : "bad";
@@ -4309,7 +4399,7 @@ async function showBatchDetail(index: number) {
     ui.batchDetail.innerHTML = `<div class="tool-loading">Loading coverage profile…</div>`;
     try {
       const record = await window.dstoreqc.loadBatchSequence({
-        file: batchFile,
+        file: batchFileUsed,
         index,
         primerFront: batchPrimerFrontUsed,
         primerBack: batchPrimerBackUsed
@@ -4341,9 +4431,9 @@ function toggleBatchDetail(index: number) {
 
 async function runBatchAnalysis() {
   if (batchRunning) return;
-  if (!batchFile) {
-    await selectBatchFile();
-    if (!batchFile) return;
+  if (!referenceFile) {
+    await selectReference();
+    if (!referenceFile) return;
   }
   if (!analyzerReady) {
     ui.batchResult.classList.remove("empty-state");
@@ -4351,13 +4441,11 @@ async function runBatchAnalysis() {
     return;
   }
 
-  const front = normalizePrimer(ui.batchPrimerFront.value, appSettings.primerFront);
-  const back = normalizePrimer(ui.batchPrimerBack.value, appSettings.primerBack);
-  appSettings.primerFront = front;
-  appSettings.primerBack = back;
+  const { front, back } = sharedPrimers();
   batchPrimerFrontUsed = front;
   batchPrimerBackUsed = back;
-  saveSettings();
+  batchFileUsed = referenceFile;
+  const signature = inputSignature("batch");
 
   batchRunning = true;
   batchRows = [];
@@ -4374,7 +4462,7 @@ async function runBatchAnalysis() {
 
   try {
     const result: InteractiveBatchResult = await window.dstoreqc.runInteractiveBatch({
-      file: batchFile,
+      file: batchFileUsed,
       primerFront: front,
       primerBack: back
     });
@@ -4404,7 +4492,9 @@ async function runBatchAnalysis() {
     renderBatchTable();
     renderIcons();
     ui.batchProgress.textContent = `${formatNumber(batchRows.length)} / ${formatNumber(batchRows.length)} done`;
-    appendLog(`Batch QC analyzed ${batchRows.length} reference strands from ${compactPath(batchFile)}.`);
+    appendLog(`Batch QC analyzed ${batchRows.length} reference strands from ${compactPath(batchFileUsed)}.`);
+    runSignatures.batch = signature;
+    updateStaleNotes();
   } catch (error) {
     ui.batchResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
     ui.batchProgress.textContent = "failed";
@@ -4448,7 +4538,6 @@ async function saveBatchCsv() {
 }
 
 ui.viewTabs.forEach((tab) => tab.addEventListener("click", () => setView((tab.dataset.view as ViewName) || "interactive")));
-ui.batchSelectButton.addEventListener("click", selectBatchFile);
 ui.batchRunButton.addEventListener("click", runBatchAnalysis);
 ui.batchSaveButton.addEventListener("click", saveBatchCsv);
 ui.batchResult.addEventListener("click", (event) => {
@@ -4528,28 +4617,73 @@ ui.batchDetail.addEventListener("click", (event) => {
     showBatchDetail(batchDetailIndex);
   }
 });
-ui.batchPrimerFront.addEventListener("change", () => {
-  appSettings.primerFront = normalizePrimer(ui.batchPrimerFront.value, DEFAULT_PRIMER);
-  syncBatchPrimerInputs();
-  saveSettings();
-});
-ui.batchPrimerBack.addEventListener("change", () => {
-  appSettings.primerBack = normalizePrimer(ui.batchPrimerBack.value, DEFAULT_PRIMER);
-  syncBatchPrimerInputs();
-  saveSettings();
-});
-ui.linksSelectButton.addEventListener("click", selectLinksFile);
 ui.linksRunButton.addEventListener("click", runLinksTool);
-ui.filterSelectButton.addEventListener("click", selectFilterFile);
 ui.filterRunButton.addEventListener("click", runFilterTool);
 ui.filterSaveButton.addEventListener("click", saveFilterOutput);
-ui.reportRefButton.addEventListener("click", selectReportRef);
-ui.reportNgsButton.addEventListener("click", selectReportNgs);
+ui.reportIncludeReads.addEventListener("change", updateStaleNotes);
 ui.reportRunButton.addEventListener("click", generateReport);
 ui.reportAiButton.addEventListener("click", interpretReport);
 ui.reportResult.addEventListener("click", handleMarkdownCopyClick);
 ui.reportExportHtmlButton.addEventListener("click", () => exportReport("html"));
 ui.reportExportMdButton.addEventListener("click", () => exportReport("md"));
+
+// ---- Shared inputs bar wiring ----
+elements.referenceSelectButton.addEventListener("click", () => { void selectReference(); });
+elements.readsSelectButton.addEventListener("click", () => {
+  if (analyzerReady) void addSequencingFiles();
+  else void selectFiles();
+});
+elements.inputsBar.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.closest("[data-clear-reference]")) {
+    referenceFile = "";
+    renderInputsBar();
+    return;
+  }
+  const remove = target.closest<HTMLElement>("[data-remove-read]");
+  if (remove?.dataset.removeRead != null && !analyzerReady && !analyzerLoading) {
+    selectedFiles = selectedFiles.filter((_, i) => i !== Number(remove.dataset.removeRead));
+    renderInputsBar();
+  }
+});
+elements.inputsToggle.addEventListener("click", () => {
+  appSettings.inputsCollapsed = !appSettings.inputsCollapsed;
+  saveSettings();
+  renderInputsBar();
+});
+function bindParamInput(input: HTMLInputElement, apply: () => void) {
+  // Update on every keystroke so Run always sees the typed value, but only snap the
+  // field back to a valid number once editing is finished.
+  input.addEventListener("input", () => { apply(); saveSettings(); renderInputsBar(); });
+  input.addEventListener("change", () => { apply(); syncParamInputs(); saveSettings(); renderInputsBar(); });
+}
+bindParamInput(elements.kInput, () => { appSettings.k = clampInt(elements.kInput.value, 1, 31, appSettings.k); });
+bindParamInput(elements.threadsInput, () => { appSettings.threads = clampInt(elements.threadsInput.value, 1, 64, appSettings.threads); });
+bindParamInput(elements.readLengthInput, () => { appSettings.readLength = clampInt(elements.readLengthInput.value, 1, 1_000_000, appSettings.readLength); });
+// While linked, the field being typed in drives the other one; only the other input's
+// text is rewritten so the caret and a half-typed value are never disturbed.
+bindParamInput(elements.primerFrontInput, () => {
+  appSettings.primerFront = normalizePrimer(elements.primerFrontInput.value, appSettings.primerFront);
+  if (appSettings.primerLinked) {
+    appSettings.primerBack = appSettings.primerFront;
+    elements.primerBackInput.value = String(appSettings.primerBack);
+  }
+});
+bindParamInput(elements.primerBackInput, () => {
+  appSettings.primerBack = normalizePrimer(elements.primerBackInput.value, appSettings.primerBack);
+  if (appSettings.primerLinked) {
+    appSettings.primerFront = appSettings.primerBack;
+    elements.primerFrontInput.value = String(appSettings.primerFront);
+  }
+});
+elements.primerLinkButton.addEventListener("click", () => {
+  appSettings.primerLinked = !appSettings.primerLinked;
+  // Re-linking adopts the front value so the pair is equal again.
+  if (appSettings.primerLinked) appSettings.primerBack = appSettings.primerFront;
+  syncParamInputs();
+  saveSettings();
+  renderInputsBar();
+});
 
 loadSettings();
 renderSettings();
@@ -4557,9 +4691,9 @@ setChatMode(appSettings.agentTools ? "agent" : "chat");
 applyPanelLayout();
 loadThreads();
 updateChatContextChip();
-syncBatchPrimerInputs();
+syncParamInputs();
 updateQueryModeControls();
-renderFileList();
+renderInputsBar();
 renderIcons();
 setView("interactive");
 void loadSecrets();

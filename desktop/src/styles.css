@@ -4080,3 +4080,383 @@ textarea:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+/* ===== Shared inputs bar ===== */
+.inputs-bar {
+  container-type: inline-size;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex-shrink: 0;
+  padding: 8px 14px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+}
+
+.inputs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.inputs-toggle {
+  min-height: 0;
+  height: 28px;
+  min-width: 0;
+  padding: 0 6px 0 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.inputs-toggle svg {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
+  color: var(--muted);
+  transition: transform var(--dur) var(--ease);
+}
+
+.inputs-bar.collapsed .inputs-toggle svg {
+  transform: rotate(-90deg);
+}
+
+.inputs-summary {
+  display: none;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inputs-bar.collapsed .inputs-summary {
+  display: block;
+}
+
+.inputs-bar.collapsed .inputs-body {
+  display: none;
+}
+
+.kernel-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.kernel-pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.kernel-pill.ready {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+}
+
+.kernel-pill.ready::before {
+  background: var(--green);
+}
+
+.kernel-pill.stale {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+}
+
+.kernel-pill.stale::before {
+  background: var(--amber);
+}
+
+.kernel-pill.loading {
+  color: var(--accent-strong);
+}
+
+.kernel-pill.loading::before {
+  background: transparent;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  animation: trace-spin 0.8s linear infinite;
+}
+
+.inputs-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 20px;
+  align-items: start;
+  margin-top: 6px;
+}
+
+.input-sources {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.input-source {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.input-label,
+.input-field > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.input-pick {
+  min-height: 0;
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.input-pick svg {
+  width: 13px;
+  height: 13px;
+  flex-basis: 13px;
+}
+
+.input-chips {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.input-chip {
+  max-width: min(260px, 100%);
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  padding: 0 4px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  font-size: 12px;
+}
+
+.chip-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.input-chip:not(:has(.chip-remove)) {
+  padding-right: 9px;
+}
+
+.chip-remove {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.chip-remove svg {
+  width: 12px;
+  height: 12px;
+  flex-basis: 12px;
+}
+
+.chip-remove:hover {
+  background: var(--surface-hover);
+  color: var(--red);
+}
+
+.input-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.input-params {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 12px;
+}
+
+.input-field {
+  display: grid;
+  gap: 3px;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.input-field input {
+  height: 28px;
+  min-height: 0;
+  padding: 0 8px;
+  width: 78px;
+  font-size: 12.5px;
+}
+
+.primer-pair {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.primer-pair input {
+  width: 58px;
+}
+
+.primer-link {
+  width: 26px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.primer-link svg {
+  width: 13px;
+  height: 13px;
+  flex-basis: 13px;
+}
+
+.primer-link[aria-pressed="true"] {
+  color: var(--accent-strong);
+}
+
+/* Inputs the active view does not consume recede but stay editable. */
+.inputs-bar .unused {
+  opacity: 0.5;
+}
+
+.inputs-bar .unused:hover,
+.inputs-bar .unused:focus-within {
+  opacity: 1;
+}
+
+.inputs-notice {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--amber) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.inputs-notice[hidden] {
+  display: none;
+}
+
+/* Narrow workspace (agent panel open): stack the parameters under the file rows. */
+@container (max-width: 720px) {
+  .inputs-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Per-view tool bands now hold only that tool's own options. */
+.kernel-band,
+.tool-band {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.kernel-row,
+.tool-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.kernel-hint,
+.tool-hint {
+  margin: 0;
+  flex: 1 1 260px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.inline-field {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inline-field input {
+  width: 110px;
+}
+
+.report-config .tool-hint {
+  margin-top: -2px;
+}
+
+.bloom-options .kernel-hint {
+  flex-basis: auto;
+}
+
+/* Result older than the shared inputs it was computed from. */
+.result-band.stale::before {
+  content: "Inputs changed since this result was generated — run again to refresh.";
+  display: block;
+  margin: -2px 0 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--amber) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  color: var(--text);
+  font-size: 12px;
+}
+
+.tool-row .checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
