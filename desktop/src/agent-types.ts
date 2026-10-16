@@ -74,3 +74,24 @@ export type AgentRun = {
 };
 
 export type AgentTraceEvent = { id: string; trace: AgentToolTrace };
+
+export type AgentProgress = { phase: "model"; modelTurns: number; toolCalls: number; finalTurn: boolean };
+export type AgentProgressEvent = { id: string; progress: AgentProgress };
+
+export type AgentEvidenceStatus = {
+  datasetVersion: string | null;
+  k: number | null;
+  indexScope: "reference" | null;
+  batch: {
+    total: number; complete: number; incomplete: number; skipped: number; errors: number;
+    cachedProfiles: number; primerFront: number; primerBack: number;
+  } | null;
+  selectedSequence: boolean;
+};
+
+export type AgentToolAvailability = { name: string; available: boolean; reason?: string };
+
+export type AgentStatus = AgentEvidenceStatus & {
+  tools: AgentToolAvailability[];
+  limits: { modelTurns: number; toolCalls: number; deadlineMs: number };
+};

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AGENT_LIMITS, compactAgentContext, type AgentBackend } from "./agent";
-import type { AgentSnapshot } from "./agent-types";
+import type { AgentEvidenceStatus, AgentSnapshot } from "./agent-types";
 import { analyzerScope, type AnalyzerScope } from "./analyzer-config";
 
 export const EVIDENCE_LIMITS = Object.freeze({ batchRows: 250000, cachedSequenceBases: 40000000 });
@@ -50,6 +50,19 @@ export class AgentEvidenceStore {
   }
 
   getDatasetVersion() { return this.dataset?.id || null; }
+
+  // What evidence exists right now, without opening a snapshot. Counts only:
+  // no names, sequences, or paths leave the main process through this call.
+  status(): AgentEvidenceStatus {
+    const batch = this.batch;
+    return {
+      datasetVersion: this.dataset?.id || null,
+      k: this.dataset?.k ?? null,
+      indexScope: this.dataset?.indexScope === "reference" ? "reference" : null,
+      batch: batch ? { ...batch.aggregates, cachedProfiles: batch.sequences.size, primerFront: batch.primerFront, primerBack: batch.primerBack } : null,
+      selectedSequence: Boolean(this.activeSequence)
+    };
+  }
 
   clearBatch() { this.batch = null; }
 

@@ -1,6 +1,12 @@
 import { createIcons, icons } from "lucide";
 import type { DStoreQCApi } from "./preload";
-import type { AgentRun, AgentToolTrace } from "./agent-types";
+import type { AgentProgress, AgentRun, AgentStatus, AgentToolTrace } from "./agent-types";
+import {
+  agentSuggestions, compactTrace, createThread, deriveThreadTitle, describeToolCall, linkifyDnaCode, matchSlashCommands,
+  normalizeThreadStore, parseSlashCommand, profileSeries, relativeTime, THREAD_LIMITS, TOOL_LABELS, toolResultFacts, toolTargets,
+  type ChatMessage, type ChatMessageMeta, type ChatMode, type ChatThread, type CompactTrace, type SlashAction, type SlashCommand,
+  type Suggestion, type ThreadStore, type ToolTarget
+} from "./agent-ui";
 import { analyzerScope, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
 declare global {
@@ -117,12 +123,6 @@ type SummaryResult = AnalyzerSummaryResult;
 
 type AnalyzerResult = KmerResult | IndexResult | SequenceResult | SummaryResult | (AnalyzerScope & { type: "error"; message: string });
 
-type ChatMessage = {
-  role: "user" | "assistant";
-  content: string;
-  ts?: number;
-};
-
 type ProviderId =
   | "openai"
   | "google"
@@ -180,6 +180,9 @@ type AppSettings = {
   primerFront: number;
   primerBack: number;
   agentTools?: boolean;
+  chatWidth: number;
+  chatCollapsed: boolean;
+  chatExpanded: boolean;
 };
 
 // Keep the existing storage key when reusing a profile from before the rename.
@@ -359,18 +362,54 @@ const elements = {
   summaryScope: $("summaryScope"),
   summaryK: $("summaryK"),
   summaryFiles: $("summaryFiles"),
+  layout: document.querySelector(".layout") as HTMLElement,
+  chatPanel: $("chatPanel"),
+  chatResizer: $("chatResizer"),
+  chatRail: $("chatRail") as HTMLButtonElement,
+  chatRailBadge: $("chatRailBadge"),
+  threadsButton: $("threadsButton") as HTMLButtonElement,
+  threadTitle: $("threadTitle"),
+  agentSubtitle: $("agentSubtitle"),
+  newThreadButton: $("newThreadButton") as HTMLButtonElement,
+  expandChatButton: $("expandChatButton") as HTMLButtonElement,
+  collapseChatButton: $("collapseChatButton") as HTMLButtonElement,
+  threadsDrawer: $("threadsDrawer"),
+  threadSearchInput: $("threadSearchInput") as HTMLInputElement,
+  threadList: $("threadList"),
+  capabilitiesButton: $("capabilitiesButton") as HTMLButtonElement,
+  agentReadinessDot: $("agentReadinessDot"),
+  agentReadinessText: $("agentReadinessText"),
+  agentCapabilities: $("agentCapabilities"),
+  agentLimitsText: $("agentLimitsText"),
+  agentToolList: $("agentToolList"),
+  agentRunbar: $("agentRunbar"),
+  agentRunbarText: $("agentRunbarText"),
+  agentRunbarMeta: $("agentRunbarMeta"),
+  agentRunbarProgress: $("agentRunbarProgress"),
+  chatSuggestions: $("chatSuggestions"),
+  chatComposer: $("chatComposer") as HTMLFormElement,
+  editBanner: $("editBanner"),
+  cancelEditButton: $("cancelEditButton") as HTMLButtonElement,
+  slashMenu: $("slashMenu"),
   chatMessages: $("chatMessages"),
   chatInput: $("chatInput") as HTMLTextAreaElement,
   sendChatButton: $("sendChatButton") as HTMLButtonElement,
   stopChatButton: $("stopChatButton") as HTMLButtonElement,
-  clearChatButton: $("clearChatButton") as HTMLButtonElement,
   exportChatButton: $("exportChatButton") as HTMLButtonElement,
-  chatContextChip: $("chatContextChip"),
+  chatContextChip: $("chatContextChip") as HTMLButtonElement,
+  chatContextLabel: $("chatContextLabel"),
+  chatContextEmpty: $("chatContextEmpty"),
+  contextPinButton: $("contextPinButton") as HTMLButtonElement,
+  contextPreviewButton: $("contextPreviewButton") as HTMLButtonElement,
+  contextDialog: $("contextDialog"),
+  contextDialogTitle: $("contextDialogTitle"),
+  contextDialogMeta: $("contextDialogMeta"),
+  contextDialogBody: $("contextDialogBody"),
+  closeContextDialogButton: $("closeContextDialogButton") as HTMLButtonElement,
   aiProvider: $("aiProvider"),
   chatProviderSwitch: $("chatProviderSwitch"),
   chatProviderSelect: $("chatProviderSelect") as HTMLSelectElement,
   chatModelSelect: $("chatModelSelect") as HTMLSelectElement,
-  agentToolsToggle: $("agentToolsToggle") as HTMLInputElement,
   settingsPanel: $("settingsPanel"),
   saveSettingsButton: $("saveSettingsButton") as HTMLButtonElement,
   closeSettingsButton: $("closeSettingsButton") as HTMLButtonElement,
@@ -391,7 +430,6 @@ let bloomReferenceFile = "";
 let loadedScope: AnalyzerScope = {};
 let queryMode: "kmer" | "index" | "sequence" = "kmer";
 let latestResult: AnalyzerResult | null = null;
-const chatMessages: ChatMessage[] = [];
 let appSettings: AppSettings = createDefaultSettings();
 
 function renderIcons() {
@@ -447,7 +485,10 @@ function createDefaultSettings(): AppSettings {
     sequenceChartSeries: "both",
     primerFront: DEFAULT_PRIMER,
     primerBack: DEFAULT_PRIMER,
-    agentTools: false
+    agentTools: false,
+    chatWidth: 400,
+    chatCollapsed: false,
+    chatExpanded: false
   };
 }
 
@@ -500,7 +541,10 @@ function mergeSettings(input: unknown): AppSettings {
     sequenceChartSeries,
     primerFront: normalizePrimer(stored.primerFront, defaults.primerFront),
     primerBack: normalizePrimer(stored.primerBack, defaults.primerBack),
-    agentTools: typeof stored.agentTools === "boolean" ? stored.agentTools : Boolean(defaults.agentTools)
+    agentTools: typeof stored.agentTools === "boolean" ? stored.agentTools : Boolean(defaults.agentTools),
+    chatWidth: Number.isFinite(Number(stored.chatWidth)) ? Math.min(760, Math.max(320, Math.trunc(Number(stored.chatWidth)))) : defaults.chatWidth,
+    chatCollapsed: stored.chatCollapsed === true,
+    chatExpanded: stored.chatExpanded === true
   };
 }
 
@@ -615,6 +659,8 @@ function updateProviderBadge() {
   const settings = currentAiSettings();
   elements.aiProvider.textContent = PROVIDER_BY_ID[settings.provider].label;
   elements.aiProvider.title = settings.model;
+  elements.agentSubtitle.textContent = `${PROVIDER_BY_ID[settings.provider].label} · ${settings.model}`;
+  elements.agentSubtitle.title = elements.agentSubtitle.textContent;
 }
 
 // The chat header mirrors the Settings modal's provider routing: same appSettings
@@ -1464,6 +1510,7 @@ function setAnalyzerReady(ready: boolean) {
   elements.readLengthInput.disabled = ready;
   updateBloomControls();
   updateQueryModeControls();
+  refreshAgentStatus();
 }
 
 function updateBloomControls() {
@@ -1663,10 +1710,6 @@ async function runQuery() {
 // Markdown live, and resolve with the full text when the stream ends. A compact
 // snapshot of the active view's result travels with the question as context.
 // ===========================================================================
-const CHAT_GREETING =
-  "Hi! I'm your DStoreQC analysis assistant. Run a query, batch scan, or report and ask me to interpret the " +
-  "coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.";
-
 // --- Minimal, XSS-safe Markdown renderer (input is escaped before any tag is
 // inserted, so only the tags we emit can ever reach the DOM). ---
 function formatInline(escaped: string): string {
@@ -1964,18 +2007,6 @@ function contextPayloadSize(data: unknown): string {
   }
 }
 
-function updateChatContextChip() {
-  const context = buildChatContext();
-  if (!elements.chatContextChip) return;
-  if (context) {
-    const size = contextPayloadSize(context.data);
-    elements.chatContextChip.textContent = `Context: ${context.label}${size ? ` · ${size}` : ""}`;
-    elements.chatContextChip.hidden = false;
-  } else {
-    elements.chatContextChip.hidden = true;
-  }
-}
-
 // Delegated "Copy" for fenced code blocks. Both Markdown hosts (chat transcript
 // and report narrative) attach this to their container, so re-renders never
 // need per-button wiring.
@@ -1992,7 +2023,7 @@ function handleMarkdownCopyClick(event: Event) {
   });
 }
 
-// --- Streaming chat state + DOM ---
+// --- Desktop Agent panel: threads, modes, live evidence timeline ---
 // Incremental render: finalized Markdown blocks are parsed once into `stableEl`
 // (append-only) and only the trailing, still-growing block is re-parsed into
 // `liveEl` each animation frame. Per-frame cost is therefore O(current block)
@@ -2000,6 +2031,9 @@ function handleMarkdownCopyClick(event: Event) {
 // churn (and selection loss) of replacing the entire message every frame.
 type ActiveChat = {
   id: string;
+  threadId: string;
+  mode: ChatMode;
+  model: string;
   bubble: HTMLElement;
   body: HTMLElement;
   text: string;
@@ -2007,11 +2041,50 @@ type ActiveChat = {
   liveEl: HTMLElement | null;
   stableLen: number;
   trace: AgentToolTrace[];
+  progress: AgentProgress | null;
+  startedAt: number;
 };
+
+// One row of the evidence timeline, built either from a live trace (with the
+// full result) or from the compact copy kept in the saved transcript.
+type TimelineItem = {
+  callId: string;
+  name: string;
+  arguments: unknown;
+  status: AgentToolTrace["status"];
+  durationMs?: number;
+  facts: string[];
+  targets: ToolTarget[];
+  series: Array<{ position: number; coverage: number }> | null;
+  result?: unknown;
+};
+
+const THREAD_STORAGE_KEY = "dstoreqc.chatThreads.v1";
+// Pre-thread profiles kept one flat transcript under this key; it is migrated once.
+const LEGACY_CHAT_STORAGE_KEY = "dbgps.chatTranscript";
+const DEFAULT_CHAT_WIDTH = 400;
+const MIN_CHAT_WIDTH = 320;
+const MAX_CHAT_WIDTH = 760;
+const FALLBACK_AGENT_LIMITS = { modelTurns: 5, toolCalls: 6, deadlineMs: 120000 };
+// Full runs (with evidence payloads) live only in memory, keyed by snapshot id,
+// for timeline evidence, JSON export, and follow-up evidence ids.
+const MAX_RETAINED_RUNS = 16;
+
+let threadStore: ThreadStore = { activeId: "", threads: [] };
+let chatMode: ChatMode = "chat";
+let agentStatus: AgentStatus | null = null;
+let contextEnabled = true;
+let pinnedContext: { label: string; data: unknown } | null = null;
+let editingIndex: number | null = null;
+let slashMatches: SlashCommand[] = [];
+let slashIndex = 0;
+const agentRuns = new Map<string, AgentRun>();
 let activeChat: ActiveChat | null = null;
-const retainedAgentRuns: AgentRun[] = [];
 let chatStreamCounter = 0;
 let chatRenderScheduled = false;
+let runbarTimer: number | undefined;
+let agentStatusTimer: number | undefined;
+let unseenReplies = 0;
 
 // Report-side streaming: mirrors the chat stream so "Interpret with AI" renders
 // incrementally into the report's own narrative element. Stream ids share
@@ -2054,6 +2127,159 @@ function scheduleReportStreamRender() {
   });
 }
 
+// Assistant Markdown with pure-DNA code spans turned into "open in Interactive" links.
+function renderAssistantMarkdown(text: string): string {
+  return linkifyDnaCode(renderMarkdownToHtml(text), 8);
+}
+
+function agentLimits() {
+  return agentStatus?.limits ?? FALLBACK_AGENT_LIMITS;
+}
+
+// ---- Threads ----------------------------------------------------------------
+function activeThread(): ChatThread {
+  let thread = threadStore.threads.find((item) => item.id === threadStore.activeId);
+  if (!thread) {
+    thread = createThread();
+    threadStore.threads.unshift(thread);
+    threadStore.activeId = thread.id;
+  }
+  return thread;
+}
+
+// The live transcript is always the active thread's own array, so pushes and
+// splices on it are the thread's state with no copy to keep in sync.
+let chatMessages: ChatMessage[] = [];
+
+function persistThreads() {
+  const threads = threadStore.threads.filter((thread) => thread.messages.length || thread.id === threadStore.activeId);
+  // On a quota error keep halving the number of stored threads (most recent
+  // first) rather than losing the whole history.
+  for (let keep = threads.length; keep >= 1; keep = Math.floor(keep / 2)) {
+    try {
+      localStorage.setItem(THREAD_STORAGE_KEY, JSON.stringify({ activeId: threadStore.activeId, threads: threads.slice(0, keep) }));
+      localStorage.removeItem(LEGACY_CHAT_STORAGE_KEY);
+      return;
+    } catch {
+      /* quota exceeded or storage disabled: retry smaller, else stay in memory */
+    }
+  }
+}
+
+function touchThread() {
+  const thread = activeThread();
+  if (chatMessages.length > THREAD_LIMITS.messages) chatMessages.splice(0, chatMessages.length - THREAD_LIMITS.messages);
+  thread.updatedAt = Date.now();
+  if (!thread.title) thread.title = deriveThreadTitle(chatMessages);
+  threadStore.threads.sort((a, b) => b.updatedAt - a.updatedAt);
+  persistThreads();
+  renderThreadHeader();
+  if (!elements.threadsDrawer.hidden) renderThreadList();
+}
+
+function loadThreads() {
+  const read = (key: string) => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  };
+  threadStore = normalizeThreadStore(read(THREAD_STORAGE_KEY), read(LEGACY_CHAT_STORAGE_KEY));
+  chatMessages = activeThread().messages;
+  renderThread();
+}
+
+function switchThread(id: string) {
+  if (activeChat || !threadStore.threads.some((thread) => thread.id === id)) return;
+  threadStore.activeId = id;
+  chatMessages = activeThread().messages;
+  cancelEdit();
+  persistThreads();
+  renderThread();
+  closeThreadsDrawer();
+}
+
+function newThread() {
+  if (activeChat) return;
+  cancelEdit();
+  const current = activeThread();
+  if (current.messages.length) {
+    const thread = createThread();
+    threadStore.threads.unshift(thread);
+    threadStore.threads = threadStore.threads.slice(0, THREAD_LIMITS.threads);
+    threadStore.activeId = thread.id;
+    chatMessages = thread.messages;
+    persistThreads();
+    renderThread();
+  }
+  closeThreadsDrawer();
+  openChatPanel();
+  elements.chatInput.focus();
+}
+
+function deleteThread(id: string) {
+  if (activeChat && activeChat.threadId === id) return;
+  threadStore.threads = threadStore.threads.filter((thread) => thread.id !== id);
+  if (threadStore.activeId === id) {
+    const next = threadStore.threads[0] || createThread();
+    if (!threadStore.threads.includes(next)) threadStore.threads.unshift(next);
+    threadStore.activeId = next.id;
+    chatMessages = next.messages;
+    cancelEdit();
+    renderThread();
+  }
+  persistThreads();
+  renderThreadList();
+}
+
+function renderThreadHeader() {
+  const thread = activeThread();
+  elements.threadTitle.textContent = thread.title || "New conversation";
+  elements.threadTitle.title = thread.title || "";
+}
+
+function renderThreadList() {
+  const query = elements.threadSearchInput.value.trim().toLowerCase();
+  const threads = threadStore.threads.filter((thread) => {
+    if (!query) return true;
+    return thread.title.toLowerCase().includes(query) || thread.messages.some((m) => m.content.toLowerCase().includes(query));
+  });
+  if (!threads.length) {
+    elements.threadList.innerHTML = `<li class="thread-empty">${query ? "No matching conversations" : "No conversations yet"}</li>`;
+    return;
+  }
+  elements.threadList.innerHTML = threads.map((thread) => {
+    const active = thread.id === threadStore.activeId;
+    const agentTurns = thread.messages.filter((m) => m.role === "assistant" && m.meta?.mode === "agent").length;
+    return `<li class="thread-item${active ? " active" : ""}" role="option" aria-selected="${active}">
+      <button type="button" class="thread-open" data-thread-open="${escapeHtml(thread.id)}" ${activeChat ? "disabled" : ""}>
+        <strong>${escapeHtml(thread.title || "New conversation")}</strong>
+        <span>${escapeHtml(relativeTime(thread.updatedAt))} · ${formatNumber(thread.messages.length)} messages${agentTurns ? ` · ${formatNumber(agentTurns)} agent` : ""}</span>
+      </button>
+      <button type="button" class="thread-delete" data-thread-delete="${escapeHtml(thread.id)}" title="Delete conversation" aria-label="Delete conversation" ${activeChat?.threadId === thread.id ? "disabled" : ""}>
+        <i data-lucide="trash-2"></i>
+      </button>
+    </li>`;
+  }).join("");
+  renderIcons();
+}
+
+function openThreadsDrawer() {
+  elements.threadsDrawer.hidden = false;
+  elements.threadsButton.setAttribute("aria-expanded", "true");
+  elements.threadSearchInput.value = "";
+  renderThreadList();
+  elements.threadSearchInput.focus();
+}
+
+function closeThreadsDrawer() {
+  elements.threadsDrawer.hidden = true;
+  elements.threadsButton.setAttribute("aria-expanded", "false");
+}
+
+// ---- Messages -----------------------------------------------------------------
 function createMessageBubble(role: "user" | "assistant"): { bubble: HTMLElement; body: HTMLElement } {
   const bubble = document.createElement("div");
   bubble.className = `message ${role}`;
@@ -2069,69 +2295,118 @@ function formatChatTime(ts: number): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-// Copy / retry live in a footer row that is only attached once a message is
-// final, so the controls never appear on a half-streamed reply.
-function attachMessageActions(bubble: HTMLElement, text: string, opts: { retry?: boolean; ts?: number } = {}) {
+function messageActionButton(icon: string, label: string, className = ""): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `message-action ${className}`.trim();
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = `<i data-lucide="${icon}"></i>`;
+  return button;
+}
+
+function flashButton(button: HTMLButtonElement, label: string) {
+  const previous = button.title;
+  button.title = label;
+  button.classList.add("flash");
+  setTimeout(() => { button.title = previous; button.classList.remove("flash"); }, 1200);
+}
+
+// Footer row attached once a message is final: copy, edit/regenerate/retry,
+// evidence export, and a quiet provenance line (time, model, stop reason).
+function attachMessageActions(bubble: HTMLElement, message: ChatMessage, index: number | null) {
   bubble.querySelector(".message-actions")?.remove();
-  if (!text.trim()) return;
+  if (!message.content.trim()) return;
   const row = document.createElement("div");
   row.className = "message-actions";
 
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.className = "message-action";
-  copy.textContent = "Copy";
-  copy.setAttribute("aria-label", "Copy this message");
+  const copy = messageActionButton("copy", "Copy");
   copy.addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(text);
-      copy.textContent = "Copied";
-      setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+      await navigator.clipboard.writeText(message.content);
+      flashButton(copy, "Copied");
     } catch {
-      copy.textContent = "Copy failed";
-      setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+      flashButton(copy, "Copy failed");
     }
   });
   row.appendChild(copy);
 
-  if (opts.retry) {
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.className = "message-action";
-    retry.textContent = "Retry";
-    retry.setAttribute("aria-label", "Retry this question");
-    retry.addEventListener("click", () => { void retryLastQuestion(bubble); });
+  if (message.role === "user" && index != null) {
+    const edit = messageActionButton("pencil", "Edit and resend", "action-edit");
+    edit.addEventListener("click", () => beginEdit(index));
+    row.appendChild(edit);
+  }
+  if (message.role === "assistant" && index != null && index === chatMessages.length - 1) {
+    const regenerate = messageActionButton("rotate-ccw", "Regenerate", "action-regenerate");
+    regenerate.addEventListener("click", () => { void regenerateLast(); });
+    row.appendChild(regenerate);
+  }
+  if (message.role === "assistant" && index == null && message.meta?.error) {
+    const retry = messageActionButton("rotate-ccw", "Retry", "action-regenerate");
+    retry.addEventListener("click", () => { void regenerateLast(bubble); });
     row.appendChild(retry);
   }
-
-  if (opts.ts != null && Number.isFinite(opts.ts)) {
-    const time = document.createElement("span");
-    time.className = "message-time";
-    time.textContent = formatChatTime(opts.ts);
-    row.appendChild(time);
+  const run = message.meta?.snapshotId ? agentRuns.get(message.meta.snapshotId) : undefined;
+  if (run) {
+    const exportButton = messageActionButton("file-json", "Export evidence and tool-call record (JSON)");
+    exportButton.addEventListener("click", async () => {
+      try {
+        await window.dstoreqc.saveFile({ defaultName: `DStoreQC-agent-${run.snapshot.id}.json`, content: JSON.stringify(run, null, 2) });
+      } catch (error) {
+        appendLog(`Evidence export failed: ${errMessage(error)}`);
+      }
+    });
+    row.appendChild(exportButton);
   }
 
+  const meta = document.createElement("span");
+  meta.className = "message-meta";
+  const parts: string[] = [];
+  if (message.ts != null && Number.isFinite(message.ts)) parts.push(formatChatTime(message.ts));
+  if (message.role === "assistant" && message.meta?.model) parts.push(message.meta.model);
+  meta.textContent = parts.join(" · ");
+  if (message.role === "assistant" && message.meta?.stopReason && message.meta.stopReason !== "completed") {
+    const badge = document.createElement("span");
+    badge.className = `stop-badge ${message.meta.stopReason}`;
+    badge.textContent = message.meta.stopReason.replaceAll("_", " ");
+    meta.appendChild(badge);
+  }
+  row.appendChild(meta);
   bubble.appendChild(row);
+  renderIcons();
 }
 
-// Re-ask the most recent question after a failure. The failed exchange is dropped
-// from both the transcript and the DOM so the retry is a clean second attempt
-// rather than a follow-up that references an error the model never produced.
-async function retryLastQuestion(errorBubble: HTMLElement) {
-  if (activeChat) return;
-  let question = "";
-  for (let i = chatMessages.length - 1; i >= 0; i--) {
-    if (chatMessages[i].role === "user") {
-      question = chatMessages[i].content;
-      chatMessages.splice(i);
-      break;
+function renderMessage(message: ChatMessage, index: number): HTMLElement {
+  const { bubble, body } = createMessageBubble(message.role);
+  if (message.meta?.mode === "agent") bubble.classList.add("agent");
+  if (message.meta?.error) bubble.classList.add("error");
+  if (message.role === "user") {
+    body.textContent = message.content;
+    const tags: string[] = [];
+    if (message.meta?.command) tags.push(`<span class="message-tag command">/${escapeHtml(message.meta.command)}</span>`);
+    if (message.meta?.mode === "agent") tags.push('<span class="message-tag agent"><i data-lucide="bot"></i>Agent</span>');
+    if (message.meta?.contextLabel) tags.push(`<span class="message-tag context"><i data-lucide="paperclip"></i>${escapeHtml(message.meta.contextLabel)}</span>`);
+    if (tags.length) bubble.insertAdjacentHTML("afterbegin", `<div class="message-tags">${tags.join("")}</div>`);
+  } else {
+    const run = message.meta?.snapshotId ? agentRuns.get(message.meta.snapshotId) : undefined;
+    if (run) renderTimeline(bubble, timelineFromTrace(run.trace), { running: false, stopReason: run.stopReason, snapshotId: run.snapshot.id });
+    else if (message.meta?.mode === "agent") {
+      renderTimeline(bubble, timelineFromCompact(message.meta.trace || []), { running: false, stopReason: message.meta.stopReason, snapshotId: message.meta.snapshotId, restored: true });
     }
+    body.innerHTML = renderAssistantMarkdown(message.content);
   }
-  if (!question) return;
-  errorBubble.previousElementSibling?.remove();
-  errorBubble.remove();
-  elements.chatInput.value = question;
-  await sendChat();
+  attachMessageActions(bubble, message, index);
+  return bubble;
+}
+
+function renderThread() {
+  elements.chatMessages.innerHTML = "";
+  if (!chatMessages.length) renderChatWelcome();
+  else chatMessages.forEach((message, index) => renderMessage(message, index));
+  renderThreadHeader();
+  renderSuggestions();
+  renderIcons();
+  scrollChatToBottom();
 }
 
 function scrollChatToBottom() {
@@ -2165,66 +2440,347 @@ function stableMarkdownBoundary(text: string): number {
   return boundary;
 }
 
-// --- Welcome empty-state: shown only while the transcript is empty. Chips send
-// their text through the normal sendChat path; context-aware prompts appear once
-// the active view has a result worth asking about. ---
-function chatSuggestions(): string[] {
-  return buildChatContext()
-    ? [
-        "Summarize the current result",
-        "Any dropout or low-coverage regions?",
-        "What do Sm, Kd and Kn mean?",
-        "What should I check next?"
-      ]
-    : [
-        "What do Sm, Kd and Kn mean?",
-        "How do I run a query or batch scan?",
-        "What are cross-links and entanglement?"
-      ];
+// ---- Welcome and suggestions ---------------------------------------------------
+function currentSuggestions(limit: number) {
+  return agentSuggestions((pinnedContext ?? buildChatContext())?.label ?? null, agentStatus, limit);
 }
 
-function removeChatWelcome() {
-  elements.chatMessages.querySelector(".chat-welcome")?.remove();
+function suggestionButton(suggestion: Suggestion, className: string) {
+  const agent = suggestion.mode === "agent";
+  return `<button type="button" class="${className}" data-suggest-prompt="${escapeHtml(suggestion.prompt)}" data-suggest-mode="${suggestion.mode || ""}" title="${escapeHtml(suggestion.prompt)}">` +
+    `${agent ? '<i data-lucide="bot"></i>' : '<i data-lucide="message-square"></i>'}<span>${escapeHtml(suggestion.label)}</span></button>`;
 }
 
 function renderChatWelcome() {
-  removeChatWelcome();
+  elements.chatMessages.querySelector(".chat-welcome")?.remove();
   if (chatMessages.length > 0) return;
   const welcome = document.createElement("div");
   welcome.className = "chat-welcome";
   welcome.innerHTML = `
-    <h3>Ask about your analysis</h3>
-    <p>${escapeHtml(CHAT_GREETING)}</p>
-    <div class="chat-suggestions">
-      ${chatSuggestions()
-        .map((text) => `<button type="button" class="chat-suggestion" data-chat-suggest="${escapeHtml(text)}">${escapeHtml(text)}</button>`)
-        .join("")}
-    </div>`;
+    <div class="welcome-mark"><i data-lucide="sparkles"></i></div>
+    <h3>What should we look at?</h3>
+    <p><strong>Chat</strong> explains the result you attach. <strong>Agent</strong> can also read the loaded index and Batch QC cache — read-only, bounded, and every step is shown.</p>
+    <div class="welcome-grid">${currentSuggestions(4).map((s) => suggestionButton(s, "welcome-card")).join("")}</div>
+    <p class="welcome-tip"><kbd>/</kbd> commands · <kbd>⌘K</kbd> focus · <kbd>⌘J</kbd> hide panel</p>`;
   elements.chatMessages.appendChild(welcome);
+  renderIcons();
 }
 
-function pushUserMessage(content: string) {
-  removeChatWelcome();
-  const ts = Date.now();
-  chatMessages.push({ role: "user", content, ts });
-  const { bubble, body } = createMessageBubble("user");
-  body.textContent = content;
-  attachMessageActions(bubble, content, { ts });
-  saveChatTranscript();
-  scrollChatToBottom();
+function renderSuggestions() {
+  const show = !activeChat && chatMessages.length > 0 && editingIndex == null;
+  elements.chatSuggestions.hidden = !show;
+  if (!show) return;
+  elements.chatSuggestions.innerHTML = currentSuggestions(3).map((s) => suggestionButton(s, "suggestion-chip")).join("");
+  renderIcons();
 }
 
+// ---- Mode, readiness, and capabilities -----------------------------------------
+function setChatMode(mode: ChatMode) {
+  chatMode = mode;
+  appSettings.agentTools = mode === "agent";
+  saveSettings();
+  elements.chatPanel.dataset.mode = mode;
+  document.querySelectorAll<HTMLButtonElement>("[data-chat-mode]").forEach((button) => {
+    const active = button.dataset.chatMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  elements.chatInput.placeholder = mode === "agent"
+    ? "Ask the agent — it can read the loaded index and Batch QC cache"
+    : "Ask about your analysis, or type / for commands";
+}
+
+function renderReadiness() {
+  const status = agentStatus;
+  let level: "off" | "ready" | "partial" = "off";
+  let text = "No index loaded";
+  if (status?.datasetVersion) {
+    level = status.batch ? "ready" : "partial";
+    text = `${status.indexScope === "reference" ? "Ref · " : ""}k=${status.k}`;
+    if (status.batch) text += ` · ${formatNumber(status.batch.total)} strands`;
+  }
+  elements.agentReadinessDot.className = `readiness-dot ${level}`;
+  elements.agentReadinessText.textContent = text;
+  elements.capabilitiesButton.title = status?.datasetVersion
+    ? `${status.indexScope === "reference" ? "Reference-scoped" : "Read"} index loaded (k=${status.k})${status.batch ? `, Batch QC cached (${formatNumber(status.batch.total)} strands)` : ", no Batch QC cache"}. Click for agent tools.`
+    : "No read index loaded. Click for agent tools.";
+  const limits = agentLimits();
+  elements.agentLimitsText.textContent = `≤ ${limits.toolCalls} tool calls · ≤ ${limits.modelTurns} model turns · ${Math.round(limits.deadlineMs / 1000)} s`;
+  const tools = status?.tools ?? Object.keys(TOOL_LABELS).map((name) => ({ name, available: false, reason: "Agent status unavailable." }));
+  elements.agentToolList.innerHTML = tools.map((tool) => {
+    const label = TOOL_LABELS[tool.name] || { title: tool.name, icon: "wrench", blurb: "" };
+    return `<li class="agent-tool ${tool.available ? "available" : "unavailable"}">
+      <i data-lucide="${label.icon}"></i>
+      <div><strong>${escapeHtml(label.title)}</strong><span>${escapeHtml(tool.available ? label.blurb : tool.reason || "Unavailable")}</span></div>
+      <span class="tool-state">${tool.available ? "Ready" : "Waiting"}</span>
+    </li>`;
+  }).join("");
+  renderIcons();
+}
+
+function refreshAgentStatus() {
+  if (agentStatusTimer) window.clearTimeout(agentStatusTimer);
+  agentStatusTimer = window.setTimeout(async () => {
+    try {
+      agentStatus = await window.dstoreqc.getAgentStatus();
+    } catch {
+      agentStatus = null;
+    }
+    renderReadiness();
+    renderSuggestions();
+    if (!chatMessages.length && !activeChat) renderChatWelcome();
+  }, 120);
+}
+
+function toggleCapabilities(force?: boolean) {
+  const open = force ?? elements.agentCapabilities.hidden;
+  elements.agentCapabilities.hidden = !open;
+  elements.capabilitiesButton.setAttribute("aria-expanded", String(open));
+}
+
+// ---- Context tray ---------------------------------------------------------------
+function currentChatContext(): { label: string; data: unknown } | null {
+  if (!contextEnabled) return null;
+  return pinnedContext ?? buildChatContext();
+}
+
+function updateChatContextChip() {
+  const shown = pinnedContext ?? buildChatContext();
+  const has = Boolean(shown);
+  elements.chatContextChip.hidden = !has;
+  elements.contextPinButton.hidden = !has;
+  elements.contextPreviewButton.hidden = !has;
+  elements.chatContextEmpty.hidden = has;
+  if (shown) {
+    const size = contextPayloadSize(shown.data);
+    elements.chatContextLabel.textContent = `${shown.label}${size ? ` · ${size}` : ""}`;
+    elements.chatContextChip.classList.toggle("off", !contextEnabled);
+    elements.chatContextChip.classList.toggle("pinned", Boolean(pinnedContext));
+    elements.chatContextChip.title = contextEnabled
+      ? `${pinnedContext ? "Pinned" : "Follows the active view"} — attached to the next message. Click to detach.`
+      : "Detached — click to attach to the next message.";
+    elements.contextPinButton.setAttribute("aria-pressed", String(Boolean(pinnedContext)));
+    elements.contextPinButton.classList.toggle("active", Boolean(pinnedContext));
+    elements.contextPinButton.title = pinnedContext ? "Unpin: follow the active view again" : "Pin this context across views";
+  }
+  refreshAgentStatus();
+}
+
+function togglePinnedContext() {
+  pinnedContext = pinnedContext ? null : buildChatContext();
+  updateChatContextChip();
+}
+
+function openContextDialog() {
+  const shown = pinnedContext ?? buildChatContext();
+  if (!shown) return;
+  let json = "";
+  try {
+    json = JSON.stringify(shown.data, null, 2) ?? "";
+  } catch {
+    json = "(context is not serializable)";
+  }
+  elements.contextDialogTitle.textContent = shown.label;
+  elements.contextDialogMeta.textContent = `${contextPayloadSize(shown.data) || "size unknown"} · ${pinnedContext ? "pinned" : "follows the active view"} · ${contextEnabled ? "attached" : "detached"}`;
+  elements.contextDialogBody.textContent = json;
+  elements.contextDialog.hidden = false;
+  elements.closeContextDialogButton.focus();
+}
+
+function closeContextDialog() {
+  elements.contextDialog.hidden = true;
+}
+
+// ---- Evidence timeline ----------------------------------------------------------
+function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function timelineFromTrace(trace: AgentToolTrace[]): TimelineItem[] {
+  return trace.map((item) => {
+    const start = Date.parse(item.startedAt);
+    const end = item.finishedAt ? Date.parse(item.finishedAt) : NaN;
+    return {
+      callId: item.callId,
+      name: item.name,
+      arguments: item.arguments,
+      status: item.status,
+      durationMs: Number.isFinite(start) && Number.isFinite(end) ? end - start : undefined,
+      facts: item.status === "running" ? [] : toolResultFacts(item.name, item.result),
+      targets: toolTargets(item),
+      series: profileSeries(item.result),
+      result: item.result
+    };
+  });
+}
+
+function timelineFromCompact(trace: CompactTrace[]): TimelineItem[] {
+  return trace.map((item) => ({ ...item, facts: item.facts || [], targets: toolTargets(item), series: null }));
+}
+
+function sparklineSvg(series: Array<{ position: number; coverage: number }>) {
+  const max = Math.max(1, ...series.map((point) => point.coverage));
+  const width = series.length * 4;
+  const bars = series.map((point, i) => {
+    const h = point.coverage === 0 ? 3 : Math.max(2, (point.coverage / max) * 26);
+    return `<rect class="${point.coverage === 0 ? "zero" : ""}" x="${i * 4}" y="${28 - h}" width="3" height="${h}"><title>window ${point.position}: ${point.coverage}</title></rect>`;
+  }).join("");
+  return `<svg class="step-sparkline" viewBox="0 0 ${width} 28" preserveAspectRatio="none" role="img" aria-label="Coverage of windows ${series[0].position}–${series[series.length - 1].position}">${bars}</svg>`;
+}
+
+function stepIcon(item: TimelineItem) {
+  if (item.status === "running") return '<span class="trace-spinner" role="status" aria-label="running"></span>';
+  return `<i data-lucide="${item.status === "ok" ? (TOOL_LABELS[item.name]?.icon || "check") : "circle-alert"}"></i>`;
+}
+
+function targetButton(target: ToolTarget) {
+  if (target.kind === "batch-record") {
+    const known = batchRows.some((row) => row.index === target.index);
+    return `<button type="button" class="step-link" data-open-record="${target.index}" ${known ? "" : 'title="Not in the current Batch QC table"'}><i data-lucide="table-2"></i>Row #${target.index + 1}</button>`;
+  }
+  return `<button type="button" class="step-link" data-open-kmer="${target.kmer}"><i data-lucide="external-link"></i>Open in Interactive</button>`;
+}
+
+function renderTimeline(bubble: HTMLElement, items: TimelineItem[], state: { running: boolean; stopReason?: string; snapshotId?: string; restored?: boolean }) {
+  let container = bubble.querySelector<HTMLElement>(".agent-steps");
+  if (!container) {
+    container = document.createElement("div");
+    container.className = "agent-steps";
+    bubble.insertBefore(container, bubble.querySelector(".message-body"));
+  }
+  // Open while working; afterwards collapse unless the user chose otherwise.
+  const open = state.running || (container.dataset.userToggled === "true" ? container.dataset.open === "true" : false);
+  const evidenceOpen = new Set(Array.from(container.querySelectorAll<HTMLElement>(".step-evidence:not([hidden])")).map((el) => el.dataset.callId));
+  container.dataset.open = String(open);
+  container.classList.toggle("running", state.running);
+
+  let total = 0;
+  for (const item of items) total += item.durationMs || 0;
+  const tools = `${items.length} tool call${items.length === 1 ? "" : "s"}`;
+  const summary = state.running
+    ? `Working · ${tools}`
+    : items.length ? `${tools}${total ? ` · ${formatDurationMs(total)}` : ""}` : "Answered without tools";
+  const stop = !state.running && state.stopReason && state.stopReason !== "completed"
+    ? `<span class="stop-badge ${escapeHtml(state.stopReason)}">${escapeHtml(state.stopReason.replaceAll("_", " "))}</span>` : "";
+  const snapshot = state.snapshotId ? `<span class="steps-snapshot" title="Evidence snapshot ${escapeHtml(state.snapshotId)}">${escapeHtml(state.snapshotId.slice(0, 8))}</span>` : "";
+
+  const list = items.map((item, i) => {
+    const call = describeToolCall(item.name, item.arguments);
+    const evidence = item.result !== undefined
+      ? `<button type="button" class="step-link subtle" data-step-evidence="${escapeHtml(item.callId)}"><i data-lucide="braces"></i>Evidence</button>` : "";
+    const actions = item.targets.map(targetButton).join("") + evidence;
+    return `<li class="step ${item.status}">
+      <span class="step-index" aria-hidden="true">${i + 1}</span>
+      <div class="step-main">
+        <div class="step-head">${stepIcon(item)}<strong>${escapeHtml(call.title)}</strong>${item.durationMs != null ? `<span class="step-dur">${escapeHtml(formatDurationMs(item.durationMs))}</span>` : ""}</div>
+        <div class="step-detail">${escapeHtml(call.detail)}</div>
+        ${item.facts.length ? `<div class="step-facts">${item.facts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>` : ""}
+        ${item.series ? sparklineSvg(item.series) : ""}
+        ${actions ? `<div class="step-actions">${actions}</div>` : ""}
+        ${item.result !== undefined ? `<pre class="step-evidence" data-call-id="${escapeHtml(item.callId)}" ${evidenceOpen.has(item.callId) ? "" : "hidden"}>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre>` : ""}
+      </div>
+    </li>`;
+  }).join("");
+
+  container.innerHTML = `<button type="button" class="steps-summary" aria-expanded="${open}">
+      <i data-lucide="${state.running ? "loader-circle" : "list-checks"}" class="${state.running ? "spin" : ""}"></i>
+      <span>${escapeHtml(summary)}</span>${stop}${snapshot}
+      <i data-lucide="chevron-down" class="steps-chevron"></i>
+    </button>
+    ${items.length ? `<ol class="steps-list"${open ? "" : " hidden"}>${list}</ol>` : ""}
+    ${state.restored && items.length ? `<p class="steps-note"${open ? "" : " hidden"}>Evidence payloads are kept only for this session; the step summary was saved with the conversation.</p>` : ""}`;
+  renderIcons();
+}
+
+function toggleTimeline(container: HTMLElement) {
+  const open = container.dataset.open !== "true";
+  container.dataset.open = String(open);
+  container.dataset.userToggled = "true";
+  container.querySelector(".steps-summary")?.setAttribute("aria-expanded", String(open));
+  container.querySelectorAll<HTMLElement>(".steps-list, .steps-note").forEach((el) => { el.hidden = !open; });
+}
+
+// ---- Jumps from the conversation into the workbench ------------------------------
+function openInInteractive(dna: string) {
+  setView("interactive");
+  const k = Number(elements.kInput.value) || 31;
+  queryMode = dna.length > k ? "sequence" : "kmer";
+  updateQueryModeControls();
+  elements.queryInput.value = dna;
+  if (analyzerReady) void runQuery();
+  else {
+    elements.queryInput.focus();
+    appendLog("Start the kernel to run this query.");
+  }
+}
+
+function openBatchRecord(index: number) {
+  setView("batch");
+  const position = batchRows.findIndex((row) => row.index === index);
+  if (position < 0) {
+    appendLog(`Batch record ${index} (row #${index + 1}) is not in the current Batch QC table.`);
+    return;
+  }
+  batchPage = Math.floor(position / BATCH_PAGE_SIZE);
+  batchHighlightIndex = index;
+  void showBatchDetail(index);
+}
+
+// ---- Run status bar -----------------------------------------------------------------
+function updateRunbar() {
+  const chat = activeChat;
+  if (!chat) return;
+  const elapsed = Date.now() - chat.startedAt;
+  const seconds = `${Math.floor(elapsed / 1000)}s`;
+  if (chat.mode === "agent") {
+    const limits = agentLimits();
+    const running = chat.trace.find((item) => item.status === "running");
+    const text = running
+      ? `${describeToolCall(running.name, running.arguments).title}…`
+      : chat.progress ? (chat.progress.finalTurn ? "Writing the answer…" : chat.trace.length ? "Reading the evidence…" : "Planning…") : "Opening an evidence snapshot…";
+    elements.agentRunbarText.textContent = text;
+    elements.agentRunbarMeta.textContent = `turn ${chat.progress?.modelTurns ?? 0}/${limits.modelTurns} · tools ${chat.trace.length}/${limits.toolCalls} · ${seconds}`;
+    elements.agentRunbar.classList.remove("indeterminate");
+    elements.agentRunbarProgress.style.width = `${Math.min(100, (elapsed / limits.deadlineMs) * 100)}%`;
+  } else {
+    const words = chat.text.trim() ? chat.text.trim().split(/\s+/).length : 0;
+    elements.agentRunbarText.textContent = words ? "Writing…" : `Waiting for ${chat.model}…`;
+    elements.agentRunbarMeta.textContent = `${words ? `${formatNumber(words)} words · ` : ""}${seconds}`;
+    elements.agentRunbar.classList.add("indeterminate");
+    elements.agentRunbarProgress.style.width = "";
+  }
+}
+
+function startRunbar() {
+  elements.agentRunbar.hidden = false;
+  updateRunbar();
+  if (runbarTimer) window.clearInterval(runbarTimer);
+  runbarTimer = window.setInterval(updateRunbar, 250);
+}
+
+function stopRunbar() {
+  if (runbarTimer) window.clearInterval(runbarTimer);
+  runbarTimer = undefined;
+  elements.agentRunbar.hidden = true;
+}
+
+// ---- Send / stream / finalize ---------------------------------------------------------
 function setChatBusy(busy: boolean) {
   elements.sendChatButton.hidden = busy;
   elements.stopChatButton.hidden = !busy;
   // Fold the Stop button's disabled state into the busy machine so a prior
   // cancel can never leave it stuck disabled at the start of the next stream.
   if (busy) elements.stopChatButton.disabled = false;
-  elements.clearChatButton.disabled = busy;
-  elements.agentToolsToggle.disabled = busy;
+  elements.newThreadButton.disabled = busy;
+  document.querySelectorAll<HTMLButtonElement>("[data-chat-mode]").forEach((button) => { button.disabled = busy; });
   // Provider must not change mid-stream: swap the quick switcher for the pill.
   elements.chatProviderSwitch.hidden = busy;
   elements.aiProvider.hidden = !busy;
+  elements.chatPanel.classList.toggle("busy", busy);
+  elements.chatRail.classList.toggle("busy", busy);
+  if (!elements.threadsDrawer.hidden) renderThreadList();
+  renderSuggestions();
 }
 
 function scheduleAssistantRender() {
@@ -2246,11 +2802,11 @@ function scheduleAssistantRender() {
       // Append only the newly-completed blocks; existing stable DOM is untouched.
       activeChat.stableEl.insertAdjacentHTML(
         "beforeend",
-        renderMarkdownToHtml(activeChat.text.slice(activeChat.stableLen, boundary))
+        renderAssistantMarkdown(activeChat.text.slice(activeChat.stableLen, boundary))
       );
       activeChat.stableLen = boundary;
     }
-    activeChat.liveEl.innerHTML = renderMarkdownToHtml(activeChat.text.slice(activeChat.stableLen));
+    activeChat.liveEl.innerHTML = renderAssistantMarkdown(activeChat.text.slice(activeChat.stableLen));
     if (pinned) scrollChatToBottom();
   });
 }
@@ -2258,149 +2814,129 @@ function scheduleAssistantRender() {
 // `persistContent` lets the bubble show something the transcript does not keep —
 // used on the error path so the user sees "partial + ⚠️ error" while the upstream
 // history records only the text the model actually produced.
-function finalizeAssistant(content: string, opts: { persist: boolean; error?: boolean; persistContent?: string }) {
-  if (!activeChat) return;
+function finalizeAssistant(content: string, opts: { persist: boolean; error?: boolean; persistContent?: string; meta?: ChatMessageMeta }) {
+  const chat = activeChat;
+  if (!chat) return;
   const pinned = isChatPinnedToBottom();
-  activeChat.bubble.classList.remove("streaming");
-  if (opts.error) activeChat.bubble.classList.add("error");
+  chat.bubble.classList.remove("streaming");
+  if (opts.error) chat.bubble.classList.add("error");
   // Collapse the incremental stable/live containers into one authoritative render.
-  activeChat.body.innerHTML = renderMarkdownToHtml(content);
+  chat.body.innerHTML = renderAssistantMarkdown(content);
   const ts = Date.now();
   const persisted = opts.persistContent ?? content;
-  if (opts.persist && persisted.trim()) chatMessages.push({ role: "assistant", content: persisted, ts });
-  attachMessageActions(activeChat.bubble, content, { retry: Boolean(opts.error), ts });
+  const meta: ChatMessageMeta = { ...(opts.meta || { mode: chat.mode, model: chat.model }), ...(opts.error ? { error: true } : {}) };
+  let index: number | null = null;
+  // A reply that lands after the user switched threads still belongs to the
+  // thread that asked; it is saved there even though it is not on screen.
+  const thread = threadStore.threads.find((item) => item.id === chat.threadId);
+  if (opts.persist && persisted.trim() && thread) {
+    thread.messages.push({ role: "assistant", content: persisted, ts, meta: { ...meta, error: undefined } });
+    if (thread.messages === chatMessages) index = chatMessages.length - 1;
+  }
+  attachMessageActions(chat.bubble, { role: "assistant", content, ts, meta }, index);
   activeChat = null;
+  stopRunbar();
   setChatBusy(false);
-  saveChatTranscript();
+  touchThread();
+  if (elements.layout.classList.contains("chat-collapsed")) {
+    unseenReplies++;
+    elements.chatRailBadge.textContent = String(unseenReplies);
+    elements.chatRailBadge.hidden = false;
+  }
+  refreshAgentStatus();
   if (pinned) scrollChatToBottom();
 }
 
-function formatDurationMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "";
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-}
-
-// Wall time of a run: from the first tool's start to the last tool's finish.
-function traceWallTime(trace: AgentToolTrace[]): string {
-  let minStart = Infinity;
-  let maxEnd = -Infinity;
-  for (const item of trace) {
-    const start = Date.parse(item.startedAt);
-    const end = item.finishedAt ? Date.parse(item.finishedAt) : NaN;
-    if (Number.isFinite(start)) minStart = Math.min(minStart, start);
-    if (Number.isFinite(end)) maxEnd = Math.max(maxEnd, end);
-  }
-  if (!Number.isFinite(minStart) || !Number.isFinite(maxEnd)) return "";
-  return formatDurationMs(maxEnd - minStart);
-}
-
-function traceStatusIcon(status: AgentToolTrace["status"]): string {
-  if (status === "running") return '<span class="trace-spinner" role="status" aria-label="running"></span>';
-  return `<i data-lucide="${status === "ok" ? "check" : "x"}" class="trace-icon ${status === "ok" ? "ok" : "err"}"></i>`;
-}
-
-function renderAgentTrace(bubble: HTMLElement, trace: AgentToolTrace[], run?: AgentRun): HTMLElement {
-  let container = bubble.querySelector<HTMLElement>(".agent-trace");
-  if (!container) {
-    container = document.createElement("details");
-    container.className = "agent-trace";
-    bubble.appendChild(container);
-  }
-  const open = container.hasAttribute("open");
-  const expanded = new Set(Array.from(container.querySelectorAll<HTMLElement>("details[open]")).map((item) => item.dataset.callId));
-  const summary = run ? `${trace.length} tool calls · ${run.stopReason} · ${run.snapshot.id.slice(0, 8)}` : `${trace.length} tool calls`;
-  container.innerHTML = `<summary>${escapeHtml(summary)}</summary><ol>${trace.map((item) => {
-    const duration = item.finishedAt ? formatDurationMs(Date.parse(item.finishedAt) - Date.parse(item.startedAt)) : "";
-    return `<li><span class="trace-line">${traceStatusIcon(item.status)}<strong>${escapeHtml(item.name)}</strong>` +
-      `<span class="trace-status">${escapeHtml(item.status)}</span>${duration ? `<span class="trace-duration">${escapeHtml(duration)}</span>` : ""}</span>` +
-      `<div><code>${escapeHtml(JSON.stringify(item.arguments))}</code></div>` +
-      `<details data-call-id="${escapeHtml(item.callId)}" ${expanded.has(item.callId) ? "open" : ""}><summary>Evidence</summary><pre>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre></details></li>`;
-  }).join("")}</ol>`;
-  if (open) container.setAttribute("open", "");
-  if (run) {
-    const footer = document.createElement("div");
-    footer.className = "agent-trace-footer";
-    const total = traceWallTime(trace);
-    if (total) {
-      const wall = document.createElement("span");
-      wall.className = "trace-total";
-      wall.textContent = `total ${total}`;
-      footer.appendChild(wall);
-    }
-    const badge = document.createElement("span");
-    badge.className = `stop-badge ${run.stopReason}`;
-    badge.textContent = run.stopReason.replaceAll("_", " ");
-    badge.title = `Stop reason: ${run.stopReason}`;
-    footer.appendChild(badge);
-    const button = document.createElement("button");
-    button.className = "icon-only ghost trace-export";
-    button.title = "Export evidence and tool-call record";
-    button.setAttribute("aria-label", button.title);
-    button.innerHTML = '<i data-lucide="download"></i>';
-    button.addEventListener("click", async () => {
-      try {
-        await window.dstoreqc.saveFile({ defaultName: `DStoreQC-agent-${run.snapshot.id}.json`, content: JSON.stringify(run, null, 2) });
-      } catch (error) { appendLog(`Evidence export failed: ${errMessage(error)}`); }
-    });
-    footer.appendChild(button);
-    container.appendChild(footer);
-  }
+function apiKeyMissingNotice(settings: AiSettings, mode: ChatMode) {
+  const { bubble, body } = createMessageBubble("assistant");
+  bubble.classList.add("error");
+  const text = `**${PROVIDER_BY_ID[settings.provider].label}** needs an API key. Add one in **Settings → Providers**, or switch to a local endpoint.`;
+  body.innerHTML = renderMarkdownToHtml(text);
+  attachMessageActions(bubble, { role: "assistant", content: text, meta: { mode, error: true } }, null);
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "inline-action";
+  open.innerHTML = '<i data-lucide="settings"></i><span>Open provider settings</span>';
+  open.addEventListener("click", () => openSettings("providers"));
+  bubble.insertBefore(open, bubble.querySelector(".message-actions"));
   renderIcons();
-  return container;
+  scrollChatToBottom();
 }
 
-async function sendChat() {
-  if (activeChat) return;
-  const question = elements.chatInput.value.trim();
-  if (!question) return;
+// Snapshot ids of this thread's agent answers still retained in memory, so a
+// follow-up can cite earlier evidence (main keeps the matching runs per window).
+function threadSnapshotIds() {
+  return chatMessages
+    .map((message) => message.meta?.snapshotId)
+    .filter((id): id is string => Boolean(id && agentRuns.has(id)))
+    .slice(-8);
+}
+
+async function sendMessage(content: string, mode: ChatMode, command?: string) {
+  if (activeChat || !content.trim()) return;
+  closeSlashMenu();
+  elements.chatMessages.querySelector(".chat-welcome")?.remove();
+  // Only the newest reply can be regenerated.
+  elements.chatMessages.querySelectorAll(".action-regenerate").forEach((button) => button.remove());
 
   const settings = currentAiSettings();
+  const context = currentChatContext();
+  const userMessage: ChatMessage = {
+    role: "user", content, ts: Date.now(),
+    meta: { mode, contextLabel: context?.label, command }
+  };
+  chatMessages.push(userMessage);
+  renderMessage(userMessage, chatMessages.length - 1);
+  touchThread();
+  scrollChatToBottom();
+
   if (PROVIDER_BY_ID[settings.provider]?.apiKeyRequired && !settings.apiKey) {
-    pushUserMessage(question);
-    elements.chatInput.value = "";
-    autoGrowChatInput();
-    const { bubble, body } = createMessageBubble("assistant");
-    bubble.classList.add("error");
-    body.innerHTML = renderMarkdownToHtml(`**${PROVIDER_BY_ID[settings.provider].label}** needs an API key. Open **Settings → Providers** (gear icon) to add one, or switch the active provider to a local endpoint.`);
-    scrollChatToBottom();
+    apiKeyMissingNotice(settings, mode);
     return;
   }
-
-  pushUserMessage(question);
-  elements.chatInput.value = "";
-  autoGrowChatInput();
 
   const id = `chat-${++chatStreamCounter}-${Date.now()}`;
   const { bubble, body } = createMessageBubble("assistant");
   bubble.classList.add("streaming");
+  if (mode === "agent") bubble.classList.add("agent");
   body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
-  activeChat = { id, bubble, body, text: "", stableEl: null, liveEl: null, stableLen: 0, trace: [] };
+  activeChat = {
+    id, threadId: activeThread().id, mode, model: settings.model, bubble, body, text: "",
+    stableEl: null, liveEl: null, stableLen: 0, trace: [], progress: null, startedAt: Date.now()
+  };
+  if (mode === "agent") renderTimeline(bubble, [], { running: true });
   setChatBusy(true);
+  startRunbar();
   scrollChatToBottom();
 
   try {
-    const context = buildChatContext();
     const result = await window.dstoreqc.aiChat({
       id,
-      messages: chatMessages,
+      messages: chatMessages.map((message) => ({ role: message.role, content: message.content })),
       context: context?.data ?? null,
       contextLabel: context?.label,
       settings,
-      mode: elements.agentToolsToggle.checked ? "read-only" : "chat",
-      evidenceSnapshotIds: retainedAgentRuns.map((run) => run.snapshot.id)
+      mode: mode === "agent" ? "read-only" : "chat",
+      evidenceSnapshotIds: threadSnapshotIds()
     });
     elements.aiProvider.textContent = PROVIDER_BY_ID[result.provider as ProviderId]?.label || result.provider;
     elements.aiProvider.title = result.model;
+    const base: ChatMessageMeta = { mode, provider: result.provider, model: result.model };
     if (result.agent) {
-      retainedAgentRuns.push(result.agent);
-      if (retainedAgentRuns.length > 8) retainedAgentRuns.shift();
-      renderAgentTrace(bubble, result.agent.trace, result.agent);
-      finalizeAssistant(result.content, { persist: result.agent.stopReason === "completed", error: result.agent.stopReason === "error" });
+      const run = result.agent;
+      agentRuns.set(run.snapshot.id, run);
+      while (agentRuns.size > MAX_RETAINED_RUNS) agentRuns.delete(agentRuns.keys().next().value as string);
+      renderTimeline(bubble, timelineFromTrace(run.trace), { running: false, stopReason: run.stopReason, snapshotId: run.snapshot.id });
+      finalizeAssistant(result.content, {
+        persist: run.stopReason === "completed",
+        error: run.stopReason === "error",
+        meta: { ...base, stopReason: run.stopReason, snapshotId: run.snapshot.id, trace: compactTrace(run.trace) }
+      });
     } else if (result.canceled) {
       const partial = activeChat?.text ?? "";
-      finalizeAssistant(partial || "_(stopped)_", { persist: Boolean(partial.trim()) });
+      finalizeAssistant(partial || "_(stopped)_", { persist: Boolean(partial.trim()), meta: { ...base, stopReason: "canceled" } });
     } else {
-      finalizeAssistant(result.content, { persist: true });
+      finalizeAssistant(result.content, { persist: true, meta: base });
     }
   } catch (error) {
     // Keep whatever partial answer already streamed in (like the cancel path)
@@ -2409,14 +2945,86 @@ async function sendChat() {
     const partial = activeChat?.text ?? "";
     const notice = `⚠️ ${errMessage(error)}`;
     const hasPartial = Boolean(partial.trim());
+    if (activeChat?.mode === "agent") renderTimeline(bubble, timelineFromTrace(activeChat.trace), { running: false, stopReason: "error" });
     // Keep the partial answer in the transcript (without the error notice) so a
     // follow-up question does not silently lose the turn the model half-answered.
     finalizeAssistant(hasPartial ? `${partial}\n\n${notice}` : notice, {
       persist: hasPartial,
       error: true,
-      persistContent: partial
+      persistContent: partial,
+      meta: { mode, model: settings.model, stopReason: "error" }
     });
   }
+}
+
+async function sendChat() {
+  if (activeChat) return;
+  const raw = elements.chatInput.value.trim();
+  if (!raw) return;
+  let content = raw;
+  let mode = chatMode;
+  let command: string | undefined;
+  const parsed = parseSlashCommand(raw);
+  if (parsed) {
+    if (parsed.command.action) {
+      clearComposer();
+      runSlashAction(parsed.command.action);
+      return;
+    }
+    content = parsed.prompt;
+    mode = parsed.command.mode ?? chatMode;
+    command = parsed.command.name;
+  }
+  if (editingIndex != null) {
+    chatMessages.splice(editingIndex);
+    cancelEdit();
+    renderThread();
+  }
+  clearComposer();
+  await sendMessage(content, mode, command);
+}
+
+// Re-ask the most recent question: the last exchange is dropped from both the
+// transcript and the DOM so the retry is a clean second attempt rather than a
+// follow-up that references an answer the user rejected.
+async function regenerateLast(errorBubble?: HTMLElement) {
+  if (activeChat) return;
+  let index = -1;
+  for (let i = chatMessages.length - 1; i >= 0; i--) {
+    if (chatMessages[i].role === "user") { index = i; break; }
+  }
+  if (index < 0) return;
+  const question = chatMessages[index];
+  chatMessages.splice(index);
+  errorBubble?.remove();
+  touchThread();
+  renderThread();
+  await sendMessage(question.content, question.meta?.mode ?? chatMode, question.meta?.command);
+}
+
+function beginEdit(index: number) {
+  if (activeChat || chatMessages[index]?.role !== "user") return;
+  editingIndex = index;
+  elements.chatInput.value = chatMessages[index].content;
+  elements.editBanner.hidden = false;
+  elements.chatMessages.querySelectorAll<HTMLElement>(".message").forEach((el, i) => el.classList.toggle("superseded", i >= index));
+  renderSuggestions();
+  autoGrowChatInput();
+  elements.chatInput.focus();
+}
+
+function cancelEdit() {
+  if (editingIndex == null) return;
+  editingIndex = null;
+  elements.editBanner.hidden = true;
+  elements.chatMessages.querySelectorAll(".message.superseded").forEach((el) => el.classList.remove("superseded"));
+  renderSuggestions();
+}
+
+function clearComposer() {
+  elements.chatInput.value = "";
+  closeSlashMenu();
+  autoGrowChatInput();
 }
 
 async function stopChat() {
@@ -2431,72 +3039,134 @@ async function stopChat() {
   }
 }
 
-function clearChat() {
-  if (activeChat) return;
-  chatMessages.length = 0;
-  retainedAgentRuns.length = 0;
-  void window.dstoreqc.clearAiEvidence();
-  elements.chatMessages.innerHTML = "";
-  renderChatWelcome();
-  saveChatTranscript();
+// ---- Slash commands -------------------------------------------------------------
+function runSlashAction(action: SlashAction) {
+  if (action === "new") newThread();
+  else if (action === "export") void exportChat();
+  else if (action === "mode-agent") setChatMode("agent");
+  else if (action === "mode-chat") setChatMode("chat");
 }
 
-// --- Transcript persistence and export ---
-// The transcript is the researcher's record of how a result was interpreted, so it
-// survives a reload rather than being discarded with the window.
-// Keep the transcript accessible in profiles created before the rename.
-const CHAT_STORAGE_KEY = "dbgps.chatTranscript";
-const MAX_STORED_MESSAGES = 200;
-
-function saveChatTranscript() {
-  try {
-    const recent = chatMessages.slice(-MAX_STORED_MESSAGES);
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(recent));
-  } catch {
-    /* quota exceeded or storage disabled: the in-memory transcript still works */
-  }
+function renderSlashMenu() {
+  elements.slashMenu.innerHTML = slashMatches.map((command, i) =>
+    `<div class="slash-item${i === slashIndex ? " active" : ""}" role="option" aria-selected="${i === slashIndex}" data-slash-index="${i}">` +
+    `<span class="slash-name">/${escapeHtml(command.name)}</span>` +
+    `<span class="slash-desc">${escapeHtml(command.description)}</span>` +
+    `${command.mode === "agent" ? '<span class="slash-tag">Agent</span>' : command.action ? '<span class="slash-tag muted">Action</span>' : ""}</div>`
+  ).join("");
+  elements.slashMenu.querySelector(".slash-item.active")?.scrollIntoView({ block: "nearest" });
 }
 
-function restoreChatTranscript() {
-  let stored: unknown;
-  try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-    stored = raw ? JSON.parse(raw) : null;
-  } catch {
-    stored = null;
-  }
-
-  const restored: ChatMessage[] = [];
-  if (Array.isArray(stored)) {
-    for (const entry of stored) {
-      const role = (entry as ChatMessage)?.role === "assistant" ? "assistant" : "user";
-      const content = typeof (entry as ChatMessage)?.content === "string" ? (entry as ChatMessage).content : "";
-      // Older transcripts have no ts; they simply render without a timestamp.
-      const rawTs = Number((entry as ChatMessage)?.ts);
-      const ts = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : undefined;
-      if (content.trim()) restored.push(ts ? { role, content, ts } : { role, content });
-    }
-  }
-  if (!restored.length) {
-    renderChatWelcome();
+function updateSlashMenu() {
+  slashMatches = activeChat ? [] : matchSlashCommands(elements.chatInput.value);
+  if (!slashMatches.length) {
+    closeSlashMenu();
     return;
   }
-
-  chatMessages.push(...restored);
-  removeChatWelcome();
-  for (const message of restored) {
-    const { bubble, body } = createMessageBubble(message.role);
-    if (message.role === "user") body.textContent = message.content;
-    else body.innerHTML = renderMarkdownToHtml(message.content);
-    attachMessageActions(bubble, message.content, { ts: message.ts });
-  }
-  scrollChatToBottom();
+  slashIndex = Math.min(slashIndex, slashMatches.length - 1);
+  elements.slashMenu.hidden = false;
+  renderSlashMenu();
 }
 
+function closeSlashMenu() {
+  slashMatches = [];
+  slashIndex = 0;
+  elements.slashMenu.hidden = true;
+}
+
+function pickSlash(index: number, sendNow: boolean) {
+  const command = slashMatches[index];
+  if (!command) return;
+  if (command.action || sendNow) {
+    elements.chatInput.value = `/${command.name}`;
+    void sendChat();
+    return;
+  }
+  elements.chatInput.value = `/${command.name} `;
+  closeSlashMenu();
+  elements.chatInput.focus();
+}
+
+// ---- Panel layout -------------------------------------------------------------------
+function applyPanelLayout() {
+  elements.layout.style.setProperty("--chat-width", `${appSettings.chatWidth}px`);
+  elements.layout.classList.toggle("chat-collapsed", appSettings.chatCollapsed);
+  elements.layout.classList.toggle("chat-expanded", appSettings.chatExpanded && !appSettings.chatCollapsed);
+  elements.chatRail.hidden = !appSettings.chatCollapsed;
+  elements.expandChatButton.setAttribute("aria-pressed", String(appSettings.chatExpanded));
+  elements.expandChatButton.title = appSettings.chatExpanded ? "Restore panel width" : "Widen panel";
+  elements.expandChatButton.innerHTML = `<i data-lucide="${appSettings.chatExpanded ? "minimize-2" : "maximize-2"}"></i>`;
+  if (!appSettings.chatCollapsed) {
+    unseenReplies = 0;
+    elements.chatRailBadge.hidden = true;
+  }
+  renderIcons();
+}
+
+function setPanelState(patch: Partial<Pick<AppSettings, "chatCollapsed" | "chatExpanded" | "chatWidth">>) {
+  Object.assign(appSettings, patch);
+  saveSettings();
+  applyPanelLayout();
+}
+
+function openChatPanel() {
+  if (appSettings.chatCollapsed) setPanelState({ chatCollapsed: false });
+}
+
+function clampChatWidth(width: number) {
+  const layoutWidth = elements.layout.clientWidth || window.innerWidth;
+  return Math.round(Math.min(MAX_CHAT_WIDTH, Math.max(MIN_CHAT_WIDTH, Math.min(width, layoutWidth - 560))));
+}
+
+function startChatResize(event: PointerEvent) {
+  if (appSettings.chatCollapsed) return;
+  event.preventDefault();
+  const resizer = elements.chatResizer;
+  resizer.setPointerCapture(event.pointerId);
+  elements.layout.classList.add("resizing");
+  if (appSettings.chatExpanded) {
+    appSettings.chatExpanded = false;
+    applyPanelLayout();
+  }
+  const right = elements.chatPanel.getBoundingClientRect().right;
+  const move = (e: PointerEvent) => {
+    appSettings.chatWidth = clampChatWidth(right - e.clientX);
+    elements.layout.style.setProperty("--chat-width", `${appSettings.chatWidth}px`);
+  };
+  const end = () => {
+    resizer.removeEventListener("pointermove", move);
+    resizer.removeEventListener("pointerup", end);
+    resizer.removeEventListener("pointercancel", end);
+    elements.layout.classList.remove("resizing");
+    saveSettings();
+  };
+  resizer.addEventListener("pointermove", move);
+  resizer.addEventListener("pointerup", end);
+  resizer.addEventListener("pointercancel", end);
+}
+
+// ---- Export -------------------------------------------------------------------------
 function chatTranscriptMarkdown(): string {
-  const lines = [`# DStoreQC AI conversation`, "", `_Exported ${new Date().toLocaleString()}_`, ""];
+  const thread = activeThread();
+  const lines = [`# ${thread.title || "DStoreQC conversation"}`, "", `_Exported ${new Date().toLocaleString()} from DStoreQC_`, ""];
   for (const message of chatMessages) {
-    lines.push(message.role === "user" ? "## Question" : "## Assistant", "", message.content, "");
+    if (message.role === "user") {
+      const tags = [message.meta?.command ? `/${message.meta.command}` : "", message.meta?.mode === "agent" ? "agent" : "", message.meta?.contextLabel ? `context: ${message.meta.contextLabel}` : ""].filter(Boolean);
+      lines.push(`## Question${tags.length ? ` (${tags.join(", ")})` : ""}`, "", message.content, "");
+      continue;
+    }
+    const header = [message.meta?.mode === "agent" ? "Agent" : "Assistant", message.meta?.model].filter(Boolean).join(" · ");
+    lines.push(`## ${header}`, "");
+    const trace = message.meta?.trace;
+    if (trace?.length) {
+      lines.push(`Evidence steps (snapshot \`${message.meta?.snapshotId || "n/a"}\`):`, "");
+      trace.forEach((item, i) => {
+        const call = describeToolCall(item.name, item.arguments);
+        lines.push(`${i + 1}. **${call.title}** — ${call.detail}${item.status === "error" ? " (failed)" : ""}${item.facts?.length ? `: ${item.facts.join("; ")}` : ""}`);
+      });
+      lines.push("");
+    }
+    lines.push(message.content, "");
   }
   return lines.join("\n");
 }
@@ -2561,22 +3231,141 @@ elements.resultView.addEventListener("click", (event) => {
     if (latestResult?.type === "sequence") renderSequenceResult(latestResult);
   }
 });
-elements.sendChatButton.addEventListener("click", sendChat);
+elements.chatComposer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void sendChat();
+});
 elements.stopChatButton.addEventListener("click", stopChat);
-elements.clearChatButton.addEventListener("click", clearChat);
+elements.newThreadButton.addEventListener("click", newThread);
 elements.exportChatButton.addEventListener("click", () => { void exportChat(); });
+elements.threadsButton.addEventListener("click", () => {
+  if (elements.threadsDrawer.hidden) openThreadsDrawer();
+  else closeThreadsDrawer();
+});
+elements.threadSearchInput.addEventListener("input", renderThreadList);
+elements.threadSearchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeThreadsDrawer();
+});
+let pendingThreadDelete: string | null = null;
+elements.threadList.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement;
+  const open = target.closest<HTMLButtonElement>("[data-thread-open]");
+  if (open?.dataset.threadOpen) {
+    switchThread(open.dataset.threadOpen);
+    return;
+  }
+  const remove = target.closest<HTMLButtonElement>("[data-thread-delete]");
+  const id = remove?.dataset.threadDelete;
+  if (!remove || !id) return;
+  // Two-step delete: the first click arms the button, a second confirms.
+  if (pendingThreadDelete === id) {
+    pendingThreadDelete = null;
+    deleteThread(id);
+    return;
+  }
+  pendingThreadDelete = id;
+  remove.classList.add("armed");
+  remove.title = "Click again to delete";
+  setTimeout(() => {
+    if (pendingThreadDelete !== id) return;
+    pendingThreadDelete = null;
+    remove.classList.remove("armed");
+    remove.title = "Delete conversation";
+  }, 2500);
+});
+elements.expandChatButton.addEventListener("click", () => setPanelState({ chatExpanded: !appSettings.chatExpanded }));
+elements.collapseChatButton.addEventListener("click", () => setPanelState({ chatCollapsed: true }));
+elements.chatRail.addEventListener("click", () => {
+  setPanelState({ chatCollapsed: false });
+  elements.chatInput.focus();
+});
+elements.chatResizer.addEventListener("pointerdown", startChatResize);
+elements.chatResizer.addEventListener("dblclick", () => setPanelState({ chatWidth: DEFAULT_CHAT_WIDTH, chatExpanded: false }));
+elements.chatResizer.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const delta = event.key === "ArrowLeft" ? 24 : -24;
+  setPanelState({ chatWidth: clampChatWidth(appSettings.chatWidth + delta), chatExpanded: false });
+});
+document.querySelectorAll<HTMLButtonElement>("[data-chat-mode]").forEach((button) => {
+  button.addEventListener("click", () => setChatMode(button.dataset.chatMode === "agent" ? "agent" : "chat"));
+});
+elements.capabilitiesButton.addEventListener("click", () => toggleCapabilities());
+document.addEventListener("pointerdown", (event) => {
+  if (elements.agentCapabilities.hidden) return;
+  const target = event.target as Node;
+  if (!elements.agentCapabilities.contains(target) && !elements.capabilitiesButton.contains(target)) toggleCapabilities(false);
+});
+elements.chatContextChip.addEventListener("click", () => {
+  contextEnabled = !contextEnabled;
+  updateChatContextChip();
+});
+elements.contextPinButton.addEventListener("click", togglePinnedContext);
+elements.contextPreviewButton.addEventListener("click", openContextDialog);
+elements.closeContextDialogButton.addEventListener("click", closeContextDialog);
+elements.contextDialog.addEventListener("click", (event) => {
+  if (event.target === elements.contextDialog) closeContextDialog();
+});
+elements.cancelEditButton.addEventListener("click", () => {
+  cancelEdit();
+  clearComposer();
+});
+
+function handleSuggestionClick(event: Event) {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-suggest-prompt]");
+  if (!button?.dataset.suggestPrompt || activeChat) return false;
+  const mode = button.dataset.suggestMode === "agent" ? "agent" : button.dataset.suggestMode === "chat" ? "chat" : chatMode;
+  void sendMessage(button.dataset.suggestPrompt, mode);
+  return true;
+}
+elements.chatSuggestions.addEventListener("click", handleSuggestionClick);
 elements.chatMessages.addEventListener("click", (event) => {
-  const suggestion = (event.target as HTMLElement).closest<HTMLButtonElement>(".chat-suggestion");
-  if (suggestion?.dataset.chatSuggest) {
-    if (activeChat) return;
-    elements.chatInput.value = suggestion.dataset.chatSuggest;
-    autoGrowChatInput();
-    void sendChat();
+  if (handleSuggestionClick(event)) return;
+  const target = event.target as HTMLElement;
+  const summary = target.closest<HTMLElement>(".steps-summary");
+  if (summary) {
+    const container = summary.closest<HTMLElement>(".agent-steps");
+    if (container) toggleTimeline(container);
+    return;
+  }
+  const record = target.closest<HTMLElement>("[data-open-record]");
+  if (record?.dataset.openRecord) {
+    openBatchRecord(Number(record.dataset.openRecord));
+    return;
+  }
+  const kmer = target.closest<HTMLElement>("[data-open-kmer]");
+  if (kmer?.dataset.openKmer) {
+    openInInteractive(kmer.dataset.openKmer);
+    return;
+  }
+  const dna = target.closest<HTMLElement>(".dna-link");
+  if (dna?.dataset.dna) {
+    openInInteractive(dna.dataset.dna);
+    return;
+  }
+  const evidence = target.closest<HTMLElement>("[data-step-evidence]");
+  if (evidence?.dataset.stepEvidence) {
+    const pre = Array.from(evidence.closest(".step-main")?.querySelectorAll<HTMLElement>(".step-evidence") || [])
+      .find((el) => el.dataset.callId === evidence.dataset.stepEvidence);
+    if (pre) pre.hidden = !pre.hidden;
     return;
   }
   handleMarkdownCopyClick(event);
 });
-restoreChatTranscript();
+elements.chatMessages.addEventListener("keydown", (event) => {
+  const dna = (event.target as HTMLElement).closest<HTMLElement>(".dna-link");
+  if (dna?.dataset.dna && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    openInInteractive(dna.dataset.dna);
+  }
+});
+elements.slashMenu.addEventListener("mousedown", (event) => {
+  // mousedown (not click) so the textarea keeps focus.
+  const item = (event.target as HTMLElement).closest<HTMLElement>("[data-slash-index]");
+  if (!item) return;
+  event.preventDefault();
+  pickSlash(Number(item.dataset.slashIndex), true);
+});
 
 // Live token stream: append each delta to the in-flight assistant bubble (or the
 // report's narrative element) and re-render its Markdown on the next animation frame.
@@ -2594,11 +3383,18 @@ window.dstoreqc.onAiChatChunk((chunk) => {
 });
 window.dstoreqc.onAiTool(({ id, trace }) => {
   if (!activeChat || activeChat.id !== id) return;
+  const pinned = isChatPinnedToBottom(120);
   const existing = activeChat.trace.findIndex((item) => item.callId === trace.callId);
   if (existing < 0) activeChat.trace.push(trace);
   else activeChat.trace[existing] = trace;
-  renderAgentTrace(activeChat.bubble, activeChat.trace);
-  scrollChatToBottom();
+  renderTimeline(activeChat.bubble, timelineFromTrace(activeChat.trace), { running: true });
+  updateRunbar();
+  if (pinned) scrollChatToBottom();
+});
+window.dstoreqc.onAiProgress(({ id, progress }) => {
+  if (!activeChat || activeChat.id !== id) return;
+  activeChat.progress = progress;
+  updateRunbar();
 });
 elements.settingsButton.addEventListener("click", () => openSettings("providers"));
 elements.saveSettingsButton.addEventListener("click", commitSettings);
@@ -2655,10 +3451,6 @@ elements.chatModelSelect.addEventListener("change", () => {
   saveSettings();
   renderSettings();
 });
-elements.agentToolsToggle.addEventListener("change", () => {
-  appSettings.agentTools = elements.agentToolsToggle.checked;
-  saveSettings();
-});
 elements.modelAssignmentList.addEventListener("change", (event) => {
   const select = event.target as HTMLSelectElement;
   const providerId = select.dataset.modelAssignment as ProviderId | undefined;
@@ -2705,22 +3497,42 @@ elements.queryInput.addEventListener("keydown", (event) => {
 });
 
 elements.chatInput.addEventListener("keydown", (event) => {
-  // Enter or Cmd/Ctrl+Enter sends; Shift+Enter inserts a newline. The composing
-  // guard keeps IME confirmation Enter from firing a send.
-  if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.isComposing) {
+  if (event.isComposing) return;
+  // Command menu navigation takes precedence while it is open.
+  if (!elements.slashMenu.hidden && slashMatches.length) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      slashIndex = (slashIndex + (event.key === "ArrowDown" ? 1 : slashMatches.length - 1)) % slashMatches.length;
+      renderSlashMenu();
+      return;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      pickSlash(slashIndex, event.key === "Enter");
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSlashMenu();
+      return;
+    }
+  }
+  // Enter or Cmd/Ctrl+Enter sends; Shift+Enter inserts a newline.
+  if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    sendChat();
+    void sendChat();
     return;
   }
-  if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
-    event.preventDefault();
-    sendChat();
-    return;
-  }
-  // Esc stops a running generation without reaching for the mouse.
-  if (event.key === "Escape" && activeChat) {
-    event.preventDefault();
-    void stopChat();
+  if (event.key === "Escape") {
+    // Esc stops a running generation, else leaves edit mode.
+    if (activeChat) {
+      event.preventDefault();
+      void stopChat();
+    } else if (editingIndex != null) {
+      event.preventDefault();
+      cancelEdit();
+      clearComposer();
+    }
   }
 });
 
@@ -2731,7 +3543,32 @@ function autoGrowChatInput() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
 }
-elements.chatInput.addEventListener("input", autoGrowChatInput);
+elements.chatInput.addEventListener("input", () => {
+  autoGrowChatInput();
+  updateSlashMenu();
+});
+
+// App-wide shortcuts for the agent panel.
+document.addEventListener("keydown", (event) => {
+  const mod = event.metaKey || event.ctrlKey;
+  const key = event.key.toLowerCase();
+  if (mod && !event.shiftKey && key === "j") {
+    event.preventDefault();
+    setPanelState({ chatCollapsed: !appSettings.chatCollapsed });
+    if (!appSettings.chatCollapsed) elements.chatInput.focus();
+  } else if (mod && !event.shiftKey && key === "k") {
+    event.preventDefault();
+    openChatPanel();
+    elements.chatInput.focus();
+  } else if (mod && event.shiftKey && key === "o") {
+    event.preventDefault();
+    newThread();
+  } else if (event.key === "Escape") {
+    if (!elements.contextDialog.hidden) closeContextDialog();
+    else if (!elements.threadsDrawer.hidden) closeThreadsDrawer();
+    else if (!elements.agentCapabilities.hidden) toggleCapabilities(false);
+  }
+});
 
 window.dstoreqc.onAnalyzerEvent((event) => {
   const payload = event as { kind?: string; line?: string; code?: number | null; done?: number; total?: number };
@@ -3714,7 +4551,10 @@ ui.reportExportMdButton.addEventListener("click", () => exportReport("md"));
 
 loadSettings();
 renderSettings();
-elements.agentToolsToggle.checked = Boolean(appSettings.agentTools);
+setChatMode(appSettings.agentTools ? "agent" : "chat");
+applyPanelLayout();
+loadThreads();
+updateChatContextChip();
 syncBatchPrimerInputs();
 updateQueryModeControls();
 renderFileList();

@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { runReadOnlyAgent, executeAgentTool, compactAgentContext, boundedAgentMessages, AGENT_LIMITS } = require("../dist/agent.js");
+const { runReadOnlyAgent, executeAgentTool, compactAgentContext, boundedAgentMessages, agentToolAvailability, AGENT_TOOLS, AGENT_LIMITS } = require("../dist/agent.js");
 const { AgentEvidenceStore } = require("../dist/agent-evidence.js");
 const { AnalyzerQueryQueue, validateReadOnlyCommand } = require("../dist/analyzer-queue.js");
 
@@ -233,4 +233,46 @@ test("write failure settles all pending FIFO work", async () => {
 test("generic desktop queries cannot inject commands or mutate the read index", () => {
   for (const command of ["summary\nexit", "summary\raddFile secret", "addFile anything", "exit", "batch /etc/passwd", "summary\0"]) assert.throws(() => validateReadOnlyCommand(command));
   for (const command of ["summary", "sequence ACGT", "kmer ACG 1 1", "index 42 31 1 1"]) assert.doesNotThrow(() => validateReadOnlyCommand(command));
+});
+
+test("progress reports each model turn with the tool count before the request", async () => {
+  const progress = [];
+  let turns = 0;
+  const result = await run(async () => (++turns === 1 ? call("get_analysis_summary") : { text: "done", calls: [], continuation: {} }), {
+    onProgress: (event) => progress.push(event)
+  });
+  assert.equal(result.stopReason, "completed");
+  assert.deepEqual(progress, [
+    { phase: "model", modelTurns: 1, toolCalls: 0, finalTurn: false },
+    { phase: "model", modelTurns: 2, toolCalls: 1, finalTurn: false }
+  ]);
+});
+
+test("evidence status exposes counts only and drives per-tool availability", () => {
+  const store = new AgentEvidenceStore();
+  const empty = store.status();
+  assert.equal(empty.datasetVersion, null);
+  assert.ok(agentToolAvailability(empty).every((tool) => !tool.available && /Start the kernel/.test(tool.reason)));
+  assert.deepEqual(agentToolAvailability(empty).map((tool) => tool.name), AGENT_TOOLS.map((tool) => tool.name));
+
+  const version = store.activate({ k: 3, threads: 1, readLength: 200 });
+  let byName = Object.fromEntries(agentToolAvailability(store.status()).map((tool) => [tool.name, tool]));
+  assert.equal(byName.get_analysis_summary.available, true);
+  assert.equal(byName.query_kmer.available, true);
+  assert.equal(byName.get_batch_rows.available, false);
+  assert.equal(byName.get_sequence_profile.available, false);
+
+  const rows = [{ index: 0, name: "secret-name", rawLength: 6, analyzedLength: 6, status: "ok", summary: { type: "sequenceSummary", length: 6, k: 3, kmerCount: 4, observed: 3, missing: 1, complete: false, minCoverage: 0, maxCoverage: 3, meanCoverage: 2, maxAdjacentRatio: 1 } }];
+  store.cacheBatch(version, 1, 2, rows, new Map([[0, "AAACCC"]]));
+  const status = store.status();
+  assert.deepEqual(status.batch, { total: 1, complete: 0, incomplete: 1, skipped: 0, errors: 0, cachedProfiles: 1, primerFront: 1, primerBack: 2 });
+  assert.equal(JSON.stringify(status).includes("secret-name"), false);
+  assert.equal(JSON.stringify(status).includes("AAACCC"), false);
+  byName = Object.fromEntries(agentToolAvailability(status).map((tool) => [tool.name, tool]));
+  assert.equal(byName.get_batch_rows.available, true);
+  assert.equal(byName.get_sequence_profile.available, true);
+
+  const reference = agentToolAvailability({ ...status, indexScope: "reference" }).find((tool) => tool.name === "query_kmer");
+  assert.equal(reference.available, false);
+  assert.match(reference.reason, /reference mode/);
 });

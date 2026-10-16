@@ -225,7 +225,7 @@ The Electron desktop app lives in [`desktop/`](desktop). It is organized into fi
 
 | View | Purpose |
 |:---|:---|
-| **Interactive** | Start/stop the `dstoreqc kernel` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees; chat with the AI diagnostician. |
+| **Interactive** | Start/stop the `dstoreqc kernel` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees. |
 | **Batch QC** | Load a reference set (FASTA **or** tab-delimited) and automatically score **every** strand against the loaded sequencing k-mer table — one row per strand showing observed/total k-mers, path completeness, and min/mean/max coverage. Front/back primer regions are trimmed first; click any strand to drill into its full coverage profile, and export the whole table as CSV. Reuses the kernel started in the Interactive tab. |
 | **Cross-links** | Run `dstoreqc links` on a reference library and report cross-link contributions from shared k-mers, with k and minimum-shared-strands controls. |
 | **Seq-Filter** | Run `dstoreqc filter --json` to screen entangled strands; choose k, max cross-links, primer length, and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
@@ -262,11 +262,11 @@ The Settings workspace is organized into four tabs:
 | Tab | Purpose |
 |:---|:---|
 | Providers | Enable providers, configure API keys and base URLs, and refresh the available model catalog for each provider. |
-| Model Selection | Choose the active ChatBox provider, assign one model per enabled provider, and tune temperature and maximum tokens. |
+| Model Selection | Choose the active agent-panel provider, assign one model per enabled provider, and tune temperature and maximum tokens. |
 | Appearance | Switch between Light, Dark, and System styles. |
 | Diagnostics | Configure diagnostics graph display behavior. |
 
-The ChatBox can route diagnostics through these provider definitions:
+The agent panel can route diagnostics through these provider definitions:
 
 | Provider | API shape | Default base URL |
 |:---|:---|:---|
@@ -285,9 +285,25 @@ The ChatBox can route diagnostics through these provider definitions:
 
 Model refresh uses each provider's model-list endpoint where available: OpenAI-compatible providers use `GET /models`, Anthropic uses `GET /models`, and Google uses `GET /models?key=...`. Provider enablement, model assignments, base URLs, temperature, token limits, and appearance settings are stored in local app storage. API keys are stored separately by the main process using Electron `safeStorage` when encryption is available, with a plaintext fallback when unavailable; credential storage is not universally encrypted. Keys are not written to local app storage.
 
+#### Agent panel
+
+The assistant lives in a resizable panel on the right of every view (drag its left edge, double-click to reset, **⌘J** to hide it to a rail, the widen button for a wide layout).
+
+| Feature | Behavior |
+|:---|:---|
+| Conversations | Each question starts or continues a saved conversation. The history drawer lists, searches, switches, and deletes conversations (**⌘⇧O** starts a new one). Up to 30 conversations of 200 messages are kept in local app storage; a pre-thread transcript is migrated into one conversation. |
+| Chat / Agent modes | **Chat** streams a text answer grounded in the attached context. **Agent** lets the model run the bounded read-only tools below. The readiness pill shows whether a read index and Batch QC cache are loaded; click it to see which tools can currently return evidence and why the others cannot. |
+| Context tray | The composer shows the context attached to the next message (the active view's latest result). Click the chip to detach it, pin it to keep it while switching views, or preview the exact JSON payload. |
+| Evidence timeline | Agent answers show each tool call as a step with its arguments in plain terms, duration, key facts, a coverage sparkline for profile slices, and the raw evidence on request. A run bar shows the current step, model turn, tool budget, and deadline. |
+| Jump to data | Timeline steps link to the Batch QC row they measured (opening its coverage profile) or to Interactive for a queried k-mer. Pure-DNA code spans in answers open in Interactive as a k-mer or sequence-path query. These targets come from tool arguments and results, not from the model's prose. |
+| Commands | Type `/` for commands: `/triage`, `/summary` (agent), `/explain`, `/next`, `/metrics`, `/methods` (chat), and `/agent`, `/chat`, `/new`, `/export`. Text after a command is appended as extra focus. Suggested follow-ups adapt to the loaded index, batch, and active view. |
+| Message actions | Copy any message, edit and resend an earlier question (later messages are replaced), regenerate the latest answer, and export an agent answer's full evidence record as JSON. Conversations export to Markdown with each agent answer's evidence steps. |
+
+Saved conversations keep each agent answer's compact step summary (tool, arguments, status, duration, facts) but not evidence payloads; those stay in memory for the session and in the explicit JSON export.
+
 #### Bounded read-only AI agent
 
-ChatBox defaults to ordinary streaming text chat. Enabling **Read-only tools** opts the current request into native function calling through the selected provider. The model can select an allowlisted query, receive deterministic evidence, and continue to an answer or another bounded query. Models/endpoints must support their provider's function-calling protocol; unsupported or malformed responses fail explicitly rather than being interpreted as executable text.
+The panel defaults to ordinary streaming text chat. **Agent** mode opts each request into native function calling through the selected provider. The model can select an allowlisted query, receive deterministic evidence, and continue to an answer or another bounded query. Models/endpoints must support their provider's function-calling protocol; unsupported or malformed responses fail explicitly rather than being interpreted as executable text.
 
 | Tool | Available evidence |
 |:---|:---|
@@ -300,7 +316,7 @@ The main process validates exact argument fields, integer ranges, DNA strings, a
 
 Per request, limits are six tool calls, five model turns, 120 seconds, 4,096 output tokens per model turn, 4,096 bases per cached profile, 128 coverage positions per page, 25 batch rows per page, and neighborhood depth two. History, initial context, and each tool result have respective 48,000-, 12,000-, and 24,000-UTF-16-unit budgets. Provider requests have a separate 256,000-unit serialized-body cap and 1-MiB response cap. These are application limits, not a guarantee of low total RAM: the full read index remains unchanged.
 
-The cache holds at most 250,000 batch rows and 40 million eligible sequence bases. Profiles outside those limits require manual selection. Each turn records snapshot/version identifiers, supplied context and omissions, effective model settings, tool arguments/results, timestamps, and completion status. Eight recent records are retained per window for budgeted follow-up context; this is not a durable research archive. Expand the tool-call record to inspect it and use its download control for an explicit JSON export. Export records omit API keys and retain only the endpoint origin, not a full URL or provider-private reasoning continuation.
+The cache holds at most 250,000 batch rows and 40 million eligible sequence bases. Profiles outside those limits require manual selection. Each turn records snapshot/version identifiers, supplied context and omissions, effective model settings, tool arguments/results, timestamps, and completion status. Eight recent records are retained per window for budgeted follow-up context; this is not a durable research archive. Expand the evidence timeline to inspect it and use the message's evidence export for an explicit JSON record. Export records omit API keys and retain only the endpoint origin, not a full URL or provider-private reasoning continuation.
 
 Stop cancels provider work and subsequent agent dispatch. A query already written to the C kernel is drained without adopting its result or shifting FIFO attribution; it does not interrupt C computation. A query timeout or uncertain write stops that kernel session and rejects all queued requests. Restarting, stopping, adding reads, or replacing the batch snapshot invalidates active agent requests. Report interpretation remains a separate text-only request, now bound to its originating report and canceled when a new report starts.
 

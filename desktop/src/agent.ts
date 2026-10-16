@@ -1,6 +1,6 @@
 import type {
-  AgentProvider, AgentProviderSettings, AgentProviderTurn, AgentRun, AgentSnapshot,
-  AgentToolDefinition, AgentToolTrace
+  AgentEvidenceStatus, AgentProgress, AgentProvider, AgentProviderSettings, AgentProviderTurn, AgentRun, AgentSnapshot,
+  AgentToolAvailability, AgentToolDefinition, AgentToolTrace
 } from "./agent-types";
 
 export const AGENT_LIMITS = Object.freeze({
@@ -70,6 +70,34 @@ export const AGENT_SYSTEM_PROMPT = [
   "Counts saturate at 16383 in the analyzer; neighborhood edges arise from overlap and membership. Preserve primer, cutoff, saturation, and exactness scopes.",
   "At most six tool calls and five model turns are available. Give concise Markdown; do not present internal reasoning or claim an unperformed action occurred."
 ].join(" ");
+
+// Which allowlisted tools can return evidence against the current store state.
+// The model still sees every tool (the provider schema is fixed); this only lets
+// the UI say up front which questions are answerable without a failed call.
+export function agentToolAvailability(status: AgentEvidenceStatus): AgentToolAvailability[] {
+  const loaded = Boolean(status.datasetVersion);
+  const noIndex = "Start the kernel in Interactive to load a read index.";
+  const reference = status.indexScope === "reference";
+  return AGENT_TOOLS.map(({ name }) => {
+    if (!loaded) return { name, available: false, reason: noIndex };
+    switch (name) {
+      case "get_sequence_profile":
+        return status.batch?.cachedProfiles || status.selectedSequence
+          ? { name, available: true }
+          : { name, available: false, reason: "Run Batch QC or a Sequence path query first." };
+      case "query_kmer":
+        return reference
+          ? { name, available: false, reason: "Graph k-mer queries are unavailable in reference mode." }
+          : { name, available: true };
+      case "get_batch_rows":
+        return status.batch
+          ? { name, available: true }
+          : { name, available: false, reason: "Run Batch QC to cache per-strand rows." };
+      default:
+        return { name, available: true };
+    }
+  });
+}
 
 export interface AgentBackend {
   assertCurrent(): void;
@@ -227,6 +255,7 @@ export async function runReadOnlyAgent(options: {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   signal: AbortSignal;
   onTrace?: (trace: AgentToolTrace) => void;
+  onProgress?: (progress: AgentProgress) => void;
 }): Promise<AgentRun> {
   const { snapshot, backend, provider, signal } = options;
   const settings = { ...options.settings, maxTokens: Math.max(128, Math.min(AGENT_LIMITS.outputTokens, Math.trunc(options.settings.maxTokens))) };
@@ -246,6 +275,7 @@ export async function runReadOnlyAgent(options: {
       check(signal, backend);
       const finalTurn = turn === AGENT_LIMITS.modelTurns - 1 || run.trace.length >= AGENT_LIMITS.toolCalls;
       run.modelTurns++;
+      options.onProgress?.({ phase: "model", modelTurns: run.modelTurns, toolCalls: run.trace.length, finalTurn });
       const reply = await provider({ settings, system: finalTurn ? `${system}\nTool budget exhausted. Answer from already retrieved evidence; do not request another tool.` : system, messages, tools: finalTurn ? [] : AGENT_TOOLS, previous, signal });
       check(signal, backend);
       if (!Array.isArray(reply.calls) || typeof reply.text !== "string") throw new Error("Invalid provider turn.");

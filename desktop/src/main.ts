@@ -7,9 +7,9 @@ import path from "node:path";
 import { parseCombinedReport, parseReferenceResult, filterOutput } from "./reference-results";
 import { AnalyzerQueryQueue, validateReadOnlyCommand } from "./analyzer-queue";
 import { AgentEvidenceStore } from "./agent-evidence";
-import { AGENT_LIMITS, runReadOnlyAgent } from "./agent";
+import { AGENT_LIMITS, agentToolAvailability, runReadOnlyAgent } from "./agent";
 import { requestAgentTurn } from "./agent-providers";
-import type { AgentRun } from "./agent-types";
+import type { AgentRun, AgentStatus } from "./agent-types";
 import { adoptSequenceSummary, analyzerScope, prepareBloomReference, type AnalyzerConfig, type AnalyzerScope, type AnalyzerSummaryResult, type SequenceSummaryResult } from "./analyzer-config";
 
 app.setName("DStoreQC");
@@ -1277,7 +1277,8 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
         snapshot, backend, settings, provider: requestAgentTurn,
         messages: (request.messages || []).map((message) => ({ role: message.role === "assistant" ? "assistant" : "user", content: message.content })),
         signal: controller.signal,
-        onTrace: (trace) => { if (!event.sender.isDestroyed()) event.sender.send("ai:tool", { id, trace }); }
+        onTrace: (trace) => { if (!event.sender.isDestroyed()) event.sender.send("ai:tool", { id, trace }); },
+        onProgress: (progress) => { if (!event.sender.isDestroyed()) event.sender.send("ai:progress", { id, progress }); }
       });
       const retained = agentHistory.get(owner) || [];
       retained.push(agent);
@@ -1303,6 +1304,15 @@ async function aiChat(event: IpcMainInvokeEvent, request: AiChatRequest) {
     if (idleTimer) clearTimeout(idleTimer);
     activeAiStreams.delete(key);
   }
+}
+
+function agentStatus(): AgentStatus {
+  const status = agentEvidence.status();
+  return {
+    ...status,
+    tools: agentToolAvailability(status),
+    limits: { modelTurns: AGENT_LIMITS.modelTurns, toolCalls: AGENT_LIMITS.toolCalls, deadlineMs: AGENT_LIMITS.deadlineMs }
+  };
 }
 
 function cancelAiChat(owner: number, id: string) {
@@ -1842,6 +1852,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle("ai:chat", async (event, request: AiChatRequest) => aiChat(event, request));
   ipcMain.handle("ai:cancel", async (event, id: string) => cancelAiChat(event.sender.id, id));
+  ipcMain.handle("ai:agentStatus", async () => agentStatus());
   ipcMain.handle("ai:clearEvidence", async (event) => { agentHistory.delete(event.sender.id); return { ok: true }; });
   ipcMain.handle("ai:refreshModels", async (_event, request) => refreshProviderModels(request));
 
