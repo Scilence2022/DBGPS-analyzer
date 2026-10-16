@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "../dbgps_core.h"
+#include "../dstoreqc_core.h"
 #include "../vendor/bfc/bbf.h"
 
 static int failures = 0;

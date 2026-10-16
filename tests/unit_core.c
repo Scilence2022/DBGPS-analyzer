@@ -1,4 +1,4 @@
-/* Unit tests for the shared k-mer / hash-table core (dbgps_core.h).
+/* Unit tests for the shared k-mer / hash-table core (dstoreqc_core.h).
  *
  * Built and run by tests/run.sh. These exercise the pure primitives directly,
  * complementing the end-to-end CLI tests in tests/test_cli.py.
@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../dbgps_core.h"
+#include "../dstoreqc_core.h"
 
 static int failures = 0;
 static int checks = 0;

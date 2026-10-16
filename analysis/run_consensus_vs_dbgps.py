@@ -268,7 +268,7 @@ def run_dbgps(
     primer_front: int,
     primer_back: int,
 ) -> tuple[list[dict], dict, float, str]:
-    command = [str(analyzer.resolve()), "-i", "-k", str(k), "-t", str(threads), "-L", str(read_length), str(reads)]
+    command = [str(analyzer.resolve()), "kernel", "-k", str(k), "-t", str(threads), "-L", str(read_length), str(reads)]
     stdin = f"batch {primer_front} {primer_back} {reference}\nexit\n"
     start = time.perf_counter()
     proc = subprocess.run(command, input=stdin, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -298,7 +298,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference", type=Path, default=Path("tests/data/strands.fa"))
     parser.add_argument("--reads", type=Path, default=Path("tests/data/ngs.fa"))
-    parser.add_argument("--analyzer", type=Path, default=Path("./DBGPS-analyzer"))
+    parser.add_argument("--analyzer", type=Path, default=Path("./dstoreqc"))
     parser.add_argument("--outdir", type=Path, default=Path("analysis/results"))
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--threads", type=int, default=3)

@@ -1,8 +1,8 @@
-# DBGPS-analyzer: DNA Information Storage Data Quality Analyzer
+# DStoreQC: DNA Storage Quality Control
 
 A specialized suite of high-performance tools for **data quality analysis in DNA information storage systems**. This repository provides tools to calculate sequencing metrics, detect inter-strand cross-links, and filter out entangled sequences.
 
-This codebase was split out from the original DBGPS DNA information storage encoding/decoding framework, extracting and optimizing the components specifically designed for quality control, coverage analysis, and data filtering.
+DStoreQC is a standalone quality-control tool, distinct from the published DBGPS DNA storage assembly program. This codebase was split out from the original DBGPS DNA information storage encoding/decoding framework, extracting and optimizing the components specifically designed for quality control, coverage analysis, and data filtering.
 
 ---
 
@@ -11,20 +11,21 @@ This codebase was split out from the original DBGPS DNA information storage enco
 2. [Workflow & Theory](#workflow--theory)
 3. [Installation & Building](#installation--building)
 4. [Tool Guides & Usage](#tool-guides--usage)
-   - [DBGPS-analyzer](#dbgps-analyzer)
-   - [DBGPS-links](#dbgps-links)
-   - [DBGPS-seq-filter](#dbgps-seq-filter)
+   - [Analyze and Kernel](#analyze-and-kernel)
+   - [Links](#links)
+   - [Filter](#filter)
 5. [License](#license)
 
 ---
 
 ## Overview of Tools
 
-This project consists of three core C-based command-line utilities:
+This project builds one C executable, **`dstoreqc`**, with `analyze`, `links`,
+`filter`, `kernel`, and `report` subcommands:
 
-1. **`DBGPS-analyzer`** (implemented in [DBGPS-analyzer.c](file:///Users/song/Github-Repos/DBGPS-analyzer/DBGPS-analyzer.c)): Evaluates sequencing datasets against expected target strands, calculating critical quality metrics such as strand recovery rate ($S_m$), k-mer noise ratio ($K_n$), and k-mer dropout rate ($K_d$).
-2. **`DBGPS-links`** (implemented in [DBGPS-links.c](file:///Users/song/Github-Repos/DBGPS-analyzer/DBGPS-links.c)): Detects and counts cross-links between DNA strands to identify repeated patterns and sequence entanglement.
-3. **`DBGPS-seq-filter`** (implemented in [DBGPS-seq-filter.c](file:///Users/song/Github-Repos/DBGPS-analyzer/DBGPS-seq-filter.c)): Screens out and filters entangled or highly cross-linked strands to prepare sequencing data for cleaner assembly.
+1. **`dstoreqc analyze` / `dstoreqc kernel`** (analysis module: [dstoreqc_analyzer.c](dstoreqc_analyzer.c)): Evaluates sequencing datasets against expected target strands, calculating critical quality metrics such as strand recovery rate ($S_m$), k-mer noise ratio ($K_n$), and k-mer dropout rate ($K_d$).
+2. **`dstoreqc links`** (reference module: [dstoreqc_reference.c](dstoreqc_reference.c)): Detects and counts cross-links between DNA strands to identify repeated patterns and sequence entanglement.
+3. **`dstoreqc filter`** (reference module: [dstoreqc_reference.c](dstoreqc_reference.c)): Screens out and filters entangled or highly cross-linked strands to prepare sequencing data for cleaner assembly.
 
 ---
 
@@ -47,27 +48,107 @@ In DNA data storage, errors and bias in synthesis, PCR amplification, and sequen
 - POSIX threads (`pthread`)
 
 ### Building the Software
-Clone this repository and compile using the [Makefile](file:///Users/song/Github-Repos/DBGPS-analyzer/Makefile):
+Clone this repository and compile using the [Makefile](Makefile):
 ```bash
 git clone https://github.com/Scilence2022/DBGPS-analyzer.git
 cd DBGPS-analyzer
 make
 ```
 
-The three tools share their k-mer / hash-table core through [`dbgps_core.h`](file:///Users/song/Github-Repos/DBGPS-analyzer/dbgps_core.h), so the nucleotide tables, invertible hash, k-mer encode/decode, and the saturating-count hash set are defined once.
+`make` builds a single `dstoreqc` executable. Every operation uses a subcommand.
+Use `make -j4` for parallel compilation or `make help` for build targets.
+Object files and generated header dependencies live in `.build/`; changing
+the compiler, flags, or ASan/native settings automatically rebuilds the program.
+For installation, copy `dstoreqc` to a directory on your PATH. The desktop app
+packages the same executable; no links or extra executables are required.
 
-To compile individual tools:
+The shared k-mer / hash-table primitives live in [`dstoreqc_core.h`](dstoreqc_core.h).
+[`dstoreqc_reference.c`](dstoreqc_reference.c) owns the common reference-library
+index used by links and filtering. The analyzer remains a separate module:
+reference counts measure strand membership (one contribution per canonical
+k-mer per record, saturating at 1023), whereas NGS counts measure k-mer
+occurrences (saturating at 16383). These counters are kept separate.
+
+To build the executable directly:
 ```bash
-make DBGPS-analyzer
-make DBGPS-links
-make DBGPS-seq-filter
+make dstoreqc
 ```
 
 ---
 
 ## Tool Guides & Usage
 
-### DBGPS-analyzer
+### Unified CLI
+
+```bash
+./dstoreqc analyze -k 31 reference.fa reads.fq.gz
+./dstoreqc links -k 31 -p 18 reference.fa
+./dstoreqc filter -k 31 -p 18 reference.fa > passed.fa
+./dstoreqc kernel -k 31 reads.fq.gz
+./dstoreqc report -k 31 -p 18 reference.fa reads.fq.gz > report.json
+```
+
+Use `./dstoreqc --help` or `./dstoreqc <command> --help` for options. All commands
+accept FASTA/FASTQ, optionally gzip-compressed. The CLI reference input must be
+FASTA/FASTQ; the desktop app also converts tab-delimited references.
+`analyze`, `links`, and `filter` produce text by default. Use `kernel` to
+start the JSON Lines query protocol, with optional Bloom counting. The operation
+is selected only by its subcommand: there is no executable-name dispatch or
+`-i` mode switch. Use `--` before filenames that start with a dash.
+
+`filter --json` emits counts, `filteredNames`, and `passedFasta` together, so
+callers can display filtered names and save passed sequences from one run.
+`links --json` emits the cross-link total and reference/skip counts.
+The text-mode `filter -s` option cannot be combined with `--json`.
+
+`report` supports **JSON**, **Markdown**, and standalone **HTML** reports.
+JSON remains the default and contains `reference` and `analyzer` fields.
+NGS reads are optional; without them, `analyzer` is `null`. With reads, its
+`rows` contain Sm/Kn/Kd metrics using the analyzer's default coverage and ratio
+cutoffs. Undefined numeric metrics are JSON `null` and appear as `n/a` in
+Markdown and HTML. All three formats use the same analysis results.
+
+```bash
+./dstoreqc report --format markdown -o report.md -k 31 -p 18 reference.fa reads.fq.gz
+./dstoreqc report --format html -o report.html -k 31 -p 18 reference.fa reads.fq.gz
+./dstoreqc report --format json -o report.json -k 31 -p 18 reference.fa reads.fq.gz
+```
+
+`--format md` is an alias for `--format markdown`. Without `-o` / `--output`,
+the report is written to stdout for shell redirection. HTML includes its styles
+and needs no network access. Markdown and HTML include inputs, settings,
+reference/entanglement counts, coverage metrics, filtered names and metric
+definitions. `--include-passed` also includes the original passed FASTA.
+Output files are opened after analysis and rendering succeed; an output path
+that points to a reference or reads input is rejected.
+
+```bash
+# Build the reference index once for cross-links and filtering, without NGS.
+./dstoreqc report -k 8 -p 0 tests/data/links.fa
+
+# Set independent thresholds; include original passed FASTA in the JSON.
+./dstoreqc report --links-threshold 1 --filter-max-links 0 --include-passed \
+  -k 8 -p 0 tests/data/links.fa tests/data/ngs.fa
+```
+
+The `reference` object reports `totalStrands`, `passedCount`, `filteredCount`,
+`skippedCount`, `filteredNames`, `crossLinks`, and the k/primer/threshold settings.
+`--include-passed` adds `passedFasta` to JSON and a FASTA section to Markdown/HTML; scoring ignores primers but FASTA output
+retains each passed record's original sequence. A cross-link total sums `n - 1`
+for each canonical k-mer with strand count `n > linksThreshold`. Filtering rejects
+a record if any of its k-mers has `n - 1 > filterMaxLinks`.
+
+Primer defaults remain **0 bp** for `links` and **18 bp per end** for `filter`
+and `report`. Standalone `analyze` preserves its original untrimmed reference
+behavior. In `report`, `-p` applies to both reference entanglement and the
+reference sequences scored for Sm/Kn/Kd; `-t` and `-L` control NGS counting.
+Records shorter than k after trimming are skipped for entanglement and are
+excluded from `passedCount`. For Sm, all reference records remain in the
+denominator, and unscorable records cannot count as recovered. Accordingly,
+reports using nonzero `-p` may differ from the former desktop report, which
+trimmed reference sequences only for links/filtering.
+
+### Analyze and Kernel
 
 Computes coverage metrics ($S_m$, $K_n$, $K_d$) by comparing a pool of target/designed strands with NGS sequencing files.
 
@@ -79,21 +160,20 @@ Computes coverage metrics ($S_m$, $K_n$, $K_d$) by comparing a pool of target/de
 
 #### Usage
 ```bash
-DBGPS-analyzer [options] <Strand seq file> <NGS files>
-DBGPS-analyzer -i [options] <NGS files>
+dstoreqc analyze [options] <Strand seq file> <NGS files>
+dstoreqc kernel [options] <NGS files>
 ```
 *Supported formats: `.fa`, `.fq`, `.fa.gz`, `.fq.gz`*
 
 #### Options
 | Option | Argument | Description | Default |
 |:---|:---|:---|:---|
-| `-i` | `None` | Start interactive JSON Lines diagnostics kernel mode | `Off` |
 | `-k` | `INT` | k-mer size | `31` |
 | `-t` | `INT` | Number of threads for multi-threading | `3` |
 | `-L` | `INT` | Maximum read length for k-mer counting | `200` |
 | `--bloom` | | Optional exact reference-only counting with a blocked Bloom prefilter; global Noise/Kn unavailable | off |
 | `--bloom-bits` | `INT` | Minimum allocated filter bits per target key (4-64; power-of-two allocation) | `16` |
-| `--bloom-reference` | `FILE` | Reference FASTA/FASTQ required for interactive `-i --bloom`; standalone uses its positional reference | none |
+| `--bloom-reference` | `FILE` | Reference FASTA/FASTQ required for `kernel --bloom`; standalone uses its positional reference | none |
 | `-r` | `FLOAT` | Maximum coverage ratio (0 = no limitation) | `0.0` |
 | `-R` | `FLOAT` | Upper bound for coverage ratio range iteration | `0.0` |
 | `-I` | `FLOAT` | Step size for coverage ratio iteration | `0.20` |
@@ -110,19 +190,22 @@ DBGPS-analyzer -i [options] <NGS files>
 
 #### Interactive Kernel Protocol
 
+`kernel` accepts `-k`, `-t`, `-L`, and the Bloom options. Ratio grids, coverage
+cutoffs and output-prefix options belong to `analyze`.
+
 Interactive mode builds the sequencing k-mer coverage table from one or more NGS files, then accepts one command per line on stdin and writes one JSON object per line on stdout.
 
-Optional low-memory counting: use `DBGPS-analyzer --bloom reference.fa reads.fq.gz`,
-or `DBGPS-analyzer -i --bloom --bloom-reference reference.fa reads.fq.gz` for the
+Optional low-memory counting: use `dstoreqc analyze --bloom reference.fa reads.fq.gz`,
+or `dstoreqc kernel --bloom --bloom-reference reference.fa reads.fq.gz` for the
 kernel. Target coverage, Sm and Kd remain exact up to the existing count cap;
 global Noise/Kn and graph queries are unavailable. Out-of-reference sequence
 queries return errors rather than false dropout. The desktop exposes the same
 opt-in mode before kernel startup. See [Bloom backend selection, scope and validation](docs/bloom-filter.md).
 
 ```bash
-make DBGPS-analyzer
+make dstoreqc
 printf 'summary\nkmer ACGTACGT 2 2\nsequence ACGTACGTACGT\nexit\n' \
-  | ./DBGPS-analyzer -i -k 8 reads.fa
+  | ./dstoreqc kernel -k 8 reads.fa
 ```
 
 Supported commands:
@@ -138,17 +221,22 @@ Supported commands:
 
 ### Electron Desktop App
 
-The Electron desktop app lives in [`desktop/`](file:///Users/song/Github-Repos/DBGPS-analyzer/desktop). It is organized into five top-level views (plus a Settings workspace), all wired to the C tools through the Electron main process:
+The Electron desktop app lives in [`desktop/`](desktop). It is organized into five top-level views (plus a Settings workspace), all wired to the C tools through the Electron main process:
 
 | View | Purpose |
 |:---|:---|
-| **Interactive** | Start/stop the `DBGPS-analyzer` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees; chat with the AI diagnostician. |
+| **Interactive** | Start/stop the `dstoreqc kernel` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees; chat with the AI diagnostician. |
 | **Batch QC** | Load a reference set (FASTA **or** tab-delimited) and automatically score **every** strand against the loaded sequencing k-mer table — one row per strand showing observed/total k-mers, path completeness, and min/mean/max coverage. Front/back primer regions are trimmed first; click any strand to drill into its full coverage profile, and export the whole table as CSV. Reuses the kernel started in the Interactive tab. |
-| **Cross-links** | Run `DBGPS-links` on a FASTA and report the total number of k-mers shared across strands (entanglement), with k and minimum-shared-strands controls. |
-| **Seq-Filter** | Run `DBGPS-seq-filter` to screen entangled strands; choose k, max cross-links, primer length, and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
-| **Report** | Generate a **comprehensive diagnostics report** over a reference strand set: run all three tools (and `DBGPS-analyzer` batch metrics when NGS reads are supplied), with headline metrics, rule-based verdicts, the Sm/Kd/Kn table, cross-link and entanglement summaries, an optional AI interpretation, and one-click export to HTML or Markdown. |
+| **Cross-links** | Run `dstoreqc links` on a reference library and report cross-link contributions from shared k-mers, with k and minimum-shared-strands controls. |
+| **Seq-Filter** | Run `dstoreqc filter --json` to screen entangled strands; choose k, max cross-links, primer length, and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
+| **Report** | Generate a **comprehensive diagnostics report** over a reference strand set: run `dstoreqc report` (including batch metrics when NGS reads are supplied), with headline metrics, rule-based verdicts, the Sm/Kd/Kn table, cross-link and entanglement summaries, an optional AI interpretation, and one-click export to HTML or Markdown. |
 
-The combined report runs the three tools concurrently. `DBGPS-links` and `DBGPS-seq-filter` analyze the reference strands (k-mer entanglement of the designed library); `DBGPS-analyzer` additionally computes strand recovery (Sm), k-mer dropout (Kd), and k-mer noise (Kn) when NGS reads are provided.
+The desktop calls `dstoreqc` subcommands and packages a single executable. Report
+uses one `dstoreqc report` process: cross-links and filtering share one reference
+index, which is freed before optional NGS counting. Seq-Filter uses one
+`dstoreqc filter --json` call for both filtered names and passed FASTA. Report
+applies the chosen primer length to all reference scoring and displays skipped
+records separately from passed and entangled records.
 
 #### Input formats
 
@@ -167,7 +255,7 @@ Every reference picker in the desktop app accepts two formats and auto-detects w
 
 #### Primer trimming
 
-The Batch QC view exposes separate **front** and **back** primer lengths (default **18 bp** each, persisted across sessions). The configured number of bases is removed from each end of every reference strand before it is scored, so adapter/primer regions do not distort coverage or path-completeness. Strands shorter than `k` after trimming are reported as skipped. (`DBGPS-seq-filter` and the Report view keep their own symmetric primer length `-p`.)
+The Batch QC view exposes separate **front** and **back** primer lengths (default **18 bp** each, persisted across sessions). The configured number of bases is removed from each end of every reference strand before it is scored, so adapter/primer regions do not distort coverage or path-completeness. Strands shorter than `k` after trimming are reported as skipped. (`dstoreqc filter` and the Report view keep their own symmetric primer length `-p`.)
 
 The Settings workspace is organized into four tabs:
 
@@ -228,7 +316,7 @@ npm run dev
 To produce a distributable bundle (which packages the prebuilt analyzer binary as an app resource), build the analyzer at the repo root first, then run `electron-builder`:
 
 ```bash
-make DBGPS-analyzer      # from the repo root
+make dstoreqc      # from the repo root
 cd desktop
 npm install
 npm run dist             # outputs to desktop/release/
@@ -236,13 +324,13 @@ npm run dist             # outputs to desktop/release/
 
 ---
 
-### DBGPS-links
+### Links
 
 Analyzes DNA strands in a FASTA dataset to find and count cross-links. A cross-link is defined as a k-mer shared by different strands, indicating sequence overlap or entanglement.
 
 #### Usage
 ```bash
-DBGPS-links [options] <in.fa>
+dstoreqc links [options] <in.fa>
 ```
 
 #### Options
@@ -250,13 +338,14 @@ DBGPS-links [options] <in.fa>
 |:---|:---|:---|:---|
 | `-k` | `INT` | k-mer size | `31` |
 | `-m` | `INT` | Only count k-mers occurring in more than this many strands | `1` |
+| `-p` | `INT` | Primer bases ignored at each end | `0` |
 
 > [!NOTE]
 > It is recommended to remove primers from the sequences before counting cross-links to prevent false positives from shared primer regions.
 
 ---
 
-### DBGPS-seq-filter
+### Filter
 
 A primer-aware filter tool designed to screen out entangled strands from DNA datasets. It identifies and filters out strands that exceed a specified cross-link (shared k-mer) threshold, improving the quality of the sequence pool.
 
@@ -267,7 +356,7 @@ A primer-aware filter tool designed to screen out entangled strands from DNA dat
 
 #### Usage
 ```bash
-DBGPS-seq-filter [options] <in.fa>
+dstoreqc filter [options] <in.fa>
 ```
 
 #### Options
@@ -283,21 +372,22 @@ DBGPS-seq-filter [options] <in.fa>
 ## Development & Testing
 
 The repository ships a test suite covering the shared k-mer core (C unit tests)
-and the three command-line tools end-to-end (Python tests driving the compiled
-binaries, including the interactive kernel protocol).
+and the unified CLI end-to-end (Python tests driving
+the compiled executable, including the interactive kernel, combined reports,
+JSON/Markdown/HTML reports, counter separation, primer trimming, and output-file handling).
 
 ```bash
 make test          # builds with -Wall -Wextra -Werror, runs unit + e2e tests
 ./tests/run.sh     # same thing, invoked directly
 ```
 
-Small deterministic FASTA fixtures live in [`tests/data/`](file:///Users/song/Github-Repos/DBGPS-analyzer/tests/data) and double as runnable examples. Continuous integration ([`.github/workflows/ci.yml`](file:///Users/song/Github-Repos/DBGPS-analyzer/.github/workflows/ci.yml)) builds the tools (warnings as errors), runs the suite, repeats the end-to-end tests under AddressSanitizer, and type-checks and bundles the desktop app on every push and pull request.
+Small deterministic FASTA fixtures live in [`tests/data/`](tests/data) and double as runnable examples. Continuous integration ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds the tools (warnings as errors), runs the suite, repeats the end-to-end tests under AddressSanitizer, and type-checks and bundles the desktop app on every push and pull request.
 
 ---
 
 ## License
 
-This project is licensed under the terms described in the [LICENSE](file:///Users/song/Github-Repos/DBGPS-analyzer/LICENSE) file.
+This project is licensed under the terms described in the [LICENSE](LICENSE) file.
 
 ## Author
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the opt-in reference-target Bloom index.
 
-Run after building DBGPS-analyzer, directly or through tests/run.sh. All input
+Run after building dstoreqc, directly or through tests/run.sh. All input
 and output fixtures are private temporary files; the full index is the oracle
 for existing metrics, with independent canonical counts for reference scope.
 """
@@ -17,7 +17,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-ANALYZER = Path(os.environ.get("DBGPS_TEST_ANALYZER", ROOT / "DBGPS-analyzer"))
+DSTOREQC = Path(os.environ.get("DSTOREQC_TEST_BINARY", ROOT / "dstoreqc"))
 SATURATION = (1 << 14) - 1
 HEADER = "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn"
 REFERENCE_METADATA = {"indexScope", "referenceFile", "targetKmers", "bloom",
@@ -35,9 +35,9 @@ def check(condition, message):
         print(f"  FAIL: {message}")
 
 
-def run(args, stdin=None):
+def run(args, stdin=None, command="analyze"):
     return subprocess.run(
-        [str(ANALYZER), *map(str, args)],
+        [str(DSTOREQC), command, *map(str, args)],
         input=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -99,7 +99,7 @@ def compare_metrics(full, bloom, label):
 
 
 def kernel(args, commands, label):
-    proc = run(["-i", *args], stdin="\n".join([*commands, "exit", ""]))
+    proc = run(args, stdin="\n".join([*commands, "exit", ""]), command="kernel")
     check(proc.returncode == 0, f"{label}: kernel exits 0 (stderr={proc.stderr!r})")
     events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     check(bool(events) and events[0].get("type") == "ready", f"{label}: ready event")
@@ -179,7 +179,7 @@ def mixed_fixture(tmp):
 
 def test_standalone_metrics_and_files():
     print("test_standalone_metrics_and_files")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_") as directory:
         tmp = Path(directory)
         fixture = mixed_fixture(tmp)
         reference, reads = fixture["reference"], fixture["reads"]
@@ -224,7 +224,7 @@ def test_standalone_metrics_and_files():
 
 def test_default_mode_is_unchanged():
     print("test_default_mode_is_unchanged")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_default_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_default_") as directory:
         tmp = Path(directory)
         reference = fasta(tmp / "reference.fa", [("observed", "ACGTACGT"), ("absent", "AAAA")])
         reads = fasta(tmp / "reads.fa", [("target", "ACGTACGT"), ("noise", "CCCC")])
@@ -245,7 +245,7 @@ def test_default_mode_is_unchanged():
 
 def test_kernel_reference_scope_and_add_file():
     print("test_kernel_reference_scope_and_add_file")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_kernel_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_kernel_") as directory:
         fixture = mixed_fixture(Path(directory))
         reference, reads = fixture["reference"], fixture["reads"]
         queries = [fixture["a"], reverse_complement(fixture["a"]), fixture["repeated"],
@@ -285,7 +285,7 @@ def test_kernel_reference_scope_and_add_file():
 
 def test_restricted_queries_and_safe_trimming():
     print("test_restricted_queries_and_safe_trimming")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_queries_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_queries_") as directory:
         tmp = Path(directory)
         fixture = mixed_fixture(tmp)
         reference, reads, a = fixture["reference"], fixture["reads"], fixture["a"]
@@ -353,7 +353,7 @@ def test_restricted_queries_and_safe_trimming():
 
 def test_read_length_and_k_boundaries():
     print("test_read_length_and_k_boundaries")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_lengths_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_lengths_") as directory:
         tmp = Path(directory)
         a = "AACCGGTACGATTCGGAACCTTACGATAGCTCGGATCAGTACCTGGAATCGTACCGTTAGCAGATTC"
         records = [("forward", a), ("reverse", reverse_complement(a)),
@@ -382,7 +382,7 @@ def test_read_length_and_k_boundaries():
 
 def test_low_density_does_not_expand_reference():
     print("test_low_density_does_not_expand_reference")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_membership_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_membership_") as directory:
         tmp = Path(directory)
         # At the minimum density, many distinct off-reference probes exercise
         # the exact membership guard behind the probabilistic prefilter.
@@ -413,7 +413,7 @@ def test_low_density_does_not_expand_reference():
 
 def test_saturation_and_incremental_counting():
     print("test_saturation_and_incremental_counting")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_saturation_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_saturation_") as directory:
         tmp = Path(directory)
         reference = fasta(tmp / "reference.fa", [("hot", "A" * 12), ("cold", "C" * 12),
                                                 ("absent", "ACGTACGT")])
@@ -450,7 +450,7 @@ def test_saturation_and_incremental_counting():
 
 def test_invalid_options_and_references():
     print("test_invalid_options_and_references")
-    with tempfile.TemporaryDirectory(prefix="dbgps_bloom_invalid_") as directory:
+    with tempfile.TemporaryDirectory(prefix="dstoreqc_bloom_invalid_") as directory:
         tmp = Path(directory)
         reference = fasta(tmp / "reference.fa", [("target", "AACCGGTACGATTCGG")])
         reads = fasta(tmp / "reads.fa", [("read", "AACCGGTACGATTCGG")])
@@ -461,26 +461,26 @@ def test_invalid_options_and_references():
         text.write_text("this is not a sequence file\n", encoding="ascii")
         malformed = tmp / "truncated.fq"
         malformed.write_text("@broken\nAACCGGTACGATTCGG\n+\nII\n", encoding="ascii")
-        cases = [("reference without Bloom", ["--bloom-reference", reference, "-k", "8", "-i", reads]),
-                 ("standalone reference without Bloom", ["--bloom-reference", reference, "-k", "8", reference, reads]),
-                 ("bits without Bloom", ["--bloom-bits", "64", "-k", "8", reference, reads]),
-                 ("interactive missing reference", ["--bloom", "-i", "-k", "8", reads]),
-                 ("standalone explicit reference", ["--bloom", "--bloom-reference", reference, "-k", "8", reference, reads])]
+        cases = [("reference without Bloom", "kernel", ["--bloom-reference", reference, "-k", "8", reads]),
+                 ("standalone reference without Bloom", "analyze", ["--bloom-reference", reference, "-k", "8", reference, reads]),
+                 ("bits without Bloom", "analyze", ["--bloom-bits", "64", "-k", "8", reference, reads]),
+                 ("interactive missing reference", "kernel", ["--bloom", "-k", "8", reads]),
+                 ("standalone explicit reference", "analyze", ["--bloom", "--bloom-reference", reference, "-k", "8", reference, reads])]
         for bits in ("3", "65", "0", "-1", "4.5", "sixteen", "16junk", "2147483648", "999999999999999999999999"):
-            cases.append((f"invalid Bloom bits {bits}", ["--bloom", "--bloom-bits", bits, "-k", "8", reference, reads]))
-        cases.extend([("missing bits argument", ["-k", "8", reference, reads, "--bloom", "--bloom-bits"]),
-                      ("missing reference argument", ["-k", "8", "-i", reads, "--bloom", "--bloom-reference"])])
+            cases.append((f"invalid Bloom bits {bits}", "analyze", ["--bloom", "--bloom-bits", bits, "-k", "8", reference, reads]))
+        cases.extend([("missing bits argument", "analyze", ["-k", "8", reference, reads, "--bloom", "--bloom-bits"]),
+                      ("missing reference argument", "kernel", ["-k", "8", reads, "--bloom", "--bloom-reference"])])
         bad_references = [("missing", missing), ("empty", empty), ("not FASTA", text),
                           ("malformed FASTQ", malformed),
                           ("no records", fasta(tmp / "empty_record.fa", [("empty", "")])),
                           ("no k-mers", fasta(tmp / "no_kmers.fa", [("short", "ACG"), ("ambiguous", "N" * 20)]))]
         for label, bad in bad_references:
-            cases.append((f"standalone {label} reference", ["--bloom", "-k", "8", bad, reads]))
-            cases.append((f"interactive {label} reference", ["--bloom", "--bloom-reference", bad, "-i", "-k", "8", reads]))
-        cases.extend([("missing standalone reads", ["--bloom", "-k", "8", reference, missing]),
-                      ("missing interactive reads", ["--bloom", "--bloom-reference", reference, "-i", "-k", "8", missing])])
-        for label, args in cases:
-            proc = run(args, stdin="exit\n")
+            cases.append((f"standalone {label} reference", "analyze", ["--bloom", "-k", "8", bad, reads]))
+            cases.append((f"interactive {label} reference", "kernel", ["--bloom", "--bloom-reference", bad, "-k", "8", reads]))
+        cases.extend([("missing standalone reads", "analyze", ["--bloom", "-k", "8", reference, missing]),
+                      ("missing interactive reads", "kernel", ["--bloom", "--bloom-reference", reference, "-k", "8", missing])])
+        for label, command, args in cases:
+            proc = run(args, stdin="exit\n", command=command)
             check(proc.returncode > 0, f"{label}: rejected without a signal (stderr={proc.stderr!r})")
             check(bool(proc.stderr.strip()), f"{label}: emits a diagnostic")
             check('"type":"ready"' not in proc.stdout and not metric_rows(proc.stdout),
@@ -488,8 +488,8 @@ def test_invalid_options_and_references():
 
 
 def main():
-    if not os.path.isfile(ANALYZER):
-        print(f"ERROR: {ANALYZER} not built. Run `make` first (or use tests/run.sh).")
+    if not os.path.isfile(DSTOREQC):
+        print(f"ERROR: {DSTOREQC} not built. Run `make` first (or use tests/run.sh).")
         return 2
     tests = [test_standalone_metrics_and_files, test_default_mode_is_unchanged,
              test_kernel_reference_scope_and_add_file, test_restricted_queries_and_safe_trimming,

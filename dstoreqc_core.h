@@ -1,20 +1,19 @@
-/* dbgps_core.h - shared k-mer / hash-table core for the DBGPS tools.
+/* dstoreqc_core.h - shared k-mer / hash-table core for DStoreQC.
  *
- * This header centralises the De Bruijn graph primitives that used to be
- * copy-pasted (and slowly diverging) across DBGPS-analyzer.c, DBGPS-links.c
- * and DBGPS-seq-filter.c: the 2-bit nucleotide tables, the invertible integer
- * hash, k-mer encode/decode, and the sharded saturating-count hash set
+ * This header centralises the De Bruijn graph primitives used by the
+ * analyzer and reference-library modules: the 2-bit nucleotide tables, the
+ * invertible integer hash, k-mer encode/decode, and the sharded saturating-count hash set
  * (kc_c4x_t) together with its coverage queries.
  *
  * The number of low "count" bits / hash shards is configurable per tool via
- * DBGPS_KC_BITS (define it before including this header). It defaults to 14.
+ * DSTOREQC_KC_BITS (define it before including this header). It defaults to 14.
  * The analyzer uses 14 (coverage can be high); the link/filter tools use 10.
  *
  * All functions are `static inline` so each tool only pays for what it calls
  * and unused helpers never trigger -Wunused-function under -Werror.
  */
-#ifndef DBGPS_CORE_H
-#define DBGPS_CORE_H
+#ifndef DSTOREQC_CORE_H
+#define DSTOREQC_CORE_H
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -22,29 +21,31 @@
 
 #include "khashl.h" /* hash table */
 
-#ifndef DBGPS_KC_BITS
-#define DBGPS_KC_BITS 14
+#ifndef DSTOREQC_KC_BITS
+#define DSTOREQC_KC_BITS 14
 #endif
 
-#define KC_BITS DBGPS_KC_BITS
+#define KC_BITS DSTOREQC_KC_BITS
 #define KC_MAX ((1 << KC_BITS) - 1)
 #define kc_c4_eq(a, b) ((a) >> KC_BITS == (b) >> KC_BITS) /* low KC_BITS bits = count; high bits = k-mer */
 #define kc_c4_hash(a) ((a) >> KC_BITS)
 
-KHASHL_SET_INIT(, kc_c4_t, kc_c4, uint64_t, kc_c4_hash, kc_c4_eq)
+/* Each module can use a different count-bit layout. Keep generated operations
+ * local so the 10-bit reference table cannot bind to 14-bit analyzer functions. */
+KHASHL_SET_INIT(static inline, kc_c4_t, kc_c4, uint64_t, kc_c4_hash, kc_c4_eq)
 
 #define CALLOC(ptr, len) ((ptr) = (__typeof__(ptr))calloc((len), sizeof(*(ptr))))
 #define MALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc((len) * sizeof(*(ptr))))
 #define REALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), (len) * sizeof(*(ptr))))
 
 #if defined(__GNUC__) || defined(__clang__)
-#define DBGPS_UNUSED __attribute__((unused))
+#define DSTOREQC_UNUSED __attribute__((unused))
 #else
-#define DBGPS_UNUSED
+#define DSTOREQC_UNUSED
 #endif
 
 /* translate ACGT (any case) to 0123; everything else (incl. N) to 4 */
-static const unsigned char seq_nt4_table[256] DBGPS_UNUSED = {
+static const unsigned char seq_nt4_table[256] DSTOREQC_UNUSED = {
     0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
     4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
     4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
@@ -64,7 +65,7 @@ static const unsigned char seq_nt4_table[256] DBGPS_UNUSED = {
 };
 
 /* translate 0123 to ACGT */
-static const unsigned char nt4_seq_table[4] DBGPS_UNUSED = {'A', 'C', 'G', 'T'};
+static const unsigned char nt4_seq_table[4] DSTOREQC_UNUSED = {'A', 'C', 'G', 'T'};
 
 /* invertible integer hash function */
 static inline uint64_t hash64(uint64_t key, uint64_t mask)
@@ -385,4 +386,4 @@ static inline int collect_primer_kmers(uint64_t **kms, kmer_set_t *seen, int len
     return seq_kmers_primer(*kms, seen, k, len, seq, primer_len);
 }
 
-#endif /* DBGPS_CORE_H */
+#endif /* DSTOREQC_CORE_H */

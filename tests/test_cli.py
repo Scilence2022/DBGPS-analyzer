@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end functional tests for the DBGPS command-line tools.
+"""End-to-end functional tests for the DStoreQC command-line tools.
 
 These tests drive the compiled binaries the same way a user (or the Electron
 desktop app) would: by spawning a process, feeding it FASTA/FASTQ fixtures and
@@ -19,9 +19,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "tests", "data")
 
-ANALYZER = os.path.join(ROOT, "DBGPS-analyzer")
-LINKS = os.path.join(ROOT, "DBGPS-links")
-FILTER = os.path.join(ROOT, "DBGPS-seq-filter")
+DSTOREQC = os.path.join(ROOT, "dstoreqc")
 
 _failures = []
 _passed = 0
@@ -76,7 +74,7 @@ def last_data_row(stdout):
 def test_interactive_kernel():
     print("test_interactive_kernel")
     commands = "summary\nsequence ACGTACGTACGT\nsequenceSummary ACGTACGTACGT\nkmer ACGT 1 1\nbogus\nexit\n"
-    proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")], stdin=commands)
+    proc = run([DSTOREQC, "kernel", "-k", "4", data("reads.fa")], stdin=commands)
     check(proc.returncode == 0, f"kernel exit code 0 (got {proc.returncode})")
     objs = jsonl(proc.stdout)
     by_type = {}
@@ -113,14 +111,14 @@ def test_interactive_kernel():
 def test_interactive_validation():
     print("test_interactive_validation")
     # A k-mer query shorter than k must be rejected, not crash.
-    proc = run([ANALYZER, "-i", "-k", "8", data("reads.fa")], stdin="kmer ACG\nexit\n")
+    proc = run([DSTOREQC, "kernel", "-k", "8", data("reads.fa")], stdin="kmer ACG\nexit\n")
     check(proc.returncode == 0, "kernel survives a too-short query")
     objs = jsonl(proc.stdout)
     errors = [o for o in objs if o.get("type") == "error"]
     check(len(errors) >= 1, "too-short k-mer query produces an error")
 
     # Invalid bases must be rejected.
-    proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")], stdin="kmer ACXT\nexit\n")
+    proc = run([DSTOREQC, "kernel", "-k", "4", data("reads.fa")], stdin="kmer ACXT\nexit\n")
     objs = jsonl(proc.stdout)
     errors = [o for o in objs if o.get("type") == "error"]
     check(len(errors) >= 1, "invalid base produces an error")
@@ -130,7 +128,7 @@ def test_decimal_index_conversion():
     print("test_decimal_index_conversion")
     tokens = ["0", "00015", "18446744073709551616", "9" * 256]
     commands = "".join(f"index {token} 4 0 0\n" for token in tokens)
-    proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")],
+    proc = run([DSTOREQC, "kernel", "-k", "4", data("reads.fa")],
                stdin=commands + "index 12x 4 0 0\nsummary\nexit\n")
     check(proc.returncode == 0, "decimal conversion kernel exits normally")
     events = jsonl(proc.stdout)
@@ -153,7 +151,7 @@ def test_decimal_index_conversion():
 def test_interactive_batch_qc():
     print("test_interactive_batch_qc")
     commands = f"batch 0 0 {data('strands.fa')}\nexit\n"
-    proc = run([ANALYZER, "-i", "-k", "4", data("reads.fa")], stdin=commands)
+    proc = run([DSTOREQC, "kernel", "-k", "4", data("reads.fa")], stdin=commands)
     check(proc.returncode == 0, f"batch kernel exit code 0 (got {proc.returncode})")
     objs = jsonl(proc.stdout)
     batches = [o for o in objs if o.get("type") == "batch"]
@@ -174,7 +172,7 @@ def test_interactive_batch_qc():
 # --------------------------------------------------------------------------- #
 def test_batch_metrics():
     print("test_batch_metrics")
-    proc = run([ANALYZER, "-k", "8", data("strands.fa"), data("ngs.fa")])
+    proc = run([DSTOREQC, "analyze", "-k", "8", data("strands.fa"), data("ngs.fa")])
     check(proc.returncode == 0, f"batch exit code 0 (got {proc.returncode})")
     row = last_data_row(proc.stdout)
     check(row is not None, "batch emits a data row")
@@ -191,9 +189,9 @@ def test_batch_metrics():
         check(abs(kn - 0.875) < 1e-6, f"Kn==0.875 (got {kn})")
 
 
-def test_batch_output_files(tmp_prefix="/tmp/dbgps_test_out"):
+def test_batch_output_files(tmp_prefix="/tmp/dstoreqc_test_out"):
     print("test_batch_output_files")
-    proc = run([ANALYZER, "-k", "8", "-o", tmp_prefix, data("strands.fa"), data("ngs.fa")])
+    proc = run([DSTOREQC, "analyze", "-k", "8", "-o", tmp_prefix, data("strands.fa"), data("ngs.fa")])
     check(proc.returncode == 0, "batch with -o exits 0")
     for ext in ("SmKdKn", "cov_details", "cov_ratios", "ratio_range"):
         path = f"{tmp_prefix}.{ext}"
@@ -219,7 +217,7 @@ def test_grid_golden():
     for r in ("0.00", "1.00", "2.00", "3.00"):
         for ci, cov in enumerate(("0", "1", "2")):
             expected.append(f"{r}\t{cov}\t{cell[ci]}")
-    proc = run([ANALYZER, "-k", "8", "-C", "2", "-R", "3.0", "-I", "1.0",
+    proc = run([DSTOREQC, "analyze", "-k", "8", "-C", "2", "-R", "3.0", "-I", "1.0",
                 data("strands.fa"), data("ngs.fa")])
     rows = data_rows(proc.stdout)
     check(rows == expected, f"strands grid matches golden\n   expected {expected}\n   got      {rows}")
@@ -231,7 +229,7 @@ def test_grid_golden():
     for r in ("0.00", "1.00", "2.00"):
         for ci, cov in enumerate(("0", "1")):
             expected2.append(f"{r}\t{cov}\t{cell2[ci]}")
-    proc2 = run([ANALYZER, "-k", "8", "-C", "1", "-R", "2.0", "-I", "1.0", "-s", "1",
+    proc2 = run([DSTOREQC, "analyze", "-k", "8", "-C", "1", "-R", "2.0", "-I", "1.0", "-s", "1",
                  data("uni_strand.fa"), data("uni_reads.fa")])
     rows2 = data_rows(proc2.stdout)
     check(rows2 == expected2, f"uniform skip-ratio grid matches golden\n   expected {expected2}\n   got      {rows2}")
@@ -242,8 +240,8 @@ def test_uniform_strand_ratio_filter():
     recovered even when an adjacent-ratio cap (-r) is active. The old condition
     required strand_max_ratio > 1.0 and so wrongly dropped uniform strands."""
     print("test_uniform_strand_ratio_filter")
-    base = run([ANALYZER, "-k", "8", data("uni_strand.fa"), data("uni_reads.fa")])
-    capped = run([ANALYZER, "-k", "8", "-r", "2.0", data("uni_strand.fa"), data("uni_reads.fa")])
+    base = run([DSTOREQC, "analyze", "-k", "8", data("uni_strand.fa"), data("uni_reads.fa")])
+    capped = run([DSTOREQC, "analyze", "-k", "8", "-r", "2.0", data("uni_strand.fa"), data("uni_reads.fa")])
     base_row = last_data_row(base.stdout)
     capped_row = last_data_row(capped.stdout)
     check(base_row and int(base_row[3]) == 1, "uniform strand recovered without ratio cap")
@@ -252,13 +250,13 @@ def test_uniform_strand_ratio_filter():
 
 
 # --------------------------------------------------------------------------- #
-# DBGPS-links cross-link counting
+# Cross-link counting
 # --------------------------------------------------------------------------- #
 def test_links_count():
     """Regression for the hash-table iteration bug: the buggy loop skipped
     bucket 0 and read one past the end. Pin the corrected totals."""
     print("test_links_count")
-    proc = run([LINKS, "-k", "8", data("links.fa")])
+    proc = run([DSTOREQC, "links", "-k", "8", data("links.fa")])
     check(proc.returncode == 0, f"links exit 0 (got {proc.returncode})")
     line = [ln for ln in proc.stdout.splitlines() if "cross links" in ln.lower()]
     check(len(line) == 1, "links prints a cross-link total")
@@ -266,7 +264,7 @@ def test_links_count():
         count = int(line[0].split()[-1])
         check(count == 3, f"links k=8 cross links==3 (got {count})")
 
-    proc31 = run([LINKS, "-k", "31", data("links.fa")])
+    proc31 = run([DSTOREQC, "links", "-k", "31", data("links.fa")])
     line31 = [ln for ln in proc31.stdout.splitlines() if "cross links" in ln.lower()]
     if line31:
         count31 = int(line31[0].split()[-1])
@@ -274,11 +272,11 @@ def test_links_count():
 
 
 # --------------------------------------------------------------------------- #
-# DBGPS-seq-filter
+# Sequence filtering
 # --------------------------------------------------------------------------- #
 def test_seq_filter_default_passes():
     print("test_seq_filter_default_passes")
-    proc = run([FILTER, "-k", "8", "-m", "0", "-p", "0", data("links.fa")])
+    proc = run([DSTOREQC, "filter", "-k", "8", "-m", "0", "-p", "0", data("links.fa")])
     check(proc.returncode == 0, "seq-filter exit 0")
     names = [ln[1:] for ln in proc.stdout.splitlines() if ln.startswith(">")]
     check(names == ["s3"], f"default passes only unentangled s3 (got {names})")
@@ -288,7 +286,7 @@ def test_seq_filter_s_flag_lists_filtered():
     """Regression: -s used to be a no-op (output was hard-wired on). It now
     switches to emitting the names of filtered-out (entangled) strands."""
     print("test_seq_filter_s_flag_lists_filtered")
-    proc = run([FILTER, "-k", "8", "-m", "0", "-p", "0", "-s", data("links.fa")])
+    proc = run([DSTOREQC, "filter", "-k", "8", "-m", "0", "-p", "0", "-s", data("links.fa")])
     check(proc.returncode == 0, "seq-filter -s exit 0")
     lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
     check(lines == ["s1", "s2"], f"-s lists both globally entangled strands (got {lines})")
@@ -301,7 +299,7 @@ def test_seq_filter_threshold_is_monotonic():
     print("test_seq_filter_threshold_is_monotonic")
     counts = []
     for m in ("0", "1", "10"):
-        proc = run([FILTER, "-k", "8", "-m", m, "-p", "0", "-s", data("links.fa")])
+        proc = run([DSTOREQC, "filter", "-k", "8", "-m", m, "-p", "0", "-s", data("links.fa")])
         check(proc.returncode == 0, f"seq-filter -m {m} exit 0")
         counts.append(len([ln for ln in proc.stdout.splitlines() if ln.strip()]))
     check(counts == sorted(counts, reverse=True), f"filtered counts are monotonic as m increases (got {counts})")
@@ -312,7 +310,7 @@ def test_seq_filter_skips_unscorable_after_primer_trim():
     emitted as passed. The desktop view defaults to p=18, so short references
     previously looked like a successful all-pass filter run."""
     print("test_seq_filter_skips_unscorable_after_primer_trim")
-    proc = run([FILTER, "-k", "8", "-m", "0", "-p", "18", data("links.fa")])
+    proc = run([DSTOREQC, "filter", "-k", "8", "-m", "0", "-p", "18", data("links.fa")])
     check(proc.returncode == 0, "seq-filter skips unscorable strands without failing")
     check(proc.stdout.strip() == "", "unscorable primer-trimmed strands are not emitted as passed")
     check(proc.stderr.count("Skipping ") == 3, f"all short strands are reported as skipped (stderr={proc.stderr!r})")
@@ -320,9 +318,9 @@ def test_seq_filter_skips_unscorable_after_primer_trim():
 
 def test_seq_filter_rejects_invalid_options():
     print("test_seq_filter_rejects_invalid_options")
-    bad_k = run([FILTER, "-k", "32", data("links.fa")])
-    bad_p = run([FILTER, "-p", "-1", data("links.fa")])
-    bad_m = run([FILTER, "-m", "-1", data("links.fa")])
+    bad_k = run([DSTOREQC, "filter", "-k", "32", data("links.fa")])
+    bad_p = run([DSTOREQC, "filter", "-p", "-1", data("links.fa")])
+    bad_m = run([DSTOREQC, "filter", "-m", "-1", data("links.fa")])
     check(bad_k.returncode != 0 and "-k must be between 1 and 31" in bad_k.stderr,
           "seq-filter rejects k values above the 2-bit encoder limit")
     check(bad_p.returncode != 0 and "-p must be non-negative" in bad_p.stderr,
@@ -332,10 +330,9 @@ def test_seq_filter_rejects_invalid_options():
 
 
 def main():
-    for binary in (ANALYZER, LINKS, FILTER):
-        if not os.path.exists(binary):
-            print(f"ERROR: {binary} not built. Run `make` first (or use tests/run.sh).")
-            return 2
+    if not os.path.exists(DSTOREQC):
+        print(f"ERROR: {DSTOREQC} not built. Run `make` first (or use tests/run.sh).")
+        return 2
 
     tests = [
         test_interactive_kernel,

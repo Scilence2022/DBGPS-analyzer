@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <errno.h>
 
+#include "dstoreqc_cli.h"
 #include "ketopt.h" // command-line argument parser
 #include "kthread.h" // multi-threading models: pipeline and multi-threaded for loop
 
@@ -17,8 +18,8 @@
 #include "kseq.h" // FASTA/Q parser
 KSEQ_INIT(gzFile, gzread)
 
-#define DBGPS_KC_BITS 14
-#include "dbgps_core.h" // shared k-mer / hash-table core
+#define DSTOREQC_KC_BITS 14
+#include "dstoreqc_core.h" // shared k-mer / hash-table core
 #include "vendor/bfc/bbf.h"
 
 #define Max_Path_Num 10000
@@ -420,7 +421,7 @@ static double coverage_ratio(int a, int b);
 // coverage histogram, and (once) the optional cov_details / cov_ratios /
 // ratio_range outputs. Returns 0 on success, -1 if $fn cannot be opened.
 static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t *h,
-                            int skip_ratios, FILE *cov_details_fp, FILE *cov_ratios_fp,
+                            int skip_ratios, int primer_len, FILE *cov_details_fp, FILE *cov_ratios_fp,
                             ratio_range_t *ratio_range, const reference_index_t *reference)
 {
     gzFile fp;
@@ -451,12 +452,12 @@ static int build_eval_cache(eval_cache_t *cache, const char *fn, int k, kc_c4x_t
         cache->min_cov[idx] = INT_MIN; // never counts as recovered unless set below
         cache->max_ratio[idx] = 0.0;
 
-        int l = ks->seq.l;
+        int l = trimmed_len_for(ks->seq.l, primer_len);
         if (l < k) continue;
 
         uint64_t *kms;
         MALLOC(kms, l - k + 1);
-        int km_num = seq_kmers_dedup(kms, &seen, k, l, ks->seq.s);
+        int km_num = seq_kmers_dedup(kms, &seen, k, l, ks->seq.s + primer_len);
         if (km_num == 0) { free(kms); continue; }
 
         if (km_num > coverages_cap) { coverages_cap = km_num * 2; REALLOC(coverages, coverages_cap); }
@@ -1868,29 +1869,40 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
     return 0;
 }
 
-int main(int argc, char *argv[])
-{
+typedef struct {
+    dstoreqc_analysis_options_t input;
+    int min_cov, max_cov, skip_ratios;
+    double ratio, ratio_limit, ratio_step;
+    const char *output_prefix;
+    int bloom, bloom_bits, bloom_bits_set;
+    const char *bloom_reference;
+} analyzer_options_t;
 
-    int i, c, k = 31, p = KC_BITS, block_size = 10000000, n_thread = 3, min_cov_cut = 0, max_cov_cut=0;
-    int read_len = 200;
-    int interactive = 0;
+dstoreqc_analysis_options_t dstoreqc_analysis_defaults(void)
+{
+    return (dstoreqc_analysis_options_t){NULL, 0, NULL, 31, 3, 200, 0};
+}
+
+static int analyzer_execute(const analyzer_options_t *options, int interactive, FILE *out);
+
+static int analyzer_command(int argc, char *argv[], int interactive)
+{
+    int c, k = 31, n_thread = 3, read_len = 200, help = 0;
+    int min_cov_cut = 0, max_cov_cut = 0, skip_ratios = 0;
     int bloom_enabled = 0, bloom_bits = 16, bloom_bits_set = 0;
     const char *bloom_reference = NULL;
-    reference_index_t reference = {0};
-    double max_cov_ratio = 0.0; // No limitation on ratio by default
-    double max_R = 0.0; // Upper bound for ratio range iteration
-    double step_size = 0.20; // Default step size for ratio iteration
-    int skip_ratios = 0; // Default: skip the first N ratio values
-    char *output_prefix = NULL;
+    double max_cov_ratio = 0.0, max_R = 0.0, step_size = 0.20;
+    const char *output_prefix = NULL;
 
     static const ko_longopt_t long_options[] = {
+        {"help", 0, 'h'},
         {"bloom", 0, 300},
         {"bloom-reference", 1, 301},
         {"bloom-bits", 1, 302},
         {0, 0, 0}
     };
     ketopt_t o = KETOPT_INIT;
-    while ((c = ketopt(&o, argc, argv, 1, "ik:t:c:C:L:o:r:s:R:I:", long_options)) >= 0) {
+    while ((c = ketopt(&o, argc, argv, 1, interactive ? "hk:t:L:" : "hk:t:c:C:L:o:r:s:R:I:", long_options)) >= 0) {
         if (c == '?' || c == ':') {
             fprintf(stderr, "Error: unknown option or missing option argument\n");
             return 1;
@@ -1911,9 +1923,8 @@ int main(int argc, char *argv[])
             bloom_bits = (int)parsed;
             bloom_bits_set = 1;
         }
-        if (c == 'i') interactive = 1;
+        if (c == 'h') help = 1;
         if (c == 'k') k = atoi(o.arg);
-        //else if (c == 'p') p = atoi(o.arg);
         else if (c == 't') n_thread = atoi(o.arg);
         else if (c == 'c') min_cov_cut = atoi(o.arg);
         else if (c == 'C') max_cov_cut = atoi(o.arg);
@@ -1924,43 +1935,82 @@ int main(int argc, char *argv[])
         else if (c == 'R') max_R = atof(o.arg);
         else if (c == 'I') step_size = atof(o.arg);
     }
-    if ((interactive && argc - o.ind < 1) || (!interactive && argc - o.ind < 2)) {
-        fprintf(stderr, "\n************************************************************************\n");
-        fprintf(stderr, "**                                                                    **\n");
-        fprintf(stderr, "**                   Sm Kn Kd Calculator for DBGPS                    **\n");
-        fprintf(stderr, "**     Version 20260123  Author: Lifu Song lifu.song@outlook.com      **\n");
-        //fprintf(stderr, "**  DBGPS - De Bruijn Graph based inner decoder for DNA data storage  **\n");
-        fprintf(stderr, "**                                                                    **\n");
-        fprintf(stderr, "************************************************************************\n\n");
-        fprintf(stderr, "Usage: DBGPS-analyzer [options] <Strand seq file> <NGS files> \n");
-        fprintf(stderr, "       DBGPS-analyzer -i [options] <NGS files>\n");
-        fprintf(stderr, "                       [Supporting formats: *fq, *fa, *fq.gz, *fa.gz]\n");
-        fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  -i         interactive JSON Lines diagnostics kernel mode\n");
-        fprintf(stderr, "  -k INT     k-mer size [%d]\n", k);
-        fprintf(stderr, "  -t INT     number of threads [%d]\n", n_thread);
-        fprintf(stderr, "  -L INT     Maximal read length for k-mer counting [%d]\n", read_len);
-        fprintf(stderr, "  -r FLOAT   Maximum coverage ratio [%.1f] (0 = no limitation)\n", max_cov_ratio);
-        fprintf(stderr, "  -R FLOAT   Upper bound for ratio range iteration [%.1f]\n", max_R);
-        fprintf(stderr, "  -I FLOAT   Step size for ratio iteration [%.2f]\n", step_size);
-        fprintf(stderr, "  -c INT     min_cov_cut [%d]\n", min_cov_cut);
-        fprintf(stderr, "  -C INT     max_cov_cut [%d]\n", max_cov_cut);
-        fprintf(stderr, "  -o STR     output prefix for additional files [none]\n");
-        fprintf(stderr, "  -s INT     Number of initial ratio values to ignore [%d]\n", skip_ratios);
-        fprintf(stderr, "  --bloom                 count reference k-mers only (default: off); Noise/Kn and graph queries unavailable\n");
-        fprintf(stderr, "  --bloom-reference FILE  reference FASTA/FASTQ required with -i --bloom\n");
-        fprintf(stderr, "  --bloom-bits INT        minimum allocated filter bits per target key [16], range 4-64\n");
+    if (help || (interactive && argc - o.ind < 1) || (!interactive && argc - o.ind < 2)) {
+        FILE *usage_out = help ? stdout : stderr;
+        fprintf(usage_out, "Usage: dstoreqc %s [options] %s\n",
+                interactive ? "kernel" : "analyze",
+                interactive ? "<reads.fa/fq[.gz]> ..." : "<reference.fa> <reads.fa/fq[.gz]> ...");
+        fprintf(usage_out, "Options:\n");
+        fprintf(usage_out, "  -h, --help show this help\n");
+        fprintf(usage_out, "  -k INT     k-mer size [%d]\n", k);
+        fprintf(usage_out, "  -t INT     number of threads [%d]\n", n_thread);
+        fprintf(usage_out, "  -L INT     Maximal read length for k-mer counting [%d]\n", read_len);
+        if (!interactive) {
+            fprintf(usage_out, "  -r FLOAT   Maximum coverage ratio [%.1f] (0 = no limitation)\n", max_cov_ratio);
+            fprintf(usage_out, "  -R FLOAT   Upper bound for ratio range iteration [%.1f]\n", max_R);
+            fprintf(usage_out, "  -I FLOAT   Step size for ratio iteration [%.2f]\n", step_size);
+            fprintf(usage_out, "  -c INT     min_cov_cut [%d]\n", min_cov_cut);
+            fprintf(usage_out, "  -C INT     max_cov_cut [%d]\n", max_cov_cut);
+            fprintf(usage_out, "  -o STR     output prefix for additional files [none]\n");
+            fprintf(usage_out, "  -s INT     Number of initial ratio values to ignore [%d]\n", skip_ratios);
+        }
+        fprintf(usage_out, "  --bloom                 count reference k-mers only (default: off); Noise/Kn and graph queries unavailable\n");
+        if (interactive) fprintf(usage_out, "  --bloom-reference FILE  reference FASTA/FASTQ required with --bloom\n");
+        fprintf(usage_out, "  --bloom-bits INT        minimum allocated filter bits per target key [16], range 4-64\n");
         
-        fprintf(stderr, "\n");
-        return 1;
+        fprintf(usage_out, "\n");
+        return help ? 0 : 1;
     }
 
+    analyzer_options_t options = {0};
+    options.input = dstoreqc_analysis_defaults();
+    options.input.k = k;
+    options.input.threads = n_thread;
+    options.input.read_length = read_len;
+    options.input.reference = interactive ? NULL : argv[o.ind];
+    options.input.read_count = argc - o.ind - (interactive ? 0 : 1);
+    options.input.reads = argv + o.ind + (interactive ? 0 : 1);
+    options.min_cov = min_cov_cut;
+    options.max_cov = max_cov_cut;
+    options.skip_ratios = skip_ratios;
+    options.ratio = max_cov_ratio;
+    options.ratio_limit = max_R;
+    options.ratio_step = step_size;
+    options.output_prefix = output_prefix;
+    options.bloom = bloom_enabled;
+    options.bloom_bits = bloom_bits;
+    options.bloom_bits_set = bloom_bits_set;
+    options.bloom_reference = bloom_reference;
+    return analyzer_execute(&options, interactive, stdout);
+}
+
+static int analyzer_execute(const analyzer_options_t *options, int interactive, FILE *out)
+{
+    int i, k = options->input.k, p = KC_BITS, block_size = 10000000;
+    int n_thread = options->input.threads, read_len = options->input.read_length;
+    int primer_len = options->input.primer_length;
+    int read_count = options->input.read_count;
+    char **reads = options->input.reads;
+    const char *reference_file = options->input.reference;
+    int min_cov_cut = options->min_cov, max_cov_cut = options->max_cov;
+    int skip_ratios = options->skip_ratios;
+    double max_cov_ratio = options->ratio, max_R = options->ratio_limit, step_size = options->ratio_step;
+    const char *output_prefix = options->output_prefix;
+    int bloom_enabled = options->bloom, bloom_bits = options->bloom_bits;
+    int bloom_bits_set = options->bloom_bits_set;
+    const char *bloom_reference = options->bloom_reference;
+    reference_index_t reference = {0};
+
+    if (read_count < 1 || !reads || (!interactive && !reference_file) || primer_len < 0 || primer_len > INT_MAX / 2) {
+        fprintf(stderr, "Error: analysis requires reference/reads and a valid primer length\n");
+        return 1;
+    }
     if (!bloom_enabled && (bloom_reference || bloom_bits_set)) {
         fprintf(stderr, "Error: --bloom-reference and --bloom-bits require --bloom\n");
         return 1;
     }
     if (bloom_enabled && interactive && (!bloom_reference || !*bloom_reference)) {
-        fprintf(stderr, "Error: -i --bloom requires --bloom-reference FILE\n");
+        fprintf(stderr, "Error: kernel --bloom requires --bloom-reference FILE\n");
         return 1;
     }
     if (bloom_enabled && !interactive && bloom_reference) {
@@ -1984,51 +2034,49 @@ int main(int argc, char *argv[])
     kc_c4x_t *h = NULL;
     const reference_index_t *ref = NULL;
     if (bloom_enabled) {
-        h = load_reference_index(interactive ? bloom_reference : argv[o.ind], k, p, bloom_bits, &reference);
+        h = load_reference_index(interactive ? bloom_reference : reference_file, k, p, bloom_bits, &reference);
         if (h == NULL) return 1;
         ref = &reference;
     }
     if (interactive) {
-        int result = run_interactive_kernel(argc, argv, o.ind, k, p, block_size, n_thread, read_len, h, ref);
+        int result = run_interactive_kernel(read_count, reads, 0, k, p, block_size, n_thread, read_len, h, ref);
         bfc_bf_destroy(reference.bloom);
         return result;
     }
 
     if(max_cov_cut < min_cov_cut){max_cov_cut = min_cov_cut;}
 
-    fprintf(stdout, ">> Settings:\nk-mer size = %d\n", k);
-    fprintf(stdout, "Read length = %d\n", read_len);
-    fprintf(stdout, "Maximum coverage ratio = %.1f\n", max_cov_ratio);
-    fprintf(stdout, "Ignore initial ratios = %d\n", skip_ratios);
-    fprintf(stdout, "Upper bound for ratio range iteration = %.1f\n", max_R);
+    fprintf(out, ">> Settings:\nk-mer size = %d\n", k);
+    fprintf(out, "Read length = %d\n", read_len);
+    fprintf(out, "Maximum coverage ratio = %.1f\n", max_cov_ratio);
+    fprintf(out, "Ignore initial ratios = %d\n", skip_ratios);
+    fprintf(out, "Upper bound for ratio range iteration = %.1f\n", max_R);
     if (ref) {
-        fprintf(stdout, "Index scope = reference; global Noise/Kn unavailable (nan)\n");
-        fprintf(stdout, "Bloom target keys = %" PRIu64 "; filter bytes = %" PRIu64 "; bits per key >= %d\n",
+        fprintf(out, "Index scope = reference; global Noise/Kn unavailable (nan)\n");
+        fprintf(out, "Bloom target keys = %" PRIu64 "; filter bytes = %" PRIu64 "; bits per key >= %d\n",
                 reference.target_keys, (uint64_t)1 << (reference.bloom->n_shift - 3), bloom_bits);
     }
    
     fprintf(stderr, "Counting NGS file 1 ......\n");
-    kc_c4x_t *first = count_file_into(argv[o.ind + 1], h, k, p, block_size, n_thread, read_len, ref);
+    kc_c4x_t *first = count_file_into(reads[0], h, k, p, block_size, n_thread, read_len, ref);
     if (first == NULL) {
-        fprintf(stderr, "Error: could not open NGS file %s\n", argv[o.ind + 1]);
+        fprintf(stderr, "Error: could not open NGS file %s\n", reads[0]);
         c4x_destroy(h);
         bfc_bf_destroy(reference.bloom);
         return 1;
     }
     h = first;
 
-    int f_num = argc - o.ind, c_f_n = 3;
-    while(c_f_n <= f_num) {
-        fprintf(stderr, "Counting NGS file %d ......\n", c_f_n-1);
-        kc_c4x_t *next = count_file_into(argv[o.ind + c_f_n - 1], h, k, p, block_size, n_thread, read_len, ref);
-        if (next == 0) {
-            fprintf(stderr, "Error: could not open NGS file %s\n", argv[o.ind + c_f_n - 1]);
+    for (int file = 1; file < read_count; ++file) {
+        fprintf(stderr, "Counting NGS file %d ......\n", file + 1);
+        kc_c4x_t *next = count_file_into(reads[file], h, k, p, block_size, n_thread, read_len, ref);
+        if (next == NULL) {
+            fprintf(stderr, "Error: could not open NGS file %s\n", reads[file]);
             c4x_destroy(h);
             bfc_bf_destroy(reference.bloom);
             return 1;
         }
         h = next;
-        c_f_n = c_f_n + 1;
     }
 
     // Open coverage details file if output prefix is provided
@@ -2088,13 +2136,13 @@ int main(int argc, char *argv[])
 
     // One pass over the strand file collects everything the grid needs.
     eval_cache_t cache;
-    if (build_eval_cache(&cache, argv[o.ind], k, h, skip_ratios,
+    if (build_eval_cache(&cache, reference_file, k, h, skip_ratios, primer_len,
                          cov_details_fp, cov_ratios_fp, ratio_range, ref) != 0) {
-        fprintf(stderr, "Error: could not open strand file %s\n", argv[o.ind]);
+        fprintf(stderr, "Error: could not open strand file %s\n", reference_file);
         return 1;
     }
     if (cache.strand_num == 0) {
-        fprintf(stderr, "Error: strand file %s contained no sequences\n", argv[o.ind]);
+        fprintf(stderr, "Error: strand file %s contained no sequences\n", reference_file);
         free_eval_cache(&cache);
         return 1;
     }
@@ -2113,7 +2161,7 @@ int main(int argc, char *argv[])
         max_R = max_cov_ratio;
     }
 
-    fprintf(stdout, "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn\n");
+    fprintf(out, "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn\n");
     if (smkdkn_fp != NULL) {
         fprintf(smkdkn_fp, "Ratio\tCoverage\tTotal\tPaths\tNoise\tExist\tLost\tSm\tKd\tKn\n");
     }
@@ -2188,7 +2236,7 @@ int main(int argc, char *argv[])
             double sm = (double)exist_strand_num / cache.strand_num;
             double kd = (double)lose_km / (lose_km + exist_km);
 
-            write_smkdkn_row(stdout, ratio, cov, cache.strand_num, exist_strand_num,
+            write_smkdkn_row(out, ratio, cov, cache.strand_num, exist_strand_num,
                               noise_km, exist_km, lose_km, sm, kd);
             if (smkdkn_fp != NULL) {
                 write_smkdkn_row(smkdkn_fp, ratio, cov, cache.strand_num, exist_strand_num,
@@ -2231,4 +2279,23 @@ int main(int argc, char *argv[])
     free(h->h); free(h);
     bfc_bf_destroy(reference.bloom);
     return 0;
+}
+
+int dstoreqc_analyze_command(int argc, char *argv[])
+{
+    return analyzer_command(argc, argv, 0);
+}
+
+int dstoreqc_kernel_command(int argc, char *argv[])
+{
+    return analyzer_command(argc, argv, 1);
+}
+
+int dstoreqc_analyze_reference(const dstoreqc_analysis_options_t *input, FILE *out)
+{
+    analyzer_options_t options = {0};
+    options.input = *input;
+    options.ratio_step = 0.20;
+    options.bloom_bits = 16;
+    return analyzer_execute(&options, 0, out);
 }

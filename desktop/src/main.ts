@@ -4,12 +4,29 @@ import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSyn
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parseCombinedReport, parseReferenceResult, filterOutput } from "./reference-results";
 import { AnalyzerQueryQueue, validateReadOnlyCommand } from "./analyzer-queue";
 import { AgentEvidenceStore } from "./agent-evidence";
 import { AGENT_LIMITS, runReadOnlyAgent } from "./agent";
 import { requestAgentTurn } from "./agent-providers";
 import type { AgentRun } from "./agent-types";
 import { adoptSequenceSummary, analyzerScope, prepareBloomReference, type AnalyzerConfig, type AnalyzerScope, type AnalyzerSummaryResult, type SequenceSummaryResult } from "./analyzer-config";
+
+app.setName("DStoreQC");
+// Reuse an existing desktop profile so rebranding retains settings and chat.
+// Fresh installations use the new DStoreQC profile directory.
+if (!existsSync(app.getPath("userData"))) {
+  const legacyNames = app.isPackaged
+    ? ["DBGPS Analyzer", "dbgps-analyzer-desktop"]
+    : ["dbgps-analyzer-desktop", "DBGPS Analyzer"];
+  const legacyProfile = legacyNames
+    .map((name) => path.join(app.getPath("appData"), name))
+    .find((directory) => existsSync(directory) && statSync(directory).isDirectory());
+  if (legacyProfile) {
+    app.setPath("userData", legacyProfile);
+    app.setPath("sessionData", legacyProfile);
+  }
+}
 
 type ProviderId =
   | "openai"
@@ -99,9 +116,7 @@ function invalidateAgentEvidence() {
 // it lives at the repo root (two levels up from desktop/dist) and can be built
 // on demand with `make`.
 const repoRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
-const analyzerPath = path.join(repoRoot, "DBGPS-analyzer");
-const linksPath = path.join(repoRoot, "DBGPS-links");
-const filterPath = path.join(repoRoot, "DBGPS-seq-filter");
+const dstoreqcPath = path.join(repoRoot, "dstoreqc");
 const MAX_ANALYZER_STDOUT_LINE_BYTES = 64 * 1024 * 1024;
 const INTERACTIVE_BATCH_CHUNK_SIZE = 250;
 const ADD_FILE_TIMEOUT_MS = 300000;
@@ -347,7 +362,7 @@ function toPositiveInt(value: unknown, fallback: number, min: number, max: numbe
   return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
-function runMake(target = "DBGPS-analyzer"): Promise<string> {
+function runMake(target = "dstoreqc"): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("make", [target], { cwd: repoRoot });
     let output = "";
@@ -366,18 +381,19 @@ function runMake(target = "DBGPS-analyzer"): Promise<string> {
   });
 }
 
-function toolSources(binName: string) {
-  const cSource = `${binName}.c`;
-  const shared = ["dbgps_core.h", "khashl.h", "kseq.h", "ketopt.h", "kthread.c", "kthread.h", "Makefile"];
-  const backend = binName === "DBGPS-analyzer" ? ["vendor/bfc/bbf.c", "vendor/bfc/bbf.h"] : [];
-  return [cSource, ...shared, ...backend].map((file) => path.join(repoRoot, file));
+function toolSources() {
+  return [
+    "dstoreqc.c", "dstoreqc_cli.h", "dstoreqc_analyzer.c", "dstoreqc_reference.c", "dstoreqc_report.c", "dstoreqc_report.h",
+    "dstoreqc_core.h", "khashl.h", "kseq.h", "ketopt.h", "kthread.c", "kthread.h", "Makefile",
+    "vendor/bfc/bbf.c", "vendor/bfc/bbf.h"
+  ].map((file) => path.join(repoRoot, file));
 }
 
 function needsBuild(binName: string) {
   const target = path.join(repoRoot, binName);
   if (!existsSync(target)) return true;
   const targetMtime = statSync(target).mtimeMs;
-  return toolSources(binName).some((source) => existsSync(source) && statSync(source).mtimeMs > targetMtime);
+  return toolSources().some((source) => existsSync(source) && statSync(source).mtimeMs > targetMtime);
 }
 
 // Ensure a tool binary exists and is fresh. In a packaged app it must already
@@ -392,10 +408,8 @@ async function ensureBuilt(binName: string, force = false) {
   return runMake(binName);
 }
 
-const TOOL_BINARIES = ["DBGPS-analyzer", "DBGPS-links", "DBGPS-seq-filter"];
-
 async function ensureAnalyzerBuilt(force = false) {
-  return ensureBuilt("DBGPS-analyzer", force);
+  return ensureBuilt("dstoreqc", force);
 }
 
 // --------------------------------------------------------------------------- #
@@ -473,7 +487,7 @@ class AnalyzerSession {
     if (files.length === 0) throw new Error("Select at least one NGS FASTA/FASTQ file.");
 
     const reference = prepareBloomReference(config, normalizeToFasta);
-    const args = ["-i", ...reference.args, "-k", String(k), "-t", String(threads), "-L", String(readLength), ...files];
+    const args = ["kernel", ...reference.args, "-k", String(k), "-t", String(threads), "-L", String(readLength), "--", ...files];
     this.k = k;
 
     return new Promise((resolve, reject) => {
@@ -497,7 +511,7 @@ class AnalyzerSession {
       };
 
       try {
-        this.child = spawn(analyzerPath, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
+        this.child = spawn(dstoreqcPath, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
       } catch (error) {
         clearTimeout(timeout);
         reference.cleanup();
@@ -753,7 +767,7 @@ const AI_STREAM_IDLE_MS = 120000;
 // the user is looking at, instead of inventing a second, conflicting standard.
 function assistantSystemPrompt() {
   return [
-    "You are the AI assistant built into DBGPS Analyzer, a desktop quality-control toolkit for DNA data storage.",
+    "You are the AI assistant built into DStoreQC, a desktop quality-control toolkit for DNA data storage.",
     "You help researchers interpret De Bruijn graph sequencing diagnostics.",
     "",
     "Metrics you will be asked about:",
@@ -1307,8 +1321,8 @@ function abortAllAiStreams() {
 }
 
 // --------------------------------------------------------------------------- #
-// One-shot CLI tool runners: DBGPS-links, DBGPS-seq-filter, batch DBGPS-analyzer,
-// and a combined diagnostics report that runs all three.
+// Unified CLI runners: links, filter, analyze, and a combined report that
+// reuses one reference-library index for cross-links and filtering.
 // --------------------------------------------------------------------------- #
 type ToolRunResult = { code: number | null; stdout: string; stderr: string; command: string };
 
@@ -1415,11 +1429,6 @@ function parseSequenceRecords(file: string): SeqRecord[] {
   return startsWithFasta(text) ? parseFastaText(text) : parseTabDelimitedText(text);
 }
 
-// Count records, transparently handling FASTA, FASTQ-less tab-delimited, and gzip.
-function countRecords(file: string): number {
-  return parseSequenceRecords(file).length;
-}
-
 // Convert a tab-delimited reference file to a temporary FASTA so the FASTA/FASTQ
 // CLI tools can consume it. FASTA/FASTQ inputs pass through unchanged.
 type NormalizedInput = { path: string; cleanup: () => void };
@@ -1436,7 +1445,7 @@ function normalizeToFasta(file: string, primerFront = 0, primerBack = 0): Normal
   }).join("\n") + "\n";
   const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const safeBase = path.basename(file).replace(/[^\w.-]/g, "_");
-  const out = path.join(tmpdir(), `dbgps-${safeBase}-${stamp}.fa`);
+  const out = path.join(tmpdir(), `dstoreqc-${safeBase}-${stamp}.fa`);
   writeFileSync(out, fasta, "utf8");
   return { path: out, cleanup: () => { try { unlinkSync(out); } catch { /* best effort */ } } };
 }
@@ -1444,17 +1453,18 @@ function normalizeToFasta(file: string, primerFront = 0, primerBack = 0): Normal
 type LinksRequest = { file: string; k?: number; m?: number; primerLen?: number };
 async function runLinks(req: LinksRequest) {
   if (!req || !req.file) throw new Error("Select a reference file for cross-link analysis.");
-  await ensureBuilt("DBGPS-links");
+  await ensureBuilt("dstoreqc");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const m = toPositiveInt(req.m, 1, 0, 1 << 20);
   const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
   const norm = normalizeToFasta(req.file);
   try {
-    const args = ["-k", String(k), "-m", String(m), "-p", String(primerLen), norm.path];
-    const result = await runTool(linksPath, args);
-    const match = result.stdout.match(/Total cross links\s+(\d+)/i);
+    const args = ["links", "--json", "-k", String(k), "-m", String(m), "-p", String(primerLen), "--", norm.path];
+    const result = await runTool(dstoreqcPath, args);
+    if (result.code !== 0) throw new Error(result.stderr || "Cross-link analysis failed.");
+    const summary = JSON.parse(result.stdout) as { crossLinks: number };
     const command = result.command.replace(norm.path, req.file);
-    return { ...result, command, file: req.file, k, m, primerLen, crossLinks: match ? Number(match[1]) : null };
+    return { ...result, stdout: `Total cross links ${summary.crossLinks}\n`, command, file: req.file, k, m, primerLen, crossLinks: summary.crossLinks };
   } finally {
     norm.cleanup();
   }
@@ -1463,42 +1473,22 @@ async function runLinks(req: LinksRequest) {
 type FilterRequest = { file: string; k?: number; m?: number; primerLen?: number; listFiltered?: boolean };
 async function runFilter(req: FilterRequest) {
   if (!req || !req.file) throw new Error("Select a FASTA file to filter.");
-  await ensureBuilt("DBGPS-seq-filter");
+  await ensureBuilt("dstoreqc");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const m = toPositiveInt(req.m, 0, 0, 1 << 20);
   const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
   const listFiltered = Boolean(req.listFiltered);
   const norm = normalizeToFasta(req.file);
   try {
-    const baseArgs = ["-k", String(k), "-m", String(m), "-p", String(primerLen)];
-    const args = listFiltered ? [...baseArgs, "-s", norm.path] : [...baseArgs, norm.path];
-    const result = await runTool(filterPath, args);
-    let saveOutput = result.stdout;
-    if (listFiltered) {
-      const passedResult = await runTool(filterPath, [...baseArgs, norm.path]);
-      saveOutput = passedResult.stdout;
-    }
-    const passedCount = (saveOutput.match(/^>/gm) || []).length;
-    // In default mode the filtered strands are marked with " * " on stderr; in -s
-    // mode each filtered strand name is one stdout line.
-    const filteredCount = listFiltered
-      ? result.stdout.split("\n").filter((line) => line.trim().length > 0).length
-      : (result.stderr.match(/\*/g) || []).length;
-    const skippedCount = (result.stderr.match(/^Skipping /gm) || []).length;
+    const args = ["filter", "--json", "-k", String(k), "-m", String(m), "-p", String(primerLen), "--", norm.path];
+    const result = await runTool(dstoreqcPath, args);
+    if (result.code !== 0) throw new Error(result.stderr || "Sequence filtering failed.");
+    const summary = parseReferenceResult(result.stdout);
     const command = result.command.replace(norm.path, req.file);
     return {
       ...result,
-      command,
-      file: req.file,
-      k,
-      m,
-      primerLen,
-      listFiltered,
-      passedCount,
-      filteredCount,
-      skippedCount,
-      saveOutput,
-      saveDefaultName: "passed.fa"
+      ...filterOutput(summary, listFiltered),
+      command, file: req.file, k, m, primerLen, listFiltered
     };
   } finally {
     norm.cleanup();
@@ -1549,11 +1539,11 @@ async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
   if (ngsFiles.length === 0) throw new Error("Select at least one NGS reads file.");
-  await ensureBuilt("DBGPS-analyzer");
+  await ensureBuilt("dstoreqc");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const threads = toPositiveInt(req.threads, 3, 1, 64);
   const readLength = toPositiveInt(req.readLength, 200, k, 100000);
-  const args = ["-k", String(k), "-t", String(threads), "-L", String(readLength)];
+  const args = ["analyze", "-k", String(k), "-t", String(threads), "-L", String(readLength)];
   if (req.minCov != null) args.push("-c", String(toPositiveInt(req.minCov, 0, 0, 1 << 20)));
   if (req.maxCov != null) args.push("-C", String(toPositiveInt(req.maxCov, 0, 0, 1 << 20)));
   if (req.ratio != null && Number.isFinite(Number(req.ratio))) args.push("-r", String(Number(req.ratio)));
@@ -1562,8 +1552,8 @@ async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
   if (req.skip != null) args.push("-s", String(toPositiveInt(req.skip, 0, 0, 1 << 20)));
   const norm = normalizeToFasta(req.strandsFile);
   try {
-    args.push(norm.path, ...ngsFiles);
-    const result = await runTool(analyzerPath, args);
+    args.push("--", norm.path, ...ngsFiles);
+    const result = await runTool(dstoreqcPath, args);
     const command = result.command.replace(norm.path, req.strandsFile);
     return { ...result, command, k, rows: parseSmKdKn(result.stdout) };
   } finally {
@@ -1669,41 +1659,37 @@ type ReportRequest = {
 };
 async function runReport(req: ReportRequest) {
   if (!req || !req.referenceFile) throw new Error("Select a reference strand FASTA file.");
+  await ensureBuilt("dstoreqc");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
   const primerLen = toPositiveInt(req.primerLen, 18, 0, 100000);
-  const totalStrands = countRecords(req.referenceFile);
-
-  // The three tools are independent processes; run them concurrently.
-  const [links, filter, analyzer] = await Promise.all([
-    runLinks({ file: req.referenceFile, k, m: req.linksM ?? 1, primerLen }),
-    runFilter({ file: req.referenceFile, k, m: req.filterM ?? 0, primerLen, listFiltered: true }),
-    ngsFiles.length
-      ? runAnalyzerBatch({ strandsFile: req.referenceFile, ngsFiles, k, threads: req.threads, readLength: req.readLength })
-      : Promise.resolve(null)
-  ]);
-
-  const entangledNames = filter.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-  const headline = analyzer && analyzer.rows.length ? analyzer.rows[0] : null;
-
-  return {
-    generatedAt: new Date().toISOString(),
-    referenceFile: req.referenceFile,
-    ngsFiles,
-    k,
-    primerLen,
-    totalStrands,
-    crossLinks: links.crossLinks,
-    linksM: links.m,
-    linksCommand: links.command,
-    entangled: entangledNames.length,
-    passed: Math.max(0, totalStrands - entangledNames.length),
-    entangledNames: entangledNames.slice(0, 1000),
-    entangledTruncated: entangledNames.length > 1000,
-    filterM: filter.m,
-    filterCommand: filter.command,
-    analyzer: analyzer ? { rows: analyzer.rows, headline, command: analyzer.command } : null
-  };
+  const linksM = toPositiveInt(req.linksM, 1, 0, 1 << 20);
+  const filterM = toPositiveInt(req.filterM, 0, 0, 1 << 20);
+  const threads = toPositiveInt(req.threads, 3, 1, 64);
+  const readLength = toPositiveInt(req.readLength, 200, k, 100000);
+  const norm = normalizeToFasta(req.referenceFile);
+  try {
+    const args = ["report", "--format", "json", "-k", String(k), "-p", String(primerLen),
+      "--links-threshold", String(linksM), "--filter-max-links", String(filterM),
+      "-t", String(threads), "-L", String(readLength), "--", norm.path, ...ngsFiles];
+    const result = await runTool(dstoreqcPath, args);
+    if (result.code !== 0) throw new Error(result.stderr || "Diagnostics report failed.");
+    const payload = parseCombinedReport(result.stdout);
+    const reference = payload.reference;
+    const command = result.command.replace(norm.path, req.referenceFile);
+    return {
+      generatedAt: new Date().toISOString(), referenceFile: req.referenceFile, ngsFiles, k, primerLen,
+      totalStrands: reference.totalStrands,
+      crossLinks: reference.crossLinks, linksM, linksCommand: command,
+      entangled: reference.filteredCount, passed: reference.passedCount, skipped: reference.skippedCount,
+      entangledNames: reference.filteredNames.slice(0, 1000),
+      entangledTruncated: reference.filteredNames.length > 1000,
+      filterM, filterCommand: command,
+      analyzer: payload.analyzer ? { ...payload.analyzer, headline: payload.analyzer.rows[0] ?? null, command } : null
+    };
+  } finally {
+    norm.cleanup();
+  }
 }
 
 function createWindow() {
@@ -1713,7 +1699,7 @@ function createWindow() {
     minWidth: 1080,
     minHeight: 720,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#111418" : "#f5f7f8",
-    title: "DBGPS Analyzer",
+    title: "DStoreQC",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -1775,11 +1761,8 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("analyzer:build", async () => {
-    const logs: string[] = [];
-    for (const bin of TOOL_BINARIES) {
-      logs.push(await ensureBuilt(bin, true));
-    }
-    return { ok: true, log: logs.filter(Boolean).join("\n") || "All DBGPS tools are up to date." };
+    const log = await ensureBuilt("dstoreqc", true);
+    return { ok: true, log: log || "DStoreQC is up to date." };
   });
 
   ipcMain.handle("analyzer:start", async (_event, config: AnalyzerConfig) => {
@@ -1878,7 +1861,7 @@ app.whenReady().then(() => {
   ipcMain.handle("report:run", async (_event, request: ReportRequest) => runReport(request));
 
   ipcMain.handle("file:save", async (_event, request: { defaultName?: string; content?: string }) => {
-    const options = { defaultPath: request?.defaultName || "dbgps-report.html" };
+    const options = { defaultPath: request?.defaultName || "dstoreqc-report.html" };
     const result = mainWindow
       ? await dialog.showSaveDialog(mainWindow, options)
       : await dialog.showSaveDialog(options);

@@ -1,11 +1,11 @@
 import { createIcons, icons } from "lucide";
-import type { DbgpsApi } from "./preload";
+import type { DStoreQCApi } from "./preload";
 import type { AgentRun, AgentToolTrace } from "./agent-types";
 import { analyzerScope, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
 declare global {
   interface Window {
-    dbgps: DbgpsApi;
+    dstoreqc: DStoreQCApi;
   }
 }
 
@@ -182,6 +182,7 @@ type AppSettings = {
   agentTools?: boolean;
 };
 
+// Keep the existing storage key when reusing a profile from before the rename.
 const SETTINGS_STORAGE_KEY = "dbgps-settings-v3";
 const DEFAULT_PRIMER = 18;
 
@@ -523,12 +524,12 @@ function persistSecrets() {
     const key = appSettings.providers[provider.id]?.apiKey;
     if (key) map[provider.id] = key;
   }
-  window.dbgps.saveSecrets(map).catch(() => {});
+  window.dstoreqc.saveSecrets(map).catch(() => {});
 }
 
 async function loadSecrets() {
   try {
-    const secrets = await window.dbgps.loadSecrets();
+    const secrets = await window.dstoreqc.loadSecrets();
     for (const id of Object.keys(secrets) as ProviderId[]) {
       if (appSettings.providers[id]) appSettings.providers[id].apiKey = secrets[id];
     }
@@ -770,7 +771,7 @@ async function refreshProviderModels(providerId: ProviderId) {
   renderProviderList();
 
   try {
-    const result = await window.dbgps.refreshProviderModels({
+    const result = await window.dstoreqc.refreshProviderModels({
       provider: providerId,
       apiKey: settings.apiKey || "",
       baseUrl: settings.baseUrl
@@ -1053,7 +1054,7 @@ async function expandTreeNode(button: HTMLButtonElement) {
   setStatus("Expanding graph", "running");
   try {
     const command = direction === "upstream" ? `kmer ${kmer} 1 0` : `kmer ${kmer} 0 1`;
-    const result = (await window.dbgps.queryAnalyzer(command)) as AnalyzerResult;
+    const result = (await window.dstoreqc.queryAnalyzer(command)) as AnalyzerResult;
     if (result.type !== "kmer") {
       throw new Error(result.type === "error" ? result.message : "Unexpected expansion result.");
     }
@@ -1475,7 +1476,7 @@ function updateBloomControls() {
 
 async function selectBloomReference() {
   if (analyzerReady || analyzerLoading) return;
-  const files = await window.dbgps.selectFiles();
+  const files = await window.dstoreqc.selectFiles();
   if (!files[0]) return;
   bloomReferenceFile = files[0];
   elements.bloomReferenceFile.innerHTML = `<span title="${escapeHtml(bloomReferenceFile)}">${escapeHtml(compactPath(bloomReferenceFile))}</span>`;
@@ -1483,13 +1484,13 @@ async function selectBloomReference() {
 
 async function selectFiles() {
   if (analyzerReady) return;
-  selectedFiles = await window.dbgps.selectFiles();
+  selectedFiles = await window.dstoreqc.selectFiles();
   renderFileList();
 }
 
 async function addSequencingFiles() {
   if (!analyzerReady) return;
-  const files = await window.dbgps.selectFiles();
+  const files = await window.dstoreqc.selectFiles();
   const newFiles = files.filter((file) => !selectedFiles.includes(file));
   if (newFiles.length === 0) {
     if (files.length > 0) appendLog("No new sequencing files selected.");
@@ -1501,7 +1502,7 @@ async function addSequencingFiles() {
   setStatus(`Counting ${formatNumber(newFiles.length)} additional NGS file${newFiles.length === 1 ? "" : "s"}`, "running");
 
   try {
-    const summary = (await window.dbgps.addAnalyzerFiles(newFiles)) as SummaryResult;
+    const summary = (await window.dstoreqc.addAnalyzerFiles(newFiles)) as SummaryResult;
     selectedFiles = summary.files?.length ? summary.files : [...selectedFiles, ...newFiles];
     renderFileList();
     renderSummary(summary);
@@ -1523,8 +1524,8 @@ async function buildAnalyzer() {
   elements.buildButton.disabled = true;
   setStatus("Building C kernel", "running");
   try {
-    const result = await window.dbgps.buildAnalyzer();
-    appendLog(result.log || "DBGPS-analyzer is up to date.");
+    const result = await window.dstoreqc.buildAnalyzer();
+    appendLog(result.log || "DStoreQC is up to date.");
     setStatus("Build complete");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1552,7 +1553,7 @@ async function startAnalyzer() {
   updateBloomControls();
 
   try {
-    const ready = (await window.dbgps.startAnalyzer({
+    const ready = (await window.dstoreqc.startAnalyzer({
       files: selectedFiles,
       k: Number(elements.kInput.value),
       threads: Number(elements.threadsInput.value),
@@ -1585,7 +1586,7 @@ async function startAnalyzer() {
 }
 
 async function stopAnalyzer() {
-  await window.dbgps.stopAnalyzer();
+  await window.dstoreqc.stopAnalyzer();
   setAnalyzerReady(false);
   elements.startButton.disabled = false;
   setStatus("Kernel stopped");
@@ -1642,7 +1643,7 @@ async function runQuery() {
   elements.queryButton.disabled = true;
   setStatus("Querying", "running");
   try {
-    const result = (await window.dbgps.queryAnalyzer(command)) as AnalyzerResult;
+    const result = (await window.dstoreqc.queryAnalyzer(command)) as AnalyzerResult;
     renderResult(result);
     setStatus("Kernel running", "running");
   } catch (error) {
@@ -1663,7 +1664,7 @@ async function runQuery() {
 // snapshot of the active view's result travels with the question as context.
 // ===========================================================================
 const CHAT_GREETING =
-  "Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the " +
+  "Hi! I'm your DStoreQC analysis assistant. Run a query, batch scan, or report and ask me to interpret the " +
   "coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.";
 
 // --- Minimal, XSS-safe Markdown renderer (input is escaped before any tag is
@@ -2338,7 +2339,7 @@ function renderAgentTrace(bubble: HTMLElement, trace: AgentToolTrace[], run?: Ag
     button.innerHTML = '<i data-lucide="download"></i>';
     button.addEventListener("click", async () => {
       try {
-        await window.dbgps.saveFile({ defaultName: `DBGPS-agent-${run.snapshot.id}.json`, content: JSON.stringify(run, null, 2) });
+        await window.dstoreqc.saveFile({ defaultName: `DStoreQC-agent-${run.snapshot.id}.json`, content: JSON.stringify(run, null, 2) });
       } catch (error) { appendLog(`Evidence export failed: ${errMessage(error)}`); }
     });
     footer.appendChild(button);
@@ -2379,7 +2380,7 @@ async function sendChat() {
 
   try {
     const context = buildChatContext();
-    const result = await window.dbgps.aiChat({
+    const result = await window.dstoreqc.aiChat({
       id,
       messages: chatMessages,
       context: context?.data ?? null,
@@ -2422,7 +2423,7 @@ async function stopChat() {
   if (!activeChat) return;
   elements.stopChatButton.disabled = true;
   try {
-    await window.dbgps.cancelAiChat(activeChat.id);
+    await window.dstoreqc.cancelAiChat(activeChat.id);
   } catch {
     /* the in-flight request will settle on its own */
   } finally {
@@ -2434,7 +2435,7 @@ function clearChat() {
   if (activeChat) return;
   chatMessages.length = 0;
   retainedAgentRuns.length = 0;
-  void window.dbgps.clearAiEvidence();
+  void window.dstoreqc.clearAiEvidence();
   elements.chatMessages.innerHTML = "";
   renderChatWelcome();
   saveChatTranscript();
@@ -2443,6 +2444,7 @@ function clearChat() {
 // --- Transcript persistence and export ---
 // The transcript is the researcher's record of how a result was interpreted, so it
 // survives a reload rather than being discarded with the window.
+// Keep the transcript accessible in profiles created before the rename.
 const CHAT_STORAGE_KEY = "dbgps.chatTranscript";
 const MAX_STORED_MESSAGES = 200;
 
@@ -2492,7 +2494,7 @@ function restoreChatTranscript() {
 }
 
 function chatTranscriptMarkdown(): string {
-  const lines = [`# DBGPS AI conversation`, "", `_Exported ${new Date().toLocaleString()}_`, ""];
+  const lines = [`# DStoreQC AI conversation`, "", `_Exported ${new Date().toLocaleString()}_`, ""];
   for (const message of chatMessages) {
     lines.push(message.role === "user" ? "## Question" : "## Assistant", "", message.content, "");
   }
@@ -2505,8 +2507,8 @@ async function exportChat() {
     return;
   }
   try {
-    await window.dbgps.saveFile({
-      defaultName: `dbgps-conversation-${new Date().toISOString().slice(0, 10)}.md`,
+    await window.dstoreqc.saveFile({
+      defaultName: `dstoreqc-conversation-${new Date().toISOString().slice(0, 10)}.md`,
       content: chatTranscriptMarkdown()
     });
   } catch (error) {
@@ -2578,7 +2580,7 @@ restoreChatTranscript();
 
 // Live token stream: append each delta to the in-flight assistant bubble (or the
 // report's narrative element) and re-render its Markdown on the next animation frame.
-window.dbgps.onAiChatChunk((chunk) => {
+window.dstoreqc.onAiChatChunk((chunk) => {
   if (activeChat && chunk.id === activeChat.id) {
     if (!activeChat.text) activeChat.bubble.classList.remove("streaming");
     activeChat.text += chunk.delta;
@@ -2590,7 +2592,7 @@ window.dbgps.onAiChatChunk((chunk) => {
     scheduleReportStreamRender();
   }
 });
-window.dbgps.onAiTool(({ id, trace }) => {
+window.dstoreqc.onAiTool(({ id, trace }) => {
   if (!activeChat || activeChat.id !== id) return;
   const existing = activeChat.trace.findIndex((item) => item.callId === trace.callId);
   if (existing < 0) activeChat.trace.push(trace);
@@ -2731,7 +2733,7 @@ function autoGrowChatInput() {
 }
 elements.chatInput.addEventListener("input", autoGrowChatInput);
 
-window.dbgps.onAnalyzerEvent((event) => {
+window.dstoreqc.onAnalyzerEvent((event) => {
   const payload = event as { kind?: string; line?: string; code?: number | null; done?: number; total?: number };
   if (payload.kind === "stderr" && payload.line) appendLog(payload.line);
   if (payload.kind === "batchProgress" && batchRunning) {
@@ -2748,10 +2750,10 @@ window.dbgps.onAnalyzerEvent((event) => {
 // Multi-tool workbench: Cross-links, Seq-Filter, and the combined Report view.
 // ===========================================================================
 type ViewName = "interactive" | "batch" | "links" | "filter" | "report";
-type LinksResult = Awaited<ReturnType<DbgpsApi["runLinks"]>>;
-type FilterResult = Awaited<ReturnType<DbgpsApi["runFilter"]>>;
-type ReportResult = Awaited<ReturnType<DbgpsApi["runReport"]>>;
-type InteractiveBatchResult = Awaited<ReturnType<DbgpsApi["runInteractiveBatch"]>>;
+type LinksResult = Awaited<ReturnType<DStoreQCApi["runLinks"]>>;
+type FilterResult = Awaited<ReturnType<DStoreQCApi["runFilter"]>>;
+type ReportResult = Awaited<ReturnType<DStoreQCApi["runReport"]>>;
+type InteractiveBatchResult = Awaited<ReturnType<DStoreQCApi["runInteractiveBatch"]>>;
 type SmKdKnRow = NonNullable<ReportResult["analyzer"]>["rows"][number];
 type Verdict = { level: "ok" | "warn" | "bad"; text: string };
 
@@ -2877,7 +2879,7 @@ function renderPathChip(target: HTMLElement, files: string[], empty: string) {
 }
 
 async function pickOneFile(): Promise<string> {
-  const files = await window.dbgps.selectFiles();
+  const files = await window.dstoreqc.selectFiles();
   return files[0] || "";
 }
 
@@ -2899,7 +2901,7 @@ async function runLinksTool() {
   ui.linksResult.classList.remove("empty-state");
   ui.linksResult.innerHTML = `<div class="tool-loading">Counting cross-links…</div>`;
   try {
-    const result = await window.dbgps.runLinks({
+    const result = await window.dstoreqc.runLinks({
       file: linksFile,
       k: Number(ui.linksK.value),
       m: Number(ui.linksM.value),
@@ -2952,7 +2954,7 @@ async function runFilterTool() {
   ui.filterResult.classList.remove("empty-state");
   ui.filterResult.innerHTML = `<div class="tool-loading">Filtering…</div>`;
   try {
-    const result = await window.dbgps.runFilter({
+    const result = await window.dstoreqc.runFilter({
       file: filterFile,
       k: Number(ui.filterK.value),
       m: Number(ui.filterM.value),
@@ -3006,7 +3008,7 @@ function renderFilterResult(result: FilterResult) {
 async function saveFilterOutput() {
   if (!filterSaveOutput.trim()) return;
   try {
-    const res = await window.dbgps.saveFile({ defaultName: filterSaveDefaultName, content: filterSaveOutput });
+    const res = await window.dstoreqc.saveFile({ defaultName: filterSaveDefaultName, content: filterSaveOutput });
     if (res.saved) appendLog(`Saved filter output to ${res.path}`);
   } catch (error) {
     appendLog(`Save failed: ${errMessage(error)}`);
@@ -3023,7 +3025,7 @@ async function selectReportRef() {
 }
 
 async function selectReportNgs() {
-  const files = await window.dbgps.selectFiles();
+  const files = await window.dstoreqc.selectFiles();
   reportNgsFiles = files;
   renderPathChip(ui.reportNgsFiles, files, "No reads selected");
 }
@@ -3035,7 +3037,7 @@ async function generateReport() {
   }
   ui.reportRunButton.disabled = true;
   if (reportAiRequest) {
-    void window.dbgps.cancelAiChat(reportAiRequest.id);
+    void window.dstoreqc.cancelAiChat(reportAiRequest.id);
     reportAiRequest = null;
     activeReportStream = null;
   }
@@ -3045,9 +3047,9 @@ async function generateReport() {
   ui.reportExportMdButton.disabled = true;
   reportNarrative = "";
   ui.reportResult.classList.remove("empty-state");
-  ui.reportResult.innerHTML = `<div class="tool-loading">Running DBGPS-analyzer, DBGPS-links, and DBGPS-seq-filter…</div>`;
+  ui.reportResult.innerHTML = `<div class="tool-loading">Generating diagnostics report…</div>`;
   try {
-    const result = await window.dbgps.runReport({
+    const result = await window.dstoreqc.runReport({
       referenceFile: reportRefFile,
       ngsFiles: reportNgsFiles,
       k: Number(ui.reportK.value),
@@ -3072,9 +3074,14 @@ async function generateReport() {
 
 function reportVerdicts(report: ReportResult): Verdict[] {
   const verdicts: Verdict[] = [];
-  const total = report.totalStrands || 0;
+  const total = report.totalStrands - report.skipped;
   const entFrac = total ? report.entangled / total : 0;
-  if (report.entangled === 0) {
+  if (report.skipped > 0) {
+    verdicts.push({ level: "warn", text: `${formatNumber(report.skipped)} reference strands were too short after primer trimming and were skipped for entanglement analysis.` });
+  }
+  if (total === 0) {
+    verdicts.push({ level: "warn", text: "No reference strands could be scored for entanglement at these k and primer settings." });
+  } else if (report.entangled === 0) {
     verdicts.push({ level: "ok", text: `No entangled strands among ${formatNumber(total)} references at k=${report.k}.` });
   } else {
     verdicts.push({
@@ -3094,10 +3101,14 @@ function reportVerdicts(report: ReportResult): Verdict[] {
       level: h.sm >= 0.95 ? "ok" : h.sm >= 0.8 ? "warn" : "bad",
       text: `Strand recovery Sm = ${fmtPct(h.sm)} (${formatNumber(h.paths)}/${formatNumber(h.total)} strands fully covered).`
     });
-    verdicts.push({
-      level: h.kd <= 0.05 ? "ok" : h.kd <= 0.2 ? "warn" : "bad",
-      text: `k-mer dropout Kd = ${fmtPct(h.kd)}.`
-    });
+    if (Number.isFinite(h.kd)) {
+      verdicts.push({
+        level: h.kd <= 0.05 ? "ok" : h.kd <= 0.2 ? "warn" : "bad",
+        text: `k-mer dropout Kd = ${fmtPct(h.kd)}.`
+      });
+    } else {
+      verdicts.push({ level: "warn", text: "Dropout Kd is unavailable because no reference k-mers could be scored." });
+    }
     if (Number.isFinite(h.kn)) {
       verdicts.push({
         level: h.kn <= 0.5 ? "ok" : h.kn <= 2 ? "warn" : "bad",
@@ -3141,7 +3152,7 @@ function renderReport(report: ReportResult) {
   ui.reportResult.innerHTML = `
     <div class="report">
       <div class="report-head">
-        <h3>DBGPS diagnostics report</h3>
+        <h3>DStoreQC diagnostics report</h3>
         <p class="muted">${escapeHtml(new Date(report.generatedAt).toLocaleString())} · k=${formatNumber(report.k)} · ${escapeHtml(compactPath(report.referenceFile))}</p>
       </div>
       <div class="report-metrics">
@@ -3157,22 +3168,22 @@ function renderReport(report: ReportResult) {
         <ul class="verdict-list">${verdicts.map((v) => `<li class="verdict ${v.level}"><i data-lucide="${verdictIcon(v.level)}"></i><span>${escapeHtml(v.text)}</span></li>`).join("")}</ul>
       </div>
       ${report.analyzer
-        ? `<div class="report-section"><h4>Coverage metrics — DBGPS-analyzer</h4>${smkdknTable(report.analyzer.rows)}</div>`
-        : `<div class="report-section"><h4>Coverage metrics — DBGPS-analyzer</h4><p class="muted">No NGS reads provided; Sm/Kd/Kn not computed.</p></div>`}
+        ? `<div class="report-section"><h4>Coverage metrics</h4>${smkdknTable(report.analyzer.rows)}</div>`
+        : `<div class="report-section"><h4>Coverage metrics</h4><p class="muted">No NGS reads provided; Sm/Kd/Kn not computed.</p></div>`}
       <div class="report-section">
-        <h4>Entanglement — DBGPS-seq-filter (m=${formatNumber(report.filterM)}, p=${formatNumber(report.primerLen)})</h4>
-        <p>${formatNumber(report.passed)} passed · ${formatNumber(report.entangled)} entangled${report.entangledTruncated ? " (list truncated to 1000)" : ""}</p>
+        <h4>Entanglement (m=${formatNumber(report.filterM)}, p=${formatNumber(report.primerLen)})</h4>
+        <p>${formatNumber(report.passed)} passed · ${formatNumber(report.entangled)} entangled · ${formatNumber(report.skipped)} skipped${report.entangledTruncated ? " (list truncated to 1000)" : ""}</p>
         ${report.entangledNames.length ? `<details><summary>Entangled strand names (${formatNumber(report.entangledNames.length)})</summary><pre class="tool-log">${escapeHtml(report.entangledNames.join("\n"))}</pre></details>` : ""}
       </div>
       <div class="report-section">
-        <h4>Cross-links — DBGPS-links (m=${formatNumber(report.linksM)})</h4>
-        <p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} k-mers shared across reference strands.</p>
+        <h4>Cross-links (m=${formatNumber(report.linksM)})</h4>
+        <p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} cross-link contributions across reference strands.</p>
       </div>
       <div class="report-section narrative">
         <h4>AI interpretation</h4>
         ${narrative}
       </div>
-      <details><summary>Commands</summary><pre class="tool-log">${escapeHtml([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean).join("\n"))}</pre></details>
+      <details><summary>Commands</summary><pre class="tool-log">${escapeHtml([...new Set([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean))].join("\n"))}</pre></details>
     </div>`;
   renderIcons();
 }
@@ -3193,12 +3204,12 @@ async function interpretReport() {
   }
   try {
     const instruction =
-      "You are given a DBGPS DNA data-storage diagnostics report (JSON) combining strand recovery (Sm), " +
+      "You are given a DStoreQC DNA data-storage diagnostics report (JSON) combining strand recovery (Sm), " +
       "k-mer dropout (Kd), k-mer noise (Kn), cross-link counts, and entanglement filtering across a set of " +
       "reference strands. State measured facts with their denominators and tool scopes. Distinguish possible " +
       "explanations from established causes, acknowledge missing evidence, and propose discriminating manual checks. " +
       "Do not equate pooled k-mer support with decoding, distinct-key noise with a base-error rate, or sharing with physical chimeras.";
-    const result = await window.dbgps.aiChat({
+    const result = await window.dstoreqc.aiChat({
       id,
       messages: [{ role: "user", content: instruction }],
       context: reportContext(report),
@@ -3225,7 +3236,7 @@ async function interpretReport() {
 
 function buildReportMarkdown(report: ReportResult, narrative: string) {
   const lines: string[] = [];
-  lines.push("# DBGPS Diagnostics Report", "");
+  lines.push("# DStoreQC Diagnostics Report", "");
   lines.push(`- Generated: ${report.generatedAt}`);
   lines.push(`- Reference: ${report.referenceFile}`);
   lines.push(`- NGS reads: ${report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)"}`);
@@ -3234,6 +3245,7 @@ function buildReportMarkdown(report: ReportResult, narrative: string) {
   lines.push(`| Reference strands | ${report.totalStrands} |`);
   lines.push(`| Entangled strands | ${report.entangled} |`);
   lines.push(`| Passed strands | ${report.passed} |`);
+  lines.push(`| Skipped strands | ${report.skipped} |`);
   lines.push(`| Cross-links | ${report.crossLinks == null ? "n/a" : report.crossLinks} |`);
   const h = report.analyzer?.headline;
   if (h) {
@@ -3244,7 +3256,7 @@ function buildReportMarkdown(report: ReportResult, narrative: string) {
   lines.push("", "## Verdicts", "");
   for (const v of reportVerdicts(report)) lines.push(`- **${v.level.toUpperCase()}** — ${v.text}`);
   if (report.analyzer) {
-    lines.push("", "## Coverage metrics (DBGPS-analyzer)", "");
+    lines.push("", "## Coverage metrics", "");
     lines.push("| Ratio | Cov | Total | Paths | Noise | Exist | Lost | Sm | Kd | Kn |");
     lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const r of report.analyzer.rows) {
@@ -3255,7 +3267,7 @@ function buildReportMarkdown(report: ReportResult, narrative: string) {
     lines.push("", `## Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})`, "", "```", ...report.entangledNames, "```");
   }
   if (narrative) lines.push("", "## AI interpretation", "", narrative);
-  lines.push("", "## Commands", "", "```", report.linksCommand, report.filterCommand, ...(report.analyzer ? [report.analyzer.command] : []), "```", "");
+  lines.push("", "## Commands", "", "```", ...new Set([report.linksCommand, report.filterCommand, ...(report.analyzer ? [report.analyzer.command] : [])]), "```", "");
   return lines.join("\n");
 }
 
@@ -3271,6 +3283,7 @@ function buildReportHtml(report: ReportResult, narrative: string) {
     ["Reference strands", formatNumber(report.totalStrands)],
     ["Entangled strands", formatNumber(report.entangled)],
     ["Passed strands", formatNumber(report.passed)],
+    ["Skipped strands", formatNumber(report.skipped)],
     ["Cross-links", report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)],
     ...(h ? [["Strand recovery Sm", fmtPct(h.sm)], ["k-mer dropout Kd", fmtPct(h.kd)], ["k-mer noise Kn", Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"]] : [])
   ].map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`).join("");
@@ -3279,17 +3292,17 @@ function buildReportHtml(report: ReportResult, narrative: string) {
   const entangledHtml = report.entangledNames.length
     ? `<h2>Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})</h2><pre>${escapeHtml(report.entangledNames.join("\n"))}</pre>`
     : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>DBGPS Diagnostics Report</title><style>${css}</style></head><body>` +
-    `<h1>DBGPS Diagnostics Report</h1>` +
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>DStoreQC Diagnostics Report</title><style>${css}</style></head><body>` +
+    `<h1>DStoreQC Diagnostics Report</h1>` +
     `<p class="muted">Generated ${escapeHtml(new Date(report.generatedAt).toLocaleString())} · k=${escapeHtml(String(report.k))} · primer ${escapeHtml(String(report.primerLen))}</p>` +
     `<p class="muted">Reference: ${escapeHtml(report.referenceFile)}<br/>NGS reads: ${escapeHtml(report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)")}</p>` +
     `<h2>Summary</h2><table>${summaryRows}</table>` +
     `<h2>Verdicts</h2><ul>${verdicts}</ul>` +
-    `<h2>Coverage metrics (DBGPS-analyzer)</h2>${analyzerTable}` +
-    `<h2>Cross-links (DBGPS-links, m=${escapeHtml(String(report.linksM))})</h2><p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} k-mers shared across reference strands.</p>` +
+    `<h2>Coverage metrics</h2>${analyzerTable}` +
+    `<h2>Cross-links (m=${escapeHtml(String(report.linksM))})</h2><p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} cross-link contributions across reference strands.</p>` +
     entangledHtml +
     narrativeHtml +
-    `<h2>Commands</h2><pre>${escapeHtml([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean).join("\n"))}</pre>` +
+    `<h2>Commands</h2><pre>${escapeHtml([...new Set([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean))].join("\n"))}</pre>` +
     `</body></html>`;
 }
 
@@ -3297,9 +3310,9 @@ async function exportReport(format: "html" | "md") {
   if (!latestReport) return;
   const content = format === "html" ? buildReportHtml(latestReport, reportNarrative) : buildReportMarkdown(latestReport, reportNarrative);
   const stamp = latestReport.generatedAt.replace(/[:.]/g, "-");
-  const name = `dbgps-report-${stamp}.${format === "html" ? "html" : "md"}`;
+  const name = `dstoreqc-report-${stamp}.${format === "html" ? "html" : "md"}`;
   try {
-    const res = await window.dbgps.saveFile({ defaultName: name, content });
+    const res = await window.dstoreqc.saveFile({ defaultName: name, content });
     if (res.saved) appendLog(`Report exported to ${res.path}`);
   } catch (error) {
     appendLog(`Export failed: ${errMessage(error)}`);
@@ -3456,13 +3469,13 @@ async function showBatchDetail(index: number) {
   if (!row.detail) {
     ui.batchDetail.innerHTML = `<div class="tool-loading">Loading coverage profile…</div>`;
     try {
-      const record = await window.dbgps.loadBatchSequence({
+      const record = await window.dstoreqc.loadBatchSequence({
         file: batchFile,
         index,
         primerFront: batchPrimerFrontUsed,
         primerBack: batchPrimerBackUsed
       });
-      const result = (await window.dbgps.queryAnalyzer(`sequence ${record.seq}`)) as AnalyzerResult;
+      const result = (await window.dstoreqc.queryAnalyzer(`sequence ${record.seq}`)) as AnalyzerResult;
       if (batchDetailIndex !== index) return;
       if (result.type !== "sequence") {
         ui.batchDetail.innerHTML = `<div class="error-card">${escapeHtml(result.type === "error" ? result.message : `unexpected ${result.type} response`)}</div>`;
@@ -3521,7 +3534,7 @@ async function runBatchAnalysis() {
   ui.batchProgress.textContent = "C kernel running";
 
   try {
-    const result: InteractiveBatchResult = await window.dbgps.runInteractiveBatch({
+    const result: InteractiveBatchResult = await window.dstoreqc.runInteractiveBatch({
       file: batchFile,
       primerFront: front,
       primerBack: back
@@ -3588,7 +3601,7 @@ function buildBatchCsv() {
 async function saveBatchCsv() {
   if (!batchRows.length) return;
   try {
-    const res = await window.dbgps.saveFile({ defaultName: "batch-qc.csv", content: buildBatchCsv() });
+    const res = await window.dstoreqc.saveFile({ defaultName: "batch-qc.csv", content: buildBatchCsv() });
     if (res.saved) appendLog(`Saved Batch QC table to ${res.path}`);
   } catch (error) {
     appendLog(`Save failed: ${errMessage(error)}`);

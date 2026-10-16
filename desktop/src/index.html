@@ -7,7 +7,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';"
     />
-    <title>DBGPS Analyzer</title>
+    <title>DStoreQC</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -15,9 +15,9 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark">DB</div>
+          <div class="brand-mark">DQ</div>
           <div>
-            <h1>DBGPS Analyzer</h1>
+            <h1>DStoreQC</h1>
             <p id="statusText">Kernel not running</p>
           </div>
         </div>
@@ -356,7 +356,7 @@
                   </button>
                 </div>
               </div>
-              <div id="reportResult" class="result-view empty-state">Select a reference strand FASTA (and optional NGS reads), then generate a combined report across DBGPS-analyzer, DBGPS-links, and DBGPS-seq-filter.</div>
+              <div id="reportResult" class="result-view empty-state">Select a reference strand FASTA (and optional NGS reads), then generate a combined coverage, cross-link, and entanglement report.</div>
             </section>
           </div>
         </section>
@@ -395,7 +395,7 @@
           >
             <div class="chat-welcome">
               <h3>Ask about your analysis</h3>
-              <p>Hi! I'm your DBGPS analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</p>
+              <p>Hi! I'm your DStoreQC analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</p>
               <div class="chat-suggestions">
                 <button type="button" class="chat-suggestion" data-chat-suggest="What do Sm, Kd and Kn mean?">What do Sm, Kd and Kn mean?</button>
                 <button type="button" class="chat-suggestion" data-chat-suggest="How do I run a query or batch scan?">How do I run a query or batch scan?</button>

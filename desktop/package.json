@@ -1,8 +1,8 @@
 {
-  "name": "dbgps-analyzer-desktop",
+  "name": "dstoreqc-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Electron desktop diagnostics console for DBGPS-analyzer.",
+  "description": "Electron desktop diagnostics console for DStoreQC.",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && esbuild src/renderer.ts --bundle --platform=browser --format=iife --outfile=dist/renderer.js && node scripts/copy-static.mjs",
@@ -23,8 +23,8 @@
     "typescript": "^5.7.2"
   },
   "build": {
-    "appId": "org.dbgps.analyzer",
-    "productName": "DBGPS Analyzer",
+    "appId": "org.dstoreqc.desktop",
+    "productName": "DStoreQC",
     "directories": {
       "output": "release"
     },
@@ -33,16 +33,8 @@
     ],
     "extraResources": [
       {
-        "from": "../DBGPS-analyzer",
-        "to": "DBGPS-analyzer"
-      },
-      {
-        "from": "../DBGPS-links",
-        "to": "DBGPS-links"
-      },
-      {
-        "from": "../DBGPS-seq-filter",
-        "to": "DBGPS-seq-filter"
+        "from": "../dstoreqc",
+        "to": "dstoreqc"
       }
     ]
   }

@@ -57,7 +57,7 @@ export const AGENT_TOOLS: AgentToolDefinition[] = [
 ];
 
 export const AGENT_SYSTEM_PROMPT = [
-  "You are the bounded read-only analytical agent in DBGPS Analyzer.",
+  "You are the bounded read-only analytical agent in DStoreQC.",
   "You may select only the advertised tools against the current snapshot. No shell, file access, read loading, recounting, filtering, export, or changed parameters are available.",
   "Use tools when needed to obtain missing evidence; do not invent an unseen coverage interval, graph, older result, or biological cause.",
   "Initial active-view observations without a matching datasetVersion are not verified against the loaded index. Verify current-index claims through tools; manually generated reports can use different inputs and scopes.",
@@ -234,7 +234,7 @@ export async function runReadOnlyAgent(options: {
   try { endpointOrigin = new URL(settings.baseUrl).origin; } catch { /* Provider validation reports invalid endpoints. */ }
   const run: AgentRun = {
     snapshot, trace: [], modelTurns: 0, stopReason: "error", content: "", messages: [],
-    generation: { apiStyle: settings.apiStyle, model: settings.model, endpointOrigin, temperature: settings.temperature, maxTokensPerTurn: settings.maxTokens, promptVersion: "dbgps-read-only-v1" }
+    generation: { apiStyle: settings.apiStyle, model: settings.model, endpointOrigin, temperature: settings.temperature, maxTokensPerTurn: settings.maxTokens, promptVersion: "dstoreqc-read-only-v1" }
   };
   const previous: AgentProviderTurn[] = [];
   const ids = new Set<string>();
