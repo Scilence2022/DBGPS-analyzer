@@ -7,6 +7,7 @@ import {
   type ChatMessage, type ChatMessageMeta, type ChatMode, type ChatThread, type CompactTrace, type SlashAction, type SlashCommand,
   type Suggestion, type ThreadStore, type ToolTarget
 } from "./agent-ui";
+import { adjacentFoldChanges, describeFoldEdge, foldAxisCap, formatFold, type FoldEdge } from "./fold-change";
 import { analyzerScope, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
 declare global {
@@ -1218,7 +1219,7 @@ function renderIndexResult(data: IndexResult) {
   `;
 }
 
-function renderSequenceChartControls(hasRatios: boolean) {
+function renderSequenceChartControls(hasEdges: boolean, series: "coverage" | "ratio" | "both") {
   const typeOptions: Array<{ type: "bar" | "line"; label: string }> = [
     { type: "bar", label: "Bars" },
     { type: "line", label: "Line" }
@@ -1228,17 +1229,22 @@ function renderSequenceChartControls(hasRatios: boolean) {
     { value: "ratio", label: "Fold change" },
     { value: "both", label: "Both" }
   ];
-  const series = hasRatios ? appSettings.sequenceChartSeries : "coverage";
-  const showTypeToggle = series !== "ratio";
+  const showCoverage = series !== "ratio";
+  const showFold = series !== "coverage";
+  const legend = [
+    showCoverage ? '<span class="legend-item"><i class="swatch coverage"></i>Coverage</span><span class="legend-item"><i class="swatch low"></i>Low (&lt; 3)</span><span class="legend-item"><i class="swatch zero"></i>Zero</span>' : "",
+    showFold ? '<span class="legend-item"><i class="swatch rise"></i>Rise</span><span class="legend-item"><i class="swatch drop"></i>Drop</span><span class="legend-item"><i class="swatch edge"></i>Into / out of zero</span>' : ""
+  ].join("");
   return `
     <div class="sequence-chart-header">
       <div>
         <strong>Coverage by k-mer position</strong>
-        <span>Green: coverage. Orange: adjacent fold-change (larger/smaller). Toggle to show either series alone or both on twin axes.</span>
+        <span>${showFold ? "Fold change is signed log₂(next / current) between adjacent k-mers: below 0 coverage falls, above 0 it rises; dashed guides mark 2-fold." : "Coverage of each ordered k-mer window along the sequence."}</span>
+        <div class="chart-legend">${legend}</div>
       </div>
       <div class="chart-toggles">
         ${
-          hasRatios
+          hasEdges
             ? `<div class="chart-toggle series" role="tablist" aria-label="Chart series">
           ${seriesOptions
             .map(
@@ -1253,7 +1259,7 @@ function renderSequenceChartControls(hasRatios: boolean) {
             : ""
         }
         ${
-          showTypeToggle
+          showCoverage
             ? `<div class="chart-toggle" role="tablist" aria-label="Coverage chart type">
           ${typeOptions
             .map(
@@ -1280,140 +1286,96 @@ function chartAxisLabels(data: SequenceCoverage[]) {
   return { first, mid, last };
 }
 
-function renderCoverageBarPlot(data: SequenceCoverage[], maxCoverage: number) {
-  return `
-    <div class="coverage-bars" aria-label="k-mer coverage bars">
-      ${data
-        .map((item) => {
-          const height = Math.max(4, Math.round((item.coverage / maxCoverage) * 100));
-          return `<span class="${coverageClass(item.coverage)}" style="--h:${height}%" title="${escapeHtml(item.position)} ${escapeHtml(item.kmer)} cov=${escapeHtml(item.coverage)}"></span>`;
-        })
-        .join("")}
-    </div>
-  `;
+// Both tracks share one x scale: window i occupies [i, i + 1] in a viewBox N
+// units wide, so the fold-change bar for edge i sits exactly on the boundary
+// between the two coverage bars it compares.
+function renderCoverageTrack(data: SequenceCoverage[], maxCoverage: number) {
+  const n = data.length;
+  const grid = `<line x1="0" y1="50" x2="${n}" y2="50" class="chart-grid-line"></line>`;
+  let marks: string;
+  if (appSettings.sequenceChartType === "line") {
+    const points = data
+      .map((item, i) => `${(i + 0.5).toFixed(2)},${(100 - (item.coverage / maxCoverage) * 100).toFixed(2)}`)
+      .join(" ");
+    const zeros = data
+      .map((item, i) => (item.coverage === 0 ? `<rect class="cov-zero" x="${i}" y="97" width="1" height="3"><title>${escapeHtml(item.position)} ${escapeHtml(item.kmer)} cov=0</title></rect>` : ""))
+      .join("");
+    marks = `<polyline points="${points}" class="coverage-line"></polyline>${zeros}`;
+  } else {
+    marks = data
+      .map((item, i) => {
+        const height = item.coverage === 0 ? 3 : Math.max(1.5, (item.coverage / maxCoverage) * 100);
+        return `<rect class="cov-${coverageClass(item.coverage)}" x="${(i + 0.12).toFixed(2)}" y="${(100 - height).toFixed(2)}" width="0.76" height="${height.toFixed(2)}"><title>${escapeHtml(item.position)} ${escapeHtml(item.kmer)} cov=${escapeHtml(item.coverage)}</title></rect>`;
+      })
+      .join("");
+  }
+  return `<svg class="track-svg" viewBox="0 0 ${n} 100" preserveAspectRatio="none" role="img" aria-label="k-mer coverage">${grid}${marks}</svg>`;
 }
 
-function renderCoverageLinePlot(data: SequenceCoverage[], maxCoverage: number) {
-  const points = data
-    .map((item, index) => {
-      const x = data.length > 1 ? (index / (data.length - 1)) * 100 : 50;
-      const y = 100 - (item.coverage / maxCoverage) * 100;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
+function renderFoldTrack(edges: FoldEdge[], n: number, cap: number) {
+  const y = (log2: number) => 50 - (Math.max(-cap, Math.min(cap, log2)) / cap) * 50;
+  const guides = [1, -1].map((v) => `<line x1="0" y1="${y(v).toFixed(2)}" x2="${n}" y2="${y(v).toFixed(2)}" class="fold-guide"></line>`).join("");
+  const bars = edges
+    .map((edge) => {
+      if (edge.kind === "both-zero") return "";
+      const x = (edge.edge + 1 - 0.32).toFixed(2);
+      const title = `<title>${escapeHtml(describeFoldEdge(edge))}</title>`;
+      if (edge.kind !== "change") {
+        const up = edge.kind === "from-zero";
+        return `<rect class="fold-edge" x="${x}" y="${up ? 0 : 50}" width="0.64" height="50">${title}</rect>`;
+      }
+      const top = Math.min(50, y(edge.log2!));
+      const height = Math.max(0.8, Math.abs(y(edge.log2!) - 50));
+      const strong = Math.abs(edge.log2!) >= 1;
+      const clipped = Math.abs(edge.log2!) > cap;
+      return `<rect class="fold-${edge.log2! >= 0 ? "rise" : "drop"}${strong ? " strong" : ""}${clipped ? " clipped" : ""}" x="${x}" y="${(edge.log2! >= 0 ? top : 50).toFixed(2)}" width="0.64" height="${height.toFixed(2)}">${title}</rect>`;
     })
-    .join(" ");
-  return `
-    <svg class="coverage-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="k-mer coverage line chart">
-      <line x1="0" y1="0" x2="100" y2="0" class="chart-grid-line"></line>
-      <line x1="0" y1="50" x2="100" y2="50" class="chart-grid-line"></line>
-      <line x1="0" y1="100" x2="100" y2="100" class="chart-grid-line baseline"></line>
-      <polyline points="${points}" class="coverage-line"></polyline>
-    </svg>
-  `;
-}
-
-function formatRatio(value: number) {
-  if (!Number.isFinite(value)) return "0";
-  return `${value.toFixed(value >= 10 ? 0 : 1)}×`;
-}
-
-// Each ratio is the fold-change across the edge between two adjacent k-mers,
-// so plot it at the midpoint between their coverage positions.
-function ratioPolylinePoints(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
-  return ratios
-    .map((item, index) => {
-      const x = ((index + 0.5) / (count - 1)) * 100;
-      const y = 100 - (item.ratio / maxRatio) * 100;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(" ");
-}
-
-function renderRatioOverlay(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
-  if (ratios.length === 0 || count < 2) return "";
-  return `
-    <svg class="ratio-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="adjacent coverage fold-change">
-      <polyline points="${ratioPolylinePoints(ratios, count, maxRatio)}" class="ratio-line"></polyline>
-    </svg>
-  `;
-}
-
-function renderRatioLinePlot(ratios: Array<{ position: number; ratio: number }>, count: number, maxRatio: number) {
-  if (ratios.length === 0 || count < 2) return "";
-  return `
-    <svg class="coverage-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="adjacent coverage fold-change line">
-      <line x1="0" y1="0" x2="100" y2="0" class="chart-grid-line"></line>
-      <line x1="0" y1="50" x2="100" y2="50" class="chart-grid-line"></line>
-      <line x1="0" y1="100" x2="100" y2="100" class="chart-grid-line baseline"></line>
-      <polyline points="${ratioPolylinePoints(ratios, count, maxRatio)}" class="ratio-line solo"></polyline>
-    </svg>
-  `;
+    .join("");
+  return `<svg class="track-svg" viewBox="0 0 ${n} 100" preserveAspectRatio="none" role="img" aria-label="signed log2 fold change between adjacent k-mers">${guides}<line x1="0" y1="50" x2="${n}" y2="50" class="fold-zero"></line>${bars}</svg>`;
 }
 
 function renderSequenceCoverageChart(data: SequenceResult) {
   const shown = data.coverages.slice(0, 180);
   const xLabels = chartAxisLabels(shown);
-  const shownRatios = (data.ratios ?? []).slice(0, Math.max(0, shown.length - 1));
-  const hasRatios = shownRatios.length > 0;
-
-  // Fold-change can only be shown when adjacent pairs exist; otherwise fall back.
-  const series = hasRatios ? appSettings.sequenceChartSeries : "coverage";
-
+  const edges = adjacentFoldChanges(shown.map((item) => item.coverage));
+  const hasEdges = edges.length > 0;
+  // Fold change needs at least one adjacent pair; otherwise fall back.
+  const series = hasEdges ? appSettings.sequenceChartSeries : "coverage";
   const maxCoverage = Math.max(1, ...shown.map((item) => item.coverage));
-  const maxRatio = Math.max(1, ...shownRatios.map((item) => item.ratio));
+  const cap = foldAxisCap(edges);
+  const showCoverage = series !== "ratio";
+  const showFold = series !== "coverage";
+  const both = showCoverage && showFold;
 
-  const coverageAxis = `
+  const coverageRow = showCoverage ? `
         <div class="y-axis-label">Coverage</div>
         <div class="y-axis">
           <span>${formatNumber(maxCoverage)}</span>
           <span>${formatNumber(Math.round(maxCoverage / 2))}</span>
           <span>0</span>
-        </div>`;
-  const ratioLeftAxis = `
-        <div class="y-axis-label fold">Fold change</div>
-        <div class="y-axis fold">
-          <span>${formatRatio(maxRatio)}</span>
-          <span>${formatRatio(maxRatio / 2)}</span>
-          <span>0</span>
-        </div>`;
-  const ratioRightAxis = `
-        <div class="y-axis right">
-          <span>${formatRatio(maxRatio)}</span>
-          <span>${formatRatio(maxRatio / 2)}</span>
-          <span>0</span>
         </div>
-        <div class="y-axis-label right">Fold change</div>`;
-
-  const coveragePlot = appSettings.sequenceChartType === "line"
-    ? renderCoverageLinePlot(shown, maxCoverage)
-    : renderCoverageBarPlot(shown, maxCoverage);
-
-  let leftAxis = coverageAxis;
-  let plot = coveragePlot;
-  let rightAxis = "";
-  let dual = false;
-
-  if (series === "ratio") {
-    leftAxis = ratioLeftAxis;
-    plot = renderRatioLinePlot(shownRatios, shown.length, maxRatio);
-  } else if (series === "both") {
-    plot = `${coveragePlot}${renderRatioOverlay(shownRatios, shown.length, maxRatio)}`;
-    rightAxis = ratioRightAxis;
-    dual = true;
-  }
+        <div class="chart-plot${both ? " short" : ""}">${renderCoverageTrack(shown, maxCoverage)}</div>` : "";
+  const foldRow = showFold ? `
+        <div class="y-axis-label fold" title="Signed log₂ fold change between adjacent k-mers">log₂ FC</div>
+        <div class="y-axis fold">
+          <span title="${escapeHtml(formatFold(cap))}">+${cap}</span>
+          <span>0</span>
+          <span title="${escapeHtml(formatFold(-cap))}">−${cap}</span>
+        </div>
+        <div class="chart-plot fold-plot${both ? " compact" : ""}">${renderFoldTrack(edges, shown.length, cap)}</div>` : "";
 
   return `
     <section class="sequence-chart-panel">
-      ${renderSequenceChartControls(hasRatios)}
-      <div class="sequence-chart-frame${dual ? " dual-axis" : ""}">
-        ${leftAxis}
-        <div class="chart-plot">${plot}</div>
-        ${rightAxis}
-        <div class="x-axis-label">Position</div>
+      ${renderSequenceChartControls(hasEdges, series)}
+      <div class="sequence-chart-frame">
+        ${coverageRow}
+        ${foldRow}
         <div class="x-axis">
           <span>${formatNumber(xLabels.first)}</span>
           <span>${formatNumber(xLabels.mid)}</span>
           <span>${formatNumber(xLabels.last)}</span>
         </div>
+        <div class="x-axis-label">Position (k-mer window)</div>
       </div>
       ${data.coverages.length > shown.length ? `<p class="table-note">Showing the first ${shown.length} of ${data.coverages.length} k-mers.</p>` : ""}
     </section>

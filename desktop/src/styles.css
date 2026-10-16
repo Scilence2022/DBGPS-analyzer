@@ -18,6 +18,8 @@
   --red: #b13b3b;
   --green: #1f8a5b;
   --code-bg: #edf3f2;
+  --fc-rise: #2f6fd6;
+  --fc-drop: #d9771e;
   --scrollbar: color-mix(in srgb, var(--text) 18%, transparent);
 
   --radius-sm: 7px;
@@ -55,6 +57,8 @@
   --red: #df6b6b;
   --green: #69c391;
   --code-bg: #0e1214;
+  --fc-rise: #6fa4ff;
+  --fc-drop: #f0a04b;
   --scrollbar: color-mix(in srgb, var(--text) 22%, transparent);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 1px rgba(0, 0, 0, 0.2);
@@ -1115,7 +1119,7 @@ code {
   font-size: 13px;
 }
 
-.sequence-chart-header span {
+.sequence-chart-header > div > span {
   display: block;
   margin-top: 3px;
   color: var(--muted);
@@ -1157,30 +1161,43 @@ code {
   color: var(--on-accent);
 }
 
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 7px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--green);
+}
+
+.swatch.low { background: var(--amber); }
+.swatch.zero { background: var(--red); }
+.swatch.rise { background: var(--fc-rise); }
+.swatch.drop { background: var(--fc-drop); }
+.swatch.edge {
+  background: color-mix(in srgb, var(--red) 30%, transparent);
+  box-shadow: inset 0 0 0 1px var(--red);
+}
+
+/* Coverage and fold-change tracks share columns 3 (plot) and one x-axis. */
 .sequence-chart-frame {
   display: grid;
-  grid-template-columns: 18px 54px minmax(0, 1fr);
-  grid-template-rows: 180px 26px;
+  grid-template-columns: 18px 46px minmax(0, 1fr);
   gap: 6px 8px;
   align-items: stretch;
-}
-
-.sequence-chart-frame.dual-axis {
-  grid-template-columns: 18px 54px minmax(0, 1fr) 54px 18px;
-}
-
-.y-axis.right {
-  align-items: flex-start;
-}
-
-.y-axis-label.right {
-  transform: rotate(0deg);
-  color: var(--amber);
-}
-
-.y-axis.fold,
-.y-axis-label.fold {
-  color: var(--amber);
 }
 
 .y-axis-label {
@@ -1191,6 +1208,12 @@ code {
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
+  white-space: nowrap;
+}
+
+.y-axis.fold,
+.y-axis-label.fold {
+  color: var(--fc-drop);
 }
 
 .x-axis-label {
@@ -1207,9 +1230,10 @@ code {
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-end;
-  padding: 0 0 1px;
+  padding: 8px 0;
   color: var(--muted);
   font-size: 11px;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1218,6 +1242,7 @@ code {
   display: flex;
   justify-content: space-between;
   align-items: start;
+  padding: 0 10px;
   color: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -1230,50 +1255,41 @@ code {
   padding: 8px 10px;
   border-left: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  background:
-    linear-gradient(to bottom, var(--border) 1px, transparent 1px) 0 0 / 100% 50%,
-    var(--surface);
+  background: var(--surface);
   overflow: hidden;
 }
 
-.coverage-bars {
-  height: 100%;
-  display: flex;
-  align-items: end;
-  gap: 2px;
+.chart-plot.short {
+  height: 150px;
 }
 
-.coverage-bars span {
-  flex: 1 1 4px;
-  min-width: 3px;
-  height: var(--h);
-  border-radius: 3px 3px 0 0;
-  background: var(--green);
+.chart-plot.fold-plot {
+  border-bottom-style: dashed;
 }
 
-.coverage-bars span.low {
-  background: var(--amber);
+.chart-plot.fold-plot.compact {
+  height: 104px;
 }
 
-.coverage-bars span.zero {
-  height: 4px;
-  background: var(--red);
-}
-
-.coverage-line-chart {
+.track-svg {
   width: 100%;
   height: 100%;
   display: block;
+  overflow: visible;
 }
+
+.track-svg rect {
+  shape-rendering: crispEdges;
+}
+
+.cov-ok { fill: var(--green); }
+.cov-low { fill: var(--amber); }
+.cov-zero { fill: var(--red); }
 
 .chart-grid-line {
   stroke: color-mix(in srgb, var(--border) 72%, transparent);
-  stroke-width: 0.45;
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
-}
-
-.chart-grid-line.baseline {
-  stroke: var(--border);
 }
 
 .coverage-line {
@@ -1285,27 +1301,39 @@ code {
   vector-effect: non-scaling-stroke;
 }
 
-.ratio-overlay {
-  position: absolute;
-  inset: 8px 10px;
-  width: auto;
-  height: auto;
-  pointer-events: none;
-}
-
-.ratio-line {
-  fill: none;
-  stroke: var(--amber);
-  stroke-width: 1.5;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-  stroke-dasharray: 3 2;
+.fold-zero {
+  stroke: var(--border-strong);
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
 
-.ratio-line.solo {
-  stroke-width: 2;
-  stroke-dasharray: none;
+.fold-guide {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Diverging encoding: hue = direction, saturation = magnitude (≥ 2-fold is strong). */
+.fold-rise { fill: color-mix(in srgb, var(--fc-rise) 38%, transparent); }
+.fold-drop { fill: color-mix(in srgb, var(--fc-drop) 38%, transparent); }
+.fold-rise.strong { fill: var(--fc-rise); }
+.fold-drop.strong { fill: var(--fc-drop); }
+
+.fold-rise.clipped,
+.fold-drop.clipped,
+.fold-edge {
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.fold-rise.clipped { stroke: var(--fc-rise); }
+.fold-drop.clipped { stroke: var(--fc-drop); }
+
+/* Edges into/out of zero coverage have no finite log value: full-height red. */
+.fold-edge {
+  fill: color-mix(in srgb, var(--red) 28%, transparent);
+  stroke: var(--red);
 }
 
 .table-note {
