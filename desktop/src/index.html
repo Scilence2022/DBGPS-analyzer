@@ -361,59 +361,140 @@
           </div>
         </section>
 
-        <aside class="chat-panel">
-          <div class="chat-header">
-            <div class="section-title">
-              <i data-lucide="message-square"></i>
-              <h2>AI ChatBox</h2>
+        <div id="chatResizer" class="chat-resizer" role="separator" aria-orientation="vertical" aria-label="Resize agent panel" tabindex="0" title="Drag to resize · double-click to reset"></div>
+
+        <aside id="chatPanel" class="chat-panel" aria-label="DStoreQC Agent">
+          <header class="agent-header">
+            <button id="threadsButton" class="agent-icon-button" title="Conversations" aria-label="Show conversations" aria-expanded="false" aria-controls="threadsDrawer">
+              <i data-lucide="history"></i>
+            </button>
+            <div class="agent-heading">
+              <h2 id="threadTitle">New conversation</h2>
+              <span id="agentSubtitle" class="agent-subtitle">DStoreQC Agent</span>
             </div>
-            <div class="chat-header-actions">
-              <div id="chatProviderSwitch" class="chat-provider-switch">
-                <select id="chatProviderSelect" title="Chat provider" aria-label="Chat provider"></select>
-                <select id="chatModelSelect" title="Chat model" aria-label="Chat model"></select>
-              </div>
-              <span id="aiProvider" class="provider-pill" hidden>local</span>
-              <button id="exportChatButton" class="icon-only ghost" title="Export conversation as Markdown" aria-label="Export conversation as Markdown">
+            <div class="agent-header-actions">
+              <button id="newThreadButton" class="agent-icon-button" title="New conversation (⌘⇧O)" aria-label="New conversation">
+                <i data-lucide="square-pen"></i>
+              </button>
+              <button id="exportChatButton" class="agent-icon-button" title="Export conversation as Markdown" aria-label="Export conversation as Markdown">
                 <i data-lucide="download"></i>
               </button>
-              <button id="clearChatButton" class="icon-only ghost" title="Clear conversation" aria-label="Clear conversation">
-                <i data-lucide="eraser"></i>
+              <button id="expandChatButton" class="agent-icon-button" title="Widen panel" aria-label="Widen agent panel" aria-pressed="false">
+                <i data-lucide="maximize-2"></i>
+              </button>
+              <button id="collapseChatButton" class="agent-icon-button" title="Hide panel (⌘J)" aria-label="Hide agent panel">
+                <i data-lucide="panel-right-close"></i>
               </button>
             </div>
+          </header>
+
+          <div id="threadsDrawer" class="threads-drawer" hidden>
+            <div class="threads-search">
+              <i data-lucide="search"></i>
+              <input id="threadSearchInput" type="search" placeholder="Search conversations" aria-label="Search conversations" />
+            </div>
+            <ul id="threadList" class="thread-list" role="listbox" aria-label="Conversations"></ul>
           </div>
-          <div id="chatContextChip" class="chat-context-chip" hidden></div>
-          <div class="chat-agent-controls">
-            <label><input id="agentToolsToggle" type="checkbox"> Read-only tools</label>
+
+          <div class="agent-modebar">
+            <div class="mode-switch" role="radiogroup" aria-label="Assistant mode">
+              <button type="button" class="mode-option" data-chat-mode="chat" role="radio" aria-checked="true" title="Text answers grounded in the context you attach">
+                <i data-lucide="message-square"></i><span>Chat</span>
+              </button>
+              <button type="button" class="mode-option" data-chat-mode="agent" role="radio" aria-checked="false" title="Lets the model run bounded read-only queries against the loaded index">
+                <i data-lucide="bot"></i><span>Agent</span>
+              </button>
+            </div>
+            <button id="capabilitiesButton" class="agent-readiness" aria-expanded="false" aria-controls="agentCapabilities" title="What the agent can read right now">
+              <span id="agentReadinessDot" class="readiness-dot"></span>
+              <span id="agentReadinessText">No index</span>
+            </button>
+            <div id="chatProviderSwitch" class="chat-provider-switch">
+              <select id="chatProviderSelect" title="Provider" aria-label="Chat provider"></select>
+              <select id="chatModelSelect" title="Model" aria-label="Chat model"></select>
+            </div>
+            <span id="aiProvider" class="provider-pill" hidden>local</span>
+            <div id="agentCapabilities" class="agent-capabilities" hidden>
+              <div class="capabilities-head">
+                <strong>Read-only evidence tools</strong>
+                <span id="agentLimitsText" class="muted"></span>
+              </div>
+              <ul id="agentToolList" class="agent-tool-list"></ul>
+              <p class="capabilities-note">The agent cannot load files, recount reads, change parameters, or export. Questions, attached context and retrieved measurements are sent to the selected provider.</p>
+            </div>
           </div>
+
+
           <div
             id="chatMessages"
             class="chat-messages"
             role="log"
             aria-live="polite"
             aria-relevant="additions text"
-            aria-label="Conversation with the AI assistant"
-          >
-            <div class="chat-welcome">
-              <h3>Ask about your analysis</h3>
-              <p>Hi! I'm your DStoreQC analysis assistant. Run a query, batch scan, or report and ask me to interpret the coverage, dropout (Kd), strand recovery (Sm), or graph-adjacency evidence — or ask anything else.</p>
-              <div class="chat-suggestions">
-                <button type="button" class="chat-suggestion" data-chat-suggest="What do Sm, Kd and Kn mean?">What do Sm, Kd and Kn mean?</button>
-                <button type="button" class="chat-suggestion" data-chat-suggest="How do I run a query or batch scan?">How do I run a query or batch scan?</button>
-                <button type="button" class="chat-suggestion" data-chat-suggest="What are cross-links and entanglement?">What are cross-links and entanglement?</button>
-              </div>
+            aria-label="Conversation with the DStoreQC agent"
+          ></div>
+
+          <div id="agentRunbar" class="agent-runbar" hidden aria-live="polite">
+            <span class="runbar-spinner" aria-hidden="true"></span>
+            <span id="agentRunbarText" class="runbar-text">Connecting…</span>
+            <span id="agentRunbarMeta" class="runbar-meta"></span>
+            <div class="runbar-progress"><span id="agentRunbarProgress"></span></div>
+          </div>
+
+          <div id="chatSuggestions" class="chat-suggestions-row" aria-label="Suggested questions"></div>
+
+          <form id="chatComposer" class="composer" autocomplete="off">
+            <div id="editBanner" class="edit-banner" hidden>
+              <i data-lucide="pencil"></i>
+              <span>Editing an earlier question — later messages will be replaced.</span>
+              <button type="button" id="cancelEditButton" class="link-button">Cancel</button>
             </div>
-          </div>
-          <div class="chat-input-row">
-            <textarea id="chatInput" spellcheck="false" rows="1" aria-label="Message the AI assistant" placeholder="Enter or ⌘↵ to send, Shift+Enter for newline"></textarea>
-            <button id="sendChatButton" class="icon-only" title="Send (Enter)" aria-label="Send message">
-              <i data-lucide="send"></i>
-            </button>
-            <button id="stopChatButton" class="icon-only stop" title="Stop generating (Esc)" aria-label="Stop generating" hidden>
-              <i data-lucide="square"></i>
-            </button>
-          </div>
+            <div id="slashMenu" class="slash-menu" role="listbox" aria-label="Commands" hidden></div>
+            <textarea id="chatInput" spellcheck="false" rows="1" aria-label="Message the DStoreQC agent" placeholder="Ask about your analysis, or type / for commands"></textarea>
+            <div class="composer-footer">
+              <div class="composer-context">
+                <button type="button" id="chatContextChip" class="context-chip" title="Context attached to the next message" hidden>
+                  <i data-lucide="paperclip"></i><span id="chatContextLabel"></span>
+                </button>
+                <button type="button" id="contextPinButton" class="context-tool" title="Pin this context across views" aria-label="Pin context" aria-pressed="false" hidden>
+                  <i data-lucide="pin"></i>
+                </button>
+                <button type="button" id="contextPreviewButton" class="context-tool" title="Preview the context payload" aria-label="Preview context" hidden>
+                  <i data-lucide="eye"></i>
+                </button>
+                <span id="chatContextEmpty" class="context-empty">No context</span>
+              </div>
+              <span class="composer-hint"><kbd>/</kbd> commands · <kbd>⏎</kbd> send</span>
+              <button type="submit" id="sendChatButton" class="send-button" title="Send (Enter)" aria-label="Send message">
+                <i data-lucide="arrow-up"></i>
+              </button>
+              <button type="button" id="stopChatButton" class="send-button stop" title="Stop (Esc)" aria-label="Stop generating" hidden>
+                <i data-lucide="square"></i>
+              </button>
+            </div>
+          </form>
         </aside>
+
+        <button id="chatRail" class="chat-rail" title="Show agent (⌘J)" aria-label="Show agent panel" hidden>
+          <i data-lucide="panel-right-open"></i>
+          <span class="rail-label">Agent</span>
+          <span id="chatRailBadge" class="rail-badge" hidden></span>
+        </button>
       </main>
+
+      <div id="contextDialog" class="context-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="contextDialogTitle">
+        <div class="context-dialog-window">
+          <header>
+            <div>
+              <h2 id="contextDialogTitle">Attached context</h2>
+              <p id="contextDialogMeta" class="muted"></p>
+            </div>
+            <button id="closeContextDialogButton" class="icon-only" title="Close" aria-label="Close"><i data-lucide="x"></i></button>
+          </header>
+          <p class="context-dialog-note">This JSON travels with your next message. The main process redacts path-like fields, compacts arrays, and enforces a 12,000-character evidence budget before anything reaches the provider.</p>
+          <pre id="contextDialogBody"></pre>
+        </div>
+      </div>
 
       <section id="settingsPanel" class="settings-panel" hidden aria-label="Settings">
         <div class="settings-window">

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AgentRun, AgentTraceEvent } from "./agent-types";
+import type { AgentProgressEvent, AgentRun, AgentStatus, AgentTraceEvent } from "./agent-types";
 import type { AnalyzerConfig, AnalyzerScope, AnalyzerSummaryResult, SequenceSummaryResult } from "./analyzer-config";
 
 type ProviderId =
@@ -141,6 +141,12 @@ const api = {
     ipcRenderer.on("ai:tool", listener);
     return () => ipcRenderer.removeListener("ai:tool", listener);
   },
+  onAiProgress: (callback: (event: AgentProgressEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: AgentProgressEvent) => callback(payload);
+    ipcRenderer.on("ai:progress", listener);
+    return () => ipcRenderer.removeListener("ai:progress", listener);
+  },
+  getAgentStatus: () => ipcRenderer.invoke("ai:agentStatus") as Promise<AgentStatus>,
   refreshProviderModels: (request: ProviderRefreshRequest) =>
     ipcRenderer.invoke("ai:refreshModels", request) as Promise<{ models: string[]; provider: string; source: string }>,
   loadSecrets: () => ipcRenderer.invoke("secrets:load") as Promise<Record<string, string>>,
