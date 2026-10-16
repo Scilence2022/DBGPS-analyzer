@@ -410,6 +410,7 @@ const elements = {
   chatProviderSwitch: $("chatProviderSwitch"),
   chatProviderSelect: $("chatProviderSelect") as HTMLSelectElement,
   chatModelSelect: $("chatModelSelect") as HTMLSelectElement,
+  refreshModelsButton: $("refreshModelsButton") as HTMLButtonElement,
   settingsPanel: $("settingsPanel"),
   saveSettingsButton: $("saveSettingsButton") as HTMLButtonElement,
   closeSettingsButton: $("closeSettingsButton") as HTMLButtonElement,
@@ -810,9 +811,13 @@ function selectSettingsTab(tab: string) {
   });
 }
 
-async function refreshProviderModels(providerId: ProviderId) {
+type ModelRefreshOutcome = { ok: boolean; message: string; selectedChanged: boolean };
+
+async function refreshProviderModels(providerId: ProviderId): Promise<ModelRefreshOutcome> {
   const provider = PROVIDER_BY_ID[providerId];
   const settings = appSettings.providers[providerId];
+  const previousModel = settings.selectedModel;
+  let outcome: ModelRefreshOutcome;
   settings.refreshStatus = "Refreshing...";
   renderProviderList();
 
@@ -824,6 +829,7 @@ async function refreshProviderModels(providerId: ProviderId) {
     });
     if (result.models.length === 0) {
       settings.refreshStatus = "No models returned";
+      outcome = { ok: false, message: `${provider.label} returned no models`, selectedChanged: false };
     } else {
       settings.models = result.models;
       // The refreshed list is sorted alphabetically, so models[0] is an arbitrary
@@ -836,15 +842,48 @@ async function refreshProviderModels(providerId: ProviderId) {
       }
       settings.lastRefresh = new Date().toLocaleString();
       settings.refreshStatus = `${result.models.length} refreshed models`;
+      const selectedChanged = settings.selectedModel !== previousModel;
+      outcome = {
+        ok: true,
+        selectedChanged,
+        message: `${result.models.length} models${selectedChanged ? ` · "${previousModel}" is not available, switched to ${settings.selectedModel}` : ""}`
+      };
     }
     saveSettings();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     settings.refreshStatus = message;
     appendLog(`${provider.label} model refresh failed: ${message}`);
+    outcome = { ok: false, message, selectedChanged: false };
   }
 
   renderSettings();
+  return outcome;
+}
+
+// Refresh button beside the chat model picker: re-reads the active provider's
+// model list so a model that was pulled, renamed, or removed is reflected
+// without a trip to Settings. Result shows on the button itself and in the log.
+let modelRefreshTimer: number | undefined;
+async function refreshActiveProviderModels() {
+  if (elements.refreshModelsButton.classList.contains("loading") || activeChat) return;
+  const providerId = appSettings.activeProvider;
+  const button = elements.refreshModelsButton;
+  window.clearTimeout(modelRefreshTimer);
+  button.classList.remove("ok", "failed");
+  button.classList.add("loading");
+  button.disabled = true;
+  button.title = `Refreshing ${PROVIDER_BY_ID[providerId].label} models…`;
+  const outcome = await refreshProviderModels(providerId);
+  button.classList.remove("loading");
+  button.disabled = false;
+  button.classList.add(outcome.ok ? "ok" : "failed");
+  button.title = outcome.ok ? `Refreshed: ${outcome.message}` : `Refresh failed: ${outcome.message}`;
+  if (outcome.ok) appendLog(`${PROVIDER_BY_ID[providerId].label}: ${outcome.message}`);
+  modelRefreshTimer = window.setTimeout(() => {
+    button.classList.remove("ok", "failed");
+    button.title = "Refresh model list";
+  }, 4000);
 }
 
 async function refreshEnabledProviders() {
@@ -3446,6 +3485,7 @@ elements.chatProviderSelect.addEventListener("change", () => {
   saveSettings();
   renderSettings();
 });
+elements.refreshModelsButton.addEventListener("click", () => { void refreshActiveProviderModels(); });
 elements.chatModelSelect.addEventListener("change", () => {
   appSettings.providers[appSettings.activeProvider].selectedModel = elements.chatModelSelect.value;
   saveSettings();
