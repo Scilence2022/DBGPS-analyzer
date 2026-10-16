@@ -1803,6 +1803,46 @@ td {
   border-color: var(--border-strong);
 }
 
+.model-refresh {
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-color: var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+
+.model-refresh svg {
+  width: 13px;
+  height: 13px;
+  flex-basis: 13px;
+}
+
+.model-refresh:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-strong);
+}
+
+.model-refresh.loading svg {
+  animation: trace-spin 0.8s linear infinite;
+}
+
+.model-refresh.ok {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+}
+
+.model-refresh.failed {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+}
+
 .agent-capabilities {
   position: absolute;
   top: calc(100% + 4px);
