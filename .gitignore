@@ -1,7 +1,6 @@
 .DS_Store
-DBGPS-analyzer
-DBGPS-links
-DBGPS-seq-filter
+.build/
+dstoreqc
 *.dSYM/
 tests/unit_core
 tests/unit_bloom

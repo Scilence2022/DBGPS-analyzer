@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build the DBGPS tools and run the full test suite:
-#   1. compile all three CLI tools with warnings treated as errors
+# Build the DStoreQC tools and run the full test suite:
+#   1. compile the unified CLI with warnings as errors
 #   2. compile and run the C unit tests for the shared k-mer core
 #   3. run the Python end-to-end functional tests against the binaries
 #
@@ -35,6 +35,8 @@ echo
 echo "==> Running Python end-to-end functional tests"
 python3 tests/test_cli.py
 python3 tests/test_bloom.py
+python3 tests/test_unified.py
+python3 tests/test_reports.py
 
 echo
 echo "All tests passed."

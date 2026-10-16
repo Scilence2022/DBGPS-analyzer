@@ -29,6 +29,8 @@ jobs:
           make asan=1
           timeout 180 python3 tests/test_cli.py
           timeout 180 python3 tests/test_bloom.py
+          timeout 180 python3 tests/test_unified.py
+          timeout 180 python3 tests/test_reports.py
 
   desktop:
     name: Desktop (typecheck + build)

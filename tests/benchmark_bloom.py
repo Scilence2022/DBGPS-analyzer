@@ -59,7 +59,7 @@ def normalize_reference(source, destination):
 
 
 def run_mode(args, reference, mode):
-    command = [str(args.binary.resolve()), "-i", "-k", str(args.k), "-t", str(args.threads), "-L", str(args.read_length)]
+    command = [str(args.binary.resolve()), "kernel", "-k", str(args.k), "-t", str(args.threads), "-L", str(args.read_length)]
     if mode == "bloom":
         command += ["--bloom", "--bloom-reference", str(reference), "--bloom-bits", str(args.bloom_bits)]
     command += [str(file.resolve()) for file in args.reads]
@@ -105,7 +105,7 @@ def main():
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--reads", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, default=Path(__file__).resolve().parent.parent / "DBGPS-analyzer")
+    parser.add_argument("--binary", type=Path, default=Path(__file__).resolve().parent.parent / "dstoreqc")
     parser.add_argument("--k", type=int, default=31)
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--read-length", type=int, default=200)

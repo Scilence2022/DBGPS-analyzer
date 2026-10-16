@@ -1,6 +1,6 @@
 # Optional Bloom reference index
 
-`DBGPS-analyzer` defaults to its full read-derived k-mer index. `--bloom`
+`dstoreqc analyze` defaults to its full read-derived k-mer index. `--bloom`
 selects a reference-restricted index: exact canonical reference keys and their
 14-bit saturating read counts, preceded by a blocked Bloom filter. It reduces
 the number of stored keys, not the precision of target counts.
@@ -9,7 +9,7 @@ the number of stored keys, not the precision of target counts.
 
 The following GitHub implementations were inspected for this integration:
 
-| Repository | Relevant properties | Fit for DBGPS |
+| Repository | Relevant properties | Fit for DStoreQC |
 | --- | --- | --- |
 | [lh3/bfc](https://github.com/lh3/bfc) | MIT; small C blocked filter; accepts a precomputed `uint64_t` hash; 64-byte blocks | Selected: matches the packed k-mer pipeline and requires no hash-string conversion, new build system, or SIMD target flags |
 | [jvirkki/libbloom](https://github.com/jvirkki/libbloom) | BSD-2-Clause; small conventional C filter; binary-buffer API; MurmurHash2 and probability-based sizing | Good general library; inspected version requires 64-bit `unsigned long` and hashes each buffer twice with 32-bit MurmurHash2 |
@@ -33,13 +33,13 @@ double hashing, reserved lock byte and insertion locking follow upstream.
 Standalone Sm/Kd evaluation uses the positional reference:
 
 ```sh
-./DBGPS-analyzer --bloom --bloom-bits 16 -k 31 -t 16 reference.fa reads.fq.gz
+./dstoreqc analyze --bloom --bloom-bits 16 -k 31 -t 16 reference.fa reads.fq.gz
 ```
 
 The JSON Lines kernel needs its reference before reading sequencing files:
 
 ```sh
-./DBGPS-analyzer -i --bloom --bloom-reference reference.fa -k 31 reads.fq.gz
+./dstoreqc kernel --bloom --bloom-reference reference.fa -k 31 reads.fq.gz
 ```
 
 `--bloom` is off by default. `--bloom-bits` accepts integers 4 through 64 and
@@ -50,7 +50,7 @@ guaranteed false-positive probability: block occupancy, the reserved lock byte,
 and rounding affect the observed rate. False-positive rate affects work, not
 the resulting target counts.
 
-`--bloom-reference` is only accepted with `-i --bloom`; standalone mode always
+`--bloom-reference` is only accepted with `kernel --bloom`; standalone mode always
 uses the positional strand file so the counted and evaluated target universes
 cannot accidentally differ. `--bloom-bits` without `--bloom` is rejected.
 References must be FASTA/FASTQ, optionally gzip-compressed. The desktop also

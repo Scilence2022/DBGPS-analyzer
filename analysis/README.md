@@ -49,7 +49,7 @@ Generated files are written to `analysis/results/` by default:
 From the repository root:
 
 ```bash
-make DBGPS-analyzer
+make dstoreqc
 python3 analysis/run_consensus_vs_dbgps.py \
   --reference tests/data/strands.fa \
   --reads tests/data/ngs.fa \

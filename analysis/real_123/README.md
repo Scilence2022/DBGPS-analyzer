@@ -74,7 +74,7 @@ Large local outputs ignored by git:
 From the repository root:
 
 ```bash
-make DBGPS-analyzer
+make dstoreqc
 bash analysis/real_123/scripts/run_real_123_analysis.sh
 ```
 

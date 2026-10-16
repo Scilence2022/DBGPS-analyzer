@@ -26,7 +26,7 @@ minimap2 -x sr -t "$THREADS" -c --cs=short \
   > "$OUT/alignment/minimap2_10pct.paf" \
   2> "$OUT/alignment/minimap2_10pct.log"
 
-/usr/bin/time -lp sh -c "printf 'batch $FRONT $BACK $OUT/inputs/reference.fa\nexit\n' | ./DBGPS-analyzer -i -k $K -t $THREADS -L 200 '$OUT/inputs/YC10_5_1_10pct.fq.gz' > '$OUT/dbgps/dbgps_batch_10pct.jsonl' 2> '$OUT/dbgps/dbgps_kernel_10pct.log'" \
+/usr/bin/time -lp sh -c "printf 'batch $FRONT $BACK $OUT/inputs/reference.fa\nexit\n' | ./dstoreqc kernel -k $K -t $THREADS -L 200 '$OUT/inputs/YC10_5_1_10pct.fq.gz' > '$OUT/dbgps/dbgps_batch_10pct.jsonl' 2> '$OUT/dbgps/dbgps_kernel_10pct.log'" \
   2> "$OUT/dbgps/dbgps_time_10pct.log"
 
 /usr/bin/time -lp python3 "$OUT/scripts/parse_minimap2_vs_dbgps.py" \

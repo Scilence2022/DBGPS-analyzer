@@ -113,9 +113,9 @@ type ReportResult = {
   generatedAt: string; referenceFile: string; ngsFiles: string[];
   k: number; primerLen: number; totalStrands: number;
   crossLinks: number | null; linksM: number; linksCommand: string;
-  entangled: number; passed: number; entangledNames: string[]; entangledTruncated: boolean;
+  entangled: number; passed: number; skipped: number; entangledNames: string[]; entangledTruncated: boolean;
   filterM: number; filterCommand: string;
-  analyzer: { rows: SmKdKnRow[]; headline: SmKdKnRow | null; command: string } | null;
+  analyzer: { primerLen: number; rows: SmKdKnRow[]; headline: SmKdKnRow | null; command: string } | null;
 };
 
 const api = {
@@ -166,6 +166,6 @@ const api = {
   }
 };
 
-contextBridge.exposeInMainWorld("dbgps", api);
+contextBridge.exposeInMainWorld("dstoreqc", api);
 
-export type DbgpsApi = typeof api;
+export type DStoreQCApi = typeof api;
