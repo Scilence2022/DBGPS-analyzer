@@ -7,6 +7,7 @@ import path from "node:path";
 import { parseCombinedReport, parseReferenceResult, filterOutput } from "./reference-results";
 import { AnalyzerQueryQueue, validateReadOnlyCommand } from "./analyzer-queue";
 import { AgentEvidenceStore } from "./agent-evidence";
+import { describeNetworkFailure } from "./net-errors";
 import { AGENT_LIMITS, agentToolAvailability, runReadOnlyAgent } from "./agent";
 import { requestAgentTurn } from "./agent-providers";
 import type { AgentRun, AgentStatus } from "./agent-types";
@@ -921,7 +922,14 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 async function openStream(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
   const payloadText = JSON.stringify(body);
   for (let attempt = 0; ; attempt++) {
-    const response = await fetch(url, { method: "POST", headers, body: payloadText, signal });
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "POST", headers, body: payloadText, signal });
+    } catch (error) {
+      // A cancel/timeout abort keeps its own handling; only real network failures are rewritten.
+      if (signal.aborted) throw error;
+      throw new Error(describeNetworkFailure(error, url) ?? (error instanceof Error ? error.message : String(error)));
+    }
     if (response.ok && response.body) return response;
 
     const text = await response.text().catch(() => "");
@@ -1170,7 +1178,13 @@ async function getJson(url: string, headers: Record<string, string>, timeoutMs =
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, { method: "GET", headers, signal: controller.signal });
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET", headers, signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      throw new Error(describeNetworkFailure(error, url) ?? (error instanceof Error ? error.message : String(error)));
+    }
     const text = await response.text();
     let payload: any = {};
     if (text) {

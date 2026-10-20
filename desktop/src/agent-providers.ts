@@ -1,3 +1,4 @@
+import { describeNetworkFailure } from "./net-errors";
 import type { AgentApiStyle, AgentProvider, AgentProviderReply, AgentProviderRequest, AgentToolCall } from "./agent-types";
 
 const MAX_REQUEST_UNITS = 256000;
@@ -342,9 +343,10 @@ async function fetchJson(url: string, headers: Record<string, string>, body: str
       if (signal.aborted) { discard(response); throw abortError(); }
       return response;
     }), signal, () => { if (received) discard(received); });
-  } catch {
+  } catch (error) {
     checkAbort(signal);
-    throw new Error("Provider request failed (network error).");
+    // Classification only: no URL or exception text, since agent errors are exported.
+    throw new Error(describeNetworkFailure(error, "", false) ?? "Provider request failed (network error).");
   }
   if (signal.aborted) { discard(response); throw abortError(); }
   if (!response.ok) {
