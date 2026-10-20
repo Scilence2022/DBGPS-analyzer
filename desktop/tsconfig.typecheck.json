@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["src/main.ts", "src/preload.ts", "src/agent-ui.ts", "src/fold-change.ts", "src/renderer.ts"]
+  "include": ["src/main.ts", "src/preload.ts", "src/agent-ui.ts", "src/fold-change.ts", "src/net-errors.ts", "src/renderer.ts"]
 }

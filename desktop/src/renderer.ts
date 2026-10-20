@@ -7,6 +7,7 @@ import {
   type ChatMessage, type ChatMessageMeta, type ChatMode, type ChatThread, type CompactTrace, type SlashAction, type SlashCommand,
   type Suggestion, type ThreadStore, type ToolTarget
 } from "./agent-ui";
+import { cleanIpcError } from "./net-errors";
 import { adjacentFoldChanges, describeFoldEdge, foldAxisCap, formatFold, type FoldEdge } from "./fold-change";
 import { analyzerScope, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
@@ -3809,7 +3810,7 @@ let batchPrimerBackUsed = DEFAULT_PRIMER;
 const BATCH_PAGE_SIZE = 100;
 
 function errMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  return cleanIpcError(error instanceof Error ? error.message : String(error));
 }
 function truncateText(value: string, max: number) {
   return value.length > max ? `${value.slice(0, max)}\n… (truncated)` : value;
