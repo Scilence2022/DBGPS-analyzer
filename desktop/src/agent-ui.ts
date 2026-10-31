@@ -198,7 +198,8 @@ export const TOOL_LABELS: Record<string, { title: string; icon: string; blurb: s
   get_analysis_summary: { title: "Read index summary", icon: "database", blurb: "Counts, k, and counting settings of the loaded read index, plus cached Batch QC aggregates." },
   get_sequence_profile: { title: "Read coverage profile", icon: "chart-line", blurb: "Positional k-mer support for a cached Batch QC record or the selected Interactive sequence." },
   query_kmer: { title: "Query k-mer neighborhood", icon: "git-fork", blurb: "Count and membership-derived neighbors of one k-mer at the loaded k." },
-  get_batch_rows: { title: "Read Batch QC rows", icon: "table-2", blurb: "Paginated per-strand rows from the completed Batch QC cache." }
+  get_batch_rows: { title: "Read Batch QC rows", icon: "table-2", blurb: "Paginated per-strand rows from the completed Batch QC cache." },
+  find_batch_records: { title: "Find strands by name", icon: "search", blurb: "Exact strand names resolved to their rows in the completed Batch QC cache." }
 };
 
 export function describeToolCall(name: string, input: unknown): { title: string; detail: string; icon: string } {
@@ -223,6 +224,8 @@ export function describeToolCall(name: string, input: unknown): { title: string;
       const status = typeof a.status === "string" ? a.status : "all";
       return { ...label, detail: `${status} · rows ${offset + 1}–${offset + limit}` };
     }
+    case "find_batch_records":
+      return { ...label, detail: plural(Array.isArray(a.names) ? a.names.length : 0, "name") };
     default:
       return { ...label, detail: "loaded index" };
   }
@@ -283,6 +286,12 @@ export function toolResultFacts(name: string, result: unknown): string[] {
       if (rows) facts.push(`${rows} returned`);
       break;
     }
+    case "find_batch_records": {
+      const matched = num(args(data.selection).matchedRows);
+      if (matched != null) facts.push(`${plural(matched, "matching row")}`);
+      if (Array.isArray(data.unmatched) && data.unmatched.length) facts.push(`${data.unmatched.length} unmatched`);
+      break;
+    }
   }
   return facts;
 }
@@ -313,7 +322,7 @@ export function toolTargets(trace: { name: string; arguments: unknown; result?: 
   if (trace.name === "query_kmer" && typeof a.kmer === "string" && /^[ACGTacgt]+$/.test(a.kmer)) {
     return [{ kind: "kmer", kmer: a.kmer.toUpperCase() }];
   }
-  if (trace.name === "get_batch_rows") {
+  if (trace.name === "get_batch_rows" || trace.name === "find_batch_records") {
     const data = payload(trace.result);
     const rows = data && Array.isArray(data.rows) ? data.rows.map(args) : [];
     return rows

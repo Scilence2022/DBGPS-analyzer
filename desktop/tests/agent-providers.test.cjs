@@ -200,11 +200,11 @@ for (const style of styles) {
     for (let index = 0; index < 3; index++) await assert.rejects(requestAgentTurn(request(style)), /Malformed/);
   });
 
-  test(`${style}: rejects nonstring, oversized, and empty text and oversized arguments`, async (t) => {
+  test(`${style}: rejects nonstring and oversized text and oversized arguments, and leaves empty replies to the agent loop`, async (t) => {
     mockFetch(t, [payload(style, [], 123), payload(style, [], "x".repeat(64001)), payload(style, [], ""), payload(style, [{ ...call, arguments: { label: "x".repeat(32001) } }])]);
     await assert.rejects(requestAgentTurn(request(style)), /expected a string/);
     await assert.rejects(requestAgentTurn(request(style)), /size limit/);
-    await assert.rejects(requestAgentTurn(request(style)), /no text or tool calls/);
+    assert.deepEqual(await requestAgentTurn(request(style)).then(({ text, calls }) => ({ text, calls })), { text: "", calls: [] });
     await assert.rejects(requestAgentTurn(request(style)), /size limit/);
   });
 
@@ -254,6 +254,17 @@ test("Compatible: null assistant content is valid only with native calls", async
   mockFetch(t, [payload("openai-compatible", [call], null), payload("openai-compatible", [], null)]);
   assert.equal((await requestAgentTurn(request("openai-compatible"))).text, "");
   await assert.rejects(requestAgentTurn(request("openai-compatible")), /expected a string/);
+});
+
+test("Compatible: answer-only turns disable thinking except on models that require it", async (t) => {
+  for (const [model, expected] of [["qwen3.5:4b", "none"], ["gpt-5", undefined]]) {
+    const requests = mockFetch(t, [payload("openai-compatible", [], "Done."), payload("openai-compatible", [], "Done.")]);
+    const input = request("openai-compatible", { tools: [], disableThinking: true });
+    await requestAgentTurn({ ...input, settings: { ...input.settings, model } });
+    assert.equal(requests[0].body.reasoning_effort, expected);
+    await requestAgentTurn({ ...input, settings: { ...input.settings, model }, disableThinking: undefined });
+    assert.equal(Object.hasOwn(requests[1].body, "reasoning_effort"), false);
+  }
 });
 
 test("OpenAI: reasoning models omit temperature exactly as main.ts does", async (t) => {

@@ -2510,7 +2510,7 @@ const LEGACY_CHAT_STORAGE_KEY = "dbgps.chatTranscript";
 const DEFAULT_CHAT_WIDTH = 400;
 const MIN_CHAT_WIDTH = 320;
 const MAX_CHAT_WIDTH = 760;
-const FALLBACK_AGENT_LIMITS = { modelTurns: 5, toolCalls: 6, deadlineMs: 120000 };
+const FALLBACK_AGENT_LIMITS = { modelTurns: 5, toolCalls: 6, deadlineMs: 240000 };
 // Full runs (with evidence payloads) live only in memory, keyed by snapshot id,
 // for timeline evidence, JSON export, and follow-up evidence ids.
 const MAX_RETAINED_RUNS = 16;

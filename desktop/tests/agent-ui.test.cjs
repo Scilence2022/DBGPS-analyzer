@@ -58,6 +58,13 @@ test("result facts and jump targets come from deterministic tool data", () => {
   assert.deepEqual(ui.toolTargets({ name: "get_batch_rows", arguments: {}, result: { ok: false } }), []);
 });
 
+test("strand-name lookups are described and link to the rows they resolved", () => {
+  assert.equal(ui.describeToolCall("find_batch_records", { names: ["a", "b"] }).detail, "2 names");
+  const result = { ok: true, data: { selection: { requested: 2, matchedRows: 1, truncated: false }, rows: [{ index: 41 }], unmatched: ["b"] } };
+  assert.deepEqual(ui.toolResultFacts("find_batch_records", result), ["1 matching row", "1 unmatched"]);
+  assert.deepEqual(ui.toolTargets({ name: "find_batch_records", arguments: {}, result }), [{ kind: "batch-record", index: 41 }]);
+});
+
 test("compact trace keeps durations and facts, never payloads", () => {
   const [entry] = ui.compactTrace([{ callId: "c", name: "query_kmer", arguments: { kmer: "AAA", depth: 0 }, snapshotId: "s", status: "ok", startedAt: "2026-10-16T00:00:00.000Z", finishedAt: "2026-10-16T00:00:01.250Z", result: { ok: true, data: { coverage: 9, inDegree: 1, outDegree: 2, secret: "x" } } }]);
   assert.deepEqual(entry, { callId: "c", name: "query_kmer", arguments: { kmer: "AAA", depth: 0 }, status: "ok", durationMs: 1250, facts: ["coverage 9", "in 1 · out 2"] });

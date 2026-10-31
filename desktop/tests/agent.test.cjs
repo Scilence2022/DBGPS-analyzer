@@ -13,7 +13,7 @@ function backend(overrides = {}) {
     getSummary: async () => ({ distinctKmers: 8 }),
     getSequence: async () => ({ reference: { index: 7 }, result: { type: "sequence", k: 3, observed: 2, missing: 1, coverages: [{ position: 0, coverage: 4 }, { position: 1, coverage: 3 }, { position: 2, coverage: 0 }], ratios: [] } }),
     queryKmer: async (kmer, depth) => ({ type: "kmer", query: kmer, depth }),
-    getBatchRows: () => ({ rows: [] }), ...overrides
+    getBatchRows: () => ({ rows: [] }), findBatchRecords: (names) => ({ rows: [], unmatched: names }), ...overrides
   };
 }
 function run(provider, overrides = {}) {
@@ -63,7 +63,12 @@ for (const [name, args] of [
   ["get_sequence_profile", { recordIndex: 1.5, offset: 0, limit: 128 }],
   ["get_sequence_profile", { recordIndex: null, offset: 0, limit: 129 }],
   ["get_batch_rows", { status: "complete", offset: 0, limit: 25 }],
-  ["get_batch_rows", { status: "all", offset: -1, limit: 25 }]
+  ["get_batch_rows", { status: "all", offset: -1, limit: 25 }],
+  ["find_batch_records", { names: [] }],
+  ["find_batch_records", { names: "strand" }],
+  ["find_batch_records", { names: [""] }],
+  ["find_batch_records", { names: Array.from({ length: 26 }, (_, i) => `s${i}`) }],
+  ["find_batch_records", { names: ["x".repeat(201)] }]
 ]) test(`runtime rejects ${name} arguments ${JSON.stringify(args)}`, async () => {
   await assert.rejects(executeAgentTool(name, args, backend(), new AbortController().signal));
 });
@@ -89,6 +94,93 @@ test("last model turn disables tools and permits an evidence-based answer", asyn
   });
   assert.equal(result.stopReason, "completed");
   assert.equal(result.modelTurns, 5);
+});
+
+test("an empty reply is retried once without tools and the answer completes the run", async () => {
+  let turns = 0;
+  const seen = [];
+  const result = await run(async (request) => {
+    seen.push(request);
+    turns++;
+    if (turns === 1) return call("get_analysis_summary");
+    if (turns === 2) return { text: "  ", calls: [], continuation: {} };
+    return { text: "Answer from retained evidence.", calls: [], continuation: {} };
+  });
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.content, "Answer from retained evidence.");
+  assert.equal(seen[1].tools.length, AGENT_TOOLS.length);
+  assert.equal(seen[2].tools.length, 0);
+  assert.equal(seen[2].previous.length, 0);
+  assert.equal(seen[2].disableThinking, true);
+  assert.equal(seen[1].disableThinking, undefined);
+  assert.equal(seen[2].messages.length, messages.length);
+  assert.match(seen[2].messages.at(-1).content, /Which windows are unsupported\?[\s\S]*distinctKmers[\s\S]*No tools remain/);
+});
+
+test("an empty reply on the last turn still gets its retry", async () => {
+  let turns = 0;
+  const result = await run(async () => {
+    turns++;
+    if (turns < AGENT_LIMITS.modelTurns) return call("get_analysis_summary", {}, `call-${turns}`);
+    return turns === AGENT_LIMITS.modelTurns ? { text: "", calls: [], continuation: {} } : { text: "Recovered.", calls: [], continuation: {} };
+  });
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.modelTurns, AGENT_LIMITS.modelTurns + 1);
+});
+
+test("the answer-only retry declares evidence over the history budget", async () => {
+  let turns = 0;
+  let retry;
+  await run(async (request) => {
+    if (++turns === 1) return call("get_analysis_summary");
+    if (turns === 2) return { text: "", calls: [], continuation: {} };
+    retry = request;
+    return { text: "Done.", calls: [], continuation: {} };
+  }, { backend: backend({ getSummary: async () => ({ text: "x".repeat(AGENT_LIMITS.toolResultChars - 20) }) }) });
+  assert.doesNotMatch(retry.messages.at(-1).content, /omitted/);
+  turns = 0;
+  await run(async (request) => {
+    turns++;
+    if (turns <= 3) return { text: "", calls: Array.from({ length: 2 }, (_, i) => ({ id: `call-${turns}-${i}`, name: "get_analysis_summary", arguments: {} })), continuation: {} };
+    if (turns === 4) return { text: "", calls: [], continuation: {} };
+    retry = request;
+    return { text: "Done.", calls: [], continuation: {} };
+  }, { backend: backend({ getSummary: async () => ({ text: "x".repeat(AGENT_LIMITS.toolResultChars - 20) }) }) });
+  assert.match(retry.messages.at(-1).content, /5 omitted by the evidence budget/);
+  assert.ok(retry.messages.at(-1).content.length <= AGENT_LIMITS.historyChars + 1000);
+});
+
+test("a second empty reply stops with the retrieved evidence and one sentence ending", async () => {
+  let turns = 0;
+  const result = await run(async () => (++turns === 1 ? call("get_sequence_profile", { recordIndex: 7, offset: 0, limit: 3 }) : { text: "", calls: [], continuation: {} }));
+  assert.equal(result.stopReason, "error");
+  assert.equal(turns, 3);
+  assert.match(result.content, /fixture returned no final answer/);
+  assert.match(result.content, /select a larger model\. No final interpretation/);
+  assert.match(result.content, /Read coverage profile \(record 7 \(row #8\) · windows 0–2\): 3 of 3 windows; min 0 · max 4/);
+});
+
+test("provider errors ending in a period do not repeat it", async () => {
+  const result = await run(async () => { throw new Error("Provider request failed (HTTP 500)."); });
+  assert.equal(result.content, "Agent stopped: Provider request failed (HTTP 500). No final interpretation was completed.");
+});
+
+test("a slow model is moved to its final turn while the deadline can still be met", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  let turns = 0;
+  const offered = [];
+  const result = await run(async (request) => {
+    offered.push(request.tools.length);
+    turns++;
+    t.mock.timers.tick(AGENT_LIMITS.answerAfterMs);
+    return turns === 1 ? call("get_analysis_summary") : { text: "Answer in time.", calls: [], continuation: {} };
+  });
+  assert.equal(result.stopReason, "completed");
+  assert.deepEqual(offered, [AGENT_TOOLS.length, 0]);
+});
+
+test("a rejected k-mer tells the model the loaded k", async () => {
+  await assert.rejects(executeAgentTool("query_kmer", { kmer: "101010111", depth: 1 }, backend({ getK: () => 18 }), new AbortController().signal), /exactly 18 bases/);
 });
 
 test("repeated call IDs do not execute a second action", async () => {
@@ -182,6 +274,18 @@ test("main-owned batch snapshot uses indices, filters anomalies beyond row 25, a
   assert.throws(() => cached.assertCurrent(), /stale/);
 });
 
+test("strand names resolve to their cached records and report unmatched names", async () => {
+  const store = new AgentEvidenceStore();
+  const version = store.activate({ k: 3, threads: 1, readLength: 200 });
+  const row = (index, name) => ({ index, name, rawLength: 6, analyzedLength: 6, status: "ok", summary: { type: "sequenceSummary", length: 6, k: 3, kmerCount: 4, observed: 4, missing: 0, complete: true, minCoverage: 1, maxCoverage: 3, meanCoverage: 2, maxAdjacentRatio: 1 } });
+  store.cacheBatch(version, 0, 0, [row(0, "seq_37"), row(1, "seq_0"), row(2, "seq_5")], new Map([[1, "AAACCC"]]));
+  const { backend: cached } = store.open({}, { query: async () => ({ type: "sequence", coverages: [], ratios: [] }) });
+  const result = await executeAgentTool("find_batch_records", { names: ["seq_0", "seq_37", "seq_99"] }, cached, new AbortController().signal);
+  assert.deepEqual(result.rows.map((item) => [item.index, item.name, item.profileCached]), [[0, "seq_37", false], [1, "seq_0", true]]);
+  assert.deepEqual(result.unmatched, ["seq_99"]);
+  assert.equal(result.selection.matchedRows, 2);
+});
+
 test("cached profile cannot open a model-supplied path or use an unknown row", async () => {
   const store = new AgentEvidenceStore(); store.activate({ k: 3, threads: 1, readLength: 200 });
   const { backend: cached } = store.open({}, { query: async () => { throw new Error("must not query"); } });
@@ -260,6 +364,7 @@ test("evidence status exposes counts only and drives per-tool availability", () 
   assert.equal(byName.get_analysis_summary.available, true);
   assert.equal(byName.query_kmer.available, true);
   assert.equal(byName.get_batch_rows.available, false);
+  assert.equal(byName.find_batch_records.available, false);
   assert.equal(byName.get_sequence_profile.available, false);
 
   const rows = [{ index: 0, name: "secret-name", rawLength: 6, analyzedLength: 6, status: "ok", summary: { type: "sequenceSummary", length: 6, k: 3, kmerCount: 4, observed: 3, missing: 1, complete: false, minCoverage: 0, maxCoverage: 3, meanCoverage: 2, maxAdjacentRatio: 1 } }];
@@ -270,6 +375,7 @@ test("evidence status exposes counts only and drives per-tool availability", () 
   assert.equal(JSON.stringify(status).includes("AAACCC"), false);
   byName = Object.fromEntries(agentToolAvailability(status).map((tool) => [tool.name, tool]));
   assert.equal(byName.get_batch_rows.available, true);
+  assert.equal(byName.find_batch_records.available, true);
   assert.equal(byName.get_sequence_profile.available, true);
 
   const reference = agentToolAvailability({ ...status, indexScope: "reference" }).find((tool) => tool.name === "query_kmer");
