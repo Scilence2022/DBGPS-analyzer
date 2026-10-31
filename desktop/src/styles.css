@@ -4466,3 +4466,16 @@ textarea:focus-visible {
   color: var(--text);
   font-size: 13px;
 }
+
+/* Batch QC and Interactive share the same kernel controls and count summary. */
+.kernel-controls {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  gap: 14px;
+  min-width: 0;
+}
+
+.kernel-controls[hidden] {
+  display: none;
+}

@@ -11,7 +11,7 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body data-view="batch">
     <div class="app-shell">
       <header class="topbar">
         <div class="brand">
@@ -55,7 +55,7 @@
               </button>
               <div id="referenceFile" class="input-chips"></div>
             </div>
-            <div class="input-source" data-views="interactive report">
+            <div class="input-source" data-views="batch interactive report">
               <span class="input-label">Reads</span>
               <div class="input-actions">
                 <button id="readsSelectButton" class="ghost-button input-pick" title="Sequencing reads (FASTA/FASTQ, optionally gzip)">
@@ -69,15 +69,15 @@
             </div>
           </div>
           <div class="input-params">
-            <label class="input-field" data-views="interactive links filter report">
+            <label class="input-field" data-views="batch interactive links filter report">
               <span>k-mer</span>
               <input id="kInput" type="number" min="1" max="31" value="31" />
             </label>
-            <label class="input-field" data-views="interactive report">
+            <label class="input-field" data-views="batch interactive report">
               <span>Threads</span>
               <input id="threadsInput" type="number" min="1" max="64" value="3" />
             </label>
-            <label class="input-field" data-views="interactive report">
+            <label class="input-field" data-views="batch interactive report">
               <span>Read length</span>
               <input id="readLengthInput" type="number" min="1" value="200" />
             </label>
@@ -97,8 +97,8 @@
       </section>
 
       <nav class="view-nav" aria-label="Workbench views">
-        <button class="view-tab active" data-view="interactive"><i data-lucide="activity"></i><span>Interactive</span></button>
-        <button class="view-tab" data-view="batch"><i data-lucide="layers"></i><span>Batch QC</span></button>
+        <button class="view-tab active" data-view="batch"><i data-lucide="layers"></i><span>Batch QC</span></button>
+        <button class="view-tab" data-view="interactive"><i data-lucide="activity"></i><span>Interactive</span></button>
         <button class="view-tab" data-view="links"><i data-lucide="link"></i><span>Cross-links</span></button>
         <button class="view-tab" data-view="filter"><i data-lucide="filter"></i><span>Seq-Filter</span></button>
         <button class="view-tab" data-view="report"><i data-lucide="clipboard-list"></i><span>Report</span></button>
@@ -107,50 +107,82 @@
       <main class="layout">
         <section class="workspace">
 
-          <div id="view-interactive" class="view active">
-          <section class="config-band kernel-band">
-            <div class="kernel-row">
-              <button id="startButton" class="primary-button">
-                <i data-lucide="play"></i>
-                <span>Start kernel</span>
-              </button>
-              <p class="kernel-hint">Loads the <strong>Reads</strong> and <strong>k-mer</strong> from Inputs into the C kernel. Batch QC and the AI agent reuse it.</p>
-            </div>
-            <div class="bloom-config">
-              <label class="checkbox-label bloom-toggle">
-                <input id="bloomInput" type="checkbox" />
-                <span>Bloom encoded sequence mode</span>
-              </label>
-              <div id="bloomOptions" class="bloom-options" hidden>
-                <p class="kernel-hint">Indexes only the k-mers of the <strong>Encoded sequences</strong> from Inputs.</p>
-                <label>
-                  <span>Min. bits per key</span>
-                  <input id="bloomBitsInput" type="number" min="4" max="64" step="1" value="16" disabled />
-                </label>
+          <div id="kernelControls" class="kernel-controls">
+            <section class="config-band kernel-band">
+              <div class="kernel-row">
+                <button id="startButton" class="primary-button">
+                  <i data-lucide="play"></i>
+                  <span>Start kernel</span>
+                </button>
+                <p class="kernel-hint">Loads the <strong>Reads</strong> and <strong>k-mer</strong> from Inputs into the C kernel. Batch QC, Interactive queries, and the AI agent share this index.</p>
               </div>
-            </div>
-          </section>
+              <div class="bloom-config">
+                <label class="checkbox-label bloom-toggle">
+                  <input id="bloomInput" type="checkbox" />
+                  <span>Bloom encoded sequence mode</span>
+                </label>
+                <div id="bloomOptions" class="bloom-options" hidden>
+                  <p class="kernel-hint">Indexes only the k-mers of the <strong>Encoded sequences</strong> from Inputs.</p>
+                  <label>
+                    <span>Min. bits per key</span>
+                    <input id="bloomBitsInput" type="number" min="4" max="64" step="1" value="16" disabled />
+                  </label>
+                </div>
+              </div>
+            </section>
 
-          <section id="summaryBand" class="summary-band">
-            <div class="metric">
-              <span id="distinctKmersLabel">Distinct k-mers</span>
-              <strong id="distinctKmers">-</strong>
-            </div>
-            <div class="metric">
-              <span id="totalCoverageLabel">Total coverage</span>
-              <strong id="totalCoverage">-</strong>
-            </div>
-            <div class="metric">
-              <span>k</span>
-              <strong id="summaryK">-</strong>
-            </div>
-            <div class="metric">
-              <span>Files</span>
-              <strong id="summaryFiles">-</strong>
-            </div>
-            <p id="summaryScope" class="index-scope" hidden></p>
-          </section>
+            <section id="summaryBand" class="summary-band">
+              <div class="metric">
+                <span id="distinctKmersLabel">Distinct k-mers</span>
+                <strong id="distinctKmers">-</strong>
+              </div>
+              <div class="metric">
+                <span id="totalCoverageLabel">Total coverage</span>
+                <strong id="totalCoverage">-</strong>
+              </div>
+              <div class="metric">
+                <span>k</span>
+                <strong id="summaryK">-</strong>
+              </div>
+              <div class="metric">
+                <span>Files</span>
+                <strong id="summaryFiles">-</strong>
+              </div>
+              <p id="summaryScope" class="index-scope" hidden></p>
+            </section>
 
+          </div>
+
+          <div id="view-batch" class="view active">
+            <section class="config-band tool-band batch-config">
+              <div class="tool-row">
+                <button id="batchRunButton" class="primary-button" disabled>
+                  <i data-lucide="play"></i>
+                  <span>Analyze all</span>
+                </button>
+                <button id="batchSaveButton" class="ghost-button" disabled>
+                  <i data-lucide="download"></i>
+                  <span>Save CSV</span>
+                </button>
+                <p class="batch-hint muted">
+                  Scores every strand in <strong>Encoded sequences</strong> against the loaded sequencing k-mer table, after trimming the <strong>Primer</strong> regions. Select <strong>Reads</strong> in Inputs, then use <strong>Start kernel</strong> above before analyzing.
+                </p>
+              </div>
+            </section>
+            <section class="result-band">
+              <div class="section-title">
+                <div class="section-title-main">
+                  <i data-lucide="layers"></i>
+                  <h2>Per-strand quality scan</h2>
+                </div>
+                <div id="batchProgress" class="batch-progress"></div>
+              </div>
+              <div id="batchResult" class="result-view empty-state">Choose Encoded sequences in Inputs and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
+              <div id="batchDetail" class="batch-detail"></div>
+            </section>
+          </div>
+
+          <div id="view-interactive" class="view">
           <section class="query-band">
             <div class="query-header">
               <div class="segmented" role="tablist" aria-label="Query type">
@@ -200,35 +232,6 @@
             </div>
             <pre id="logView"></pre>
           </section>
-          </div>
-
-          <div id="view-batch" class="view">
-            <section class="config-band tool-band batch-config">
-              <div class="tool-row">
-                <button id="batchRunButton" class="primary-button">
-                  <i data-lucide="play"></i>
-                  <span>Analyze all</span>
-                </button>
-                <button id="batchSaveButton" class="ghost-button" disabled>
-                  <i data-lucide="download"></i>
-                  <span>Save CSV</span>
-                </button>
-                <p class="batch-hint muted">
-                  Scores every strand in <strong>Encoded sequences</strong> against the loaded sequencing k-mer table, after trimming the <strong>Primer</strong> regions. Start the kernel in <strong>Interactive</strong> first.
-                </p>
-              </div>
-            </section>
-            <section class="result-band">
-              <div class="section-title">
-                <div class="section-title-main">
-                  <i data-lucide="layers"></i>
-                  <h2>Per-strand quality scan</h2>
-                </div>
-                <div id="batchProgress" class="batch-progress"></div>
-              </div>
-              <div id="batchResult" class="result-view empty-state">Choose Encoded sequences in Inputs and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
-              <div id="batchDetail" class="batch-detail"></div>
-            </section>
           </div>
 
           <div id="view-links" class="view">

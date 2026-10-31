@@ -346,6 +346,7 @@ const elements = {
   inputsBody: $("inputsBody"),
   inputsNotice: $("inputsNotice"),
   kernelPill: $("kernelPill"),
+  kernelControls: $("kernelControls"),
   referenceSelectButton: $("referenceSelectButton") as HTMLButtonElement,
   referenceFile: $("referenceFile"),
   readsSelectButton: $("readsSelectButton") as HTMLButtonElement,
@@ -1662,7 +1663,7 @@ function setAnalyzerReady(ready: boolean) {
   elements.queryButton.disabled = !ready || analyzerLoading;
   elements.stopButton.disabled = !ready || analyzerLoading;
   elements.startButton.disabled = ready || analyzerLoading;
-  ui.batchRunButton.disabled = analyzerLoading;
+  ui.batchRunButton.disabled = !ready || analyzerLoading || batchRunning;
   updateBloomControls();
   updateQueryModeControls();
   renderInputsBar();
@@ -2118,7 +2119,7 @@ let latestFilter: FilterResult | null = null;
 let latestBatch: InteractiveBatchResult | null = null;
 
 function currentViewName(): ViewName {
-  return (document.body.dataset.view as ViewName) || "interactive";
+  return (document.body.dataset.view as ViewName) || "batch";
 }
 
 // Percentiles over a numeric sample, using nearest-rank on a sorted copy.
@@ -3922,6 +3923,7 @@ function fmtPct(value: number) {
 
 function setView(view: ViewName) {
   document.body.dataset.view = view;
+  elements.kernelControls.hidden = view !== "batch" && view !== "interactive";
   document.querySelectorAll<HTMLElement>(".view").forEach((el) => {
     el.classList.toggle("active", el.id === `view-${view}`);
   });
@@ -4540,7 +4542,7 @@ async function runBatchAnalysis() {
   }
   if (!analyzerReady) {
     ui.batchResult.classList.remove("empty-state");
-    ui.batchResult.innerHTML = `<div class="error-card">Start the kernel in the Interactive tab first (it loads the sequencing k-mer table used to score each strand).</div>`;
+    ui.batchResult.innerHTML = `<div class="error-card">Use Start kernel above to load the Reads from Inputs, then Analyze all to score the encoded sequences.</div>`;
     return;
   }
 
@@ -4607,7 +4609,7 @@ async function runBatchAnalysis() {
   } finally {
     if (generation === readIndexGeneration) {
       batchRunning = false;
-      ui.batchRunButton.disabled = false;
+      ui.batchRunButton.disabled = !analyzerReady || analyzerLoading;
     }
   }
 }
@@ -4645,7 +4647,7 @@ async function saveBatchCsv() {
   }
 }
 
-ui.viewTabs.forEach((tab) => tab.addEventListener("click", () => setView((tab.dataset.view as ViewName) || "interactive")));
+ui.viewTabs.forEach((tab) => tab.addEventListener("click", () => setView((tab.dataset.view as ViewName) || "batch")));
 ui.batchRunButton.addEventListener("click", runBatchAnalysis);
 ui.batchSaveButton.addEventListener("click", saveBatchCsv);
 ui.batchResult.addEventListener("click", (event) => {
@@ -4801,5 +4803,5 @@ syncParamInputs();
 updateQueryModeControls();
 renderInputsBar();
 renderIcons();
-setView("interactive");
+setView("batch");
 void loadSecrets();
