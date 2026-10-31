@@ -4232,6 +4232,12 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
+.input-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .input-pick {
   min-height: 0;
   height: 28px;

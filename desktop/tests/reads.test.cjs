@@ -187,6 +187,68 @@ test("Batch QC completing after removal cannot repopulate the cleared cache", as
   assert.match(get("batchResult").textContent, /Reads changed/);
 });
 
+test("clear reads stops the kernel and resets selections, counts and cached profiles", async () => {
+  const { calls, get, run } = await app();
+  run('referenceFile = "encoded.fa"; latestBatch = { rows: [] }; batchRows = [{ index: 0 }];');
+  assert.equal(get("clearReadsButton").disabled, false);
+  get("clearReadsButton").listeners.click();
+  await new Promise(setImmediate);
+  assert.equal(calls.at(-1), "stop");
+  assert.equal(run("selectedFiles.length"), 0);
+  assert.equal(run("referenceFile"), "encoded.fa");
+  assert.equal(run("appSettings.k"), 8);
+  assert.equal(run("latestResult"), null);
+  assert.equal(run("latestBatch"), null);
+  assert.equal(run("batchRows.length"), 0);
+  assert.equal(get("totalCoverage").textContent, "-");
+  assert.equal(get("distinctKmers").textContent, "-");
+  assert.equal(get("queryButton").disabled, true);
+  assert.equal(get("batchSaveButton").disabled, true);
+  assert.equal(get("clearReadsButton").disabled, true);
+  assert.equal(get("startButton").disabled, false);
+});
+
+for (const operation of ["load", "add"]) {
+  for (const outcome of ["resolve", "reject"]) {
+    test(`clear during ${operation} ignores its delayed ${outcome} even after a new count starts`, async () => {
+      const { api, get, run } = await app();
+      const originalStart = api.startAnalyzer;
+      let resolve, reject;
+      const pending = () => new Promise((done, fail) => { resolve = done; reject = fail; });
+      api.selectFiles = async () => ["c.fastq"];
+      if (operation === "load") api.startAnalyzer = pending;
+      else api.addAnalyzerFiles = pending;
+      const counting = run(operation === "load" ? "loadAnalyzer(kernelLoaded.config)" : "addSequencingFiles()");
+      await new Promise(setImmediate);
+      assert.equal(get("clearReadsButton").disabled, false);
+      await run("clearSequencingFiles()");
+      api.startAnalyzer = originalStart;
+      run('selectedFiles = ["new.fastq"];');
+      await run("startAnalyzer()");
+      if (outcome === "resolve") resolve({ type: "ready", files: ["old.fastq"], k: 31, threads: 3,
+        readLength: 200, distinctKmers: 999, totalKmerCoverage: 999 });
+      else reject(new Error("Canceled old count"));
+      await counting;
+      assert.equal(run("selectedFiles.join(',')"), "new.fastq");
+      assert.equal(get("totalCoverage").textContent, "20");
+      assert.equal(run("analyzerReady"), true);
+      assert.equal(get("statusText").textContent, "Kernel running");
+    });
+  }
+}
+
+test("a file picker opened before clearing cannot restore the read selection", async () => {
+  const { api, run } = await app();
+  run("setAnalyzerReady(false)");
+  let resolve;
+  api.selectFiles = () => new Promise((done) => { resolve = done; });
+  const selecting = run("selectFiles()");
+  await run("clearSequencingFiles()");
+  resolve(["old.fastq"]);
+  await selecting;
+  assert.equal(run("selectedFiles.length"), 0);
+});
+
 test("the replaced kernel's delayed exit cannot mark the new kernel as stopped", async () => {
   const { EventEmitter } = require("node:events");
   const { PassThrough } = require("node:stream");
@@ -229,4 +291,9 @@ test("the replaced kernel's delayed exit cannot mark the new kernel as stopped",
   children[1].emit("close", 1);
   assert.equal(events.filter((event) => event.kind === "exit").length, 1,
     "an unexpected exit of the current kernel must still be reported");
+  run('var finishBuild; ensureAnalyzerBuilt = () => new Promise((done) => { finishBuild = done; });');
+  const canceled = run('session = new AnalyzerSession(); session.start({ files: ["reads.fa"], k: 4, threads: 1, readLength: 20 })');
+  run('session.stop(); session = null; finishBuild();');
+  await assert.rejects(canceled, /Analyzer session stopped/);
+  assert.equal(children.length, 2, "clearing while the binary builds must prevent a later spawn");
 });

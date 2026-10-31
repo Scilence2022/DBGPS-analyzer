@@ -260,7 +260,7 @@ The **Inputs** bar above the views is shared by every tab, so each file and para
 | Input | Used by |
 |:---|:---|
 | **Encoded sequences** (FASTA or tab-delimited) | Batch QC, Cross-links, Seq-Filter, Report, and Bloom encoded sequence mode |
-| **Reads** (FASTA/FASTQ, optionally gzip) | The Interactive kernel and the Report (optional there). While the kernel runs, the same control adds files to the loaded index. |
+| **Reads** (FASTA/FASTQ, optionally gzip) | The Interactive kernel and the Report (optional there). While the kernel runs, the same control adds files to the loaded index. **Clear reads** removes all read selections, stops counting or the running kernel, and clears counts and cached query/Batch QC results. |
 | **k-mer, Threads, Read length** | The Interactive kernel and the Report (k-mer also Cross-links and Seq-Filter) |
 | **Primer trim** (front / back) | Batch QC, Cross-links, Seq-Filter, Report |
 

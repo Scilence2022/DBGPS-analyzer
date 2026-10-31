@@ -471,6 +471,7 @@ function saveSecrets(map: Record<string, string>) {
 }
 
 class AnalyzerSession {
+  private stopped = false;
   private child: ChildProcessWithoutNullStreams | null = null;
   private stdout: BoundedLineReader | null = null;
   private queue = new AnalyzerQueryQueue(() => this.stop());
@@ -480,6 +481,7 @@ class AnalyzerSession {
 
   async start(config: AnalyzerConfig) {
     await ensureAnalyzerBuilt(false);
+    if (this.stopped) throw new Error("Analyzer session stopped.");
 
     const k = toPositiveInt(config.k, 31, 1, 31);
     const threads = toPositiveInt(config.threads, 3, 1, 64);
@@ -641,6 +643,7 @@ class AnalyzerSession {
   }
 
   stop() {
+    this.stopped = true;
     const child = this.child;
     this.rejectPending(new Error("Analyzer session stopped."));
     if (child && !child.killed) {

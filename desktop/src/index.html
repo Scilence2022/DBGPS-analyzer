@@ -57,9 +57,14 @@
             </div>
             <div class="input-source" data-views="interactive report">
               <span class="input-label">Reads</span>
-              <button id="readsSelectButton" class="ghost-button input-pick" title="Sequencing reads (FASTA/FASTQ, optionally gzip)">
-                <i data-lucide="folder-open"></i><span>Select</span>
-              </button>
+              <div class="input-actions">
+                <button id="readsSelectButton" class="ghost-button input-pick" title="Sequencing reads (FASTA/FASTQ, optionally gzip)">
+                  <i data-lucide="folder-open"></i><span>Select</span>
+                </button>
+                <button id="clearReadsButton" class="ghost-button input-pick" title="Clear read selections and counting results; stop the kernel" disabled>
+                  <i data-lucide="trash-2"></i><span>Clear reads</span>
+                </button>
+              </div>
               <div id="readsFiles" class="input-chips"></div>
             </div>
           </div>

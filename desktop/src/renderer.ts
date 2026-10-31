@@ -349,6 +349,7 @@ const elements = {
   referenceSelectButton: $("referenceSelectButton") as HTMLButtonElement,
   referenceFile: $("referenceFile"),
   readsSelectButton: $("readsSelectButton") as HTMLButtonElement,
+  clearReadsButton: $("clearReadsButton") as HTMLButtonElement,
   readsFiles: $("readsFiles"),
   primerFrontInput: $("primerFrontInput") as HTMLInputElement,
   primerBackInput: $("primerBackInput") as HTMLInputElement,
@@ -448,6 +449,7 @@ let referenceFile = "";
 let kernelLoaded: { k: number; threads: number; readLength: number; files: number; config: AnalyzerConfig } | null = null;
 let analyzerReady = false;
 let analyzerLoading = false;
+let readsClearing = false;
 let readIndexGeneration = 0;
 let loadedScope: AnalyzerScope = {};
 let queryMode: "kmer" | "index" | "sequence" = "kmer";
@@ -979,6 +981,7 @@ function renderInputsBar() {
     ? "Count additional sequencing files into the running kernel"
     : "Sequencing reads (FASTA/FASTQ, optionally gzip)";
   elements.readsSelectButton.disabled = analyzerLoading;
+  elements.clearReadsButton.disabled = readsClearing || !(selectedFiles.length || analyzerReady || analyzerLoading || latestResult || latestBatch);
   elements.referenceSelectButton.disabled = false;
 
   const { front, back } = sharedPrimers();
@@ -1677,16 +1680,18 @@ function updateBloomControls() {
 // files to the loaded index instead.
 async function selectFiles() {
   if (analyzerReady || analyzerLoading) return;
+  const generation = readIndexGeneration;
   const files = await window.dstoreqc.selectFiles();
-  if (analyzerReady || analyzerLoading) return;
+  if (generation !== readIndexGeneration || analyzerReady || analyzerLoading) return;
   if (files.length) selectedFiles = files;
   renderInputsBar();
 }
 
 async function addSequencingFiles() {
   if (!analyzerReady || analyzerLoading) return;
+  const pickerGeneration = readIndexGeneration;
   const files = await window.dstoreqc.selectFiles();
-  if (!analyzerReady || analyzerLoading) return;
+  if (pickerGeneration !== readIndexGeneration || !analyzerReady || analyzerLoading) return;
   const newFiles = files.filter((file) => !selectedFiles.includes(file));
   if (newFiles.length === 0) {
     if (files.length > 0) appendLog("No new sequencing files selected.");
@@ -1695,11 +1700,13 @@ async function addSequencingFiles() {
 
   analyzerLoading = true;
   clearReadIndexResults();
+  const generation = readIndexGeneration;
   setAnalyzerReady(true);
   setStatus(`Counting ${formatNumber(newFiles.length)} additional NGS file${newFiles.length === 1 ? "" : "s"}`, "running");
 
   try {
     const summary = (await window.dstoreqc.addAnalyzerFiles(newFiles)) as SummaryResult;
+    if (generation !== readIndexGeneration) return;
     selectedFiles = summary.files?.length ? summary.files : [...selectedFiles, ...newFiles];
     if (kernelLoaded) kernelLoaded.files = selectedFiles.length;
     renderSummary(summary);
@@ -1708,13 +1715,40 @@ async function addSequencingFiles() {
     appendLog(`Added ${formatNumber(newFiles.length)} NGS file${newFiles.length === 1 ? "" : "s"} to the running kernel.`);
     setStatus("Kernel running", "running");
   } catch (error) {
+    if (generation !== readIndexGeneration) return;
     const message = error instanceof Error ? error.message : String(error);
     appendLog(message);
     setStatus("Failed to add sequencing files", "error");
     setAnalyzerReady(false);
   } finally {
+    if (generation === readIndexGeneration) {
+      analyzerLoading = false;
+      setAnalyzerReady(analyzerReady);
+    }
+  }
+}
+
+async function clearSequencingFiles() {
+  if (readsClearing) return;
+  readsClearing = true;
+  selectedFiles = [];
+  clearReadIndexResults();
+  analyzerLoading = true;
+  setAnalyzerReady(false);
+  elements.resultView.textContent = "Select reads and start the kernel to query.";
+  ui.batchResult.textContent = "Select reads and start the kernel before running Batch QC.";
+  setStatus("Clearing reads", "running");
+  try {
+    await window.dstoreqc.stopAnalyzer();
+    appendLog("Cleared read selections and counting results.");
+    setStatus("Reads cleared; kernel stopped");
+  } catch (error) {
+    appendLog(errMessage(error));
+    setStatus("Reads cleared; failed to stop kernel", "error");
+  } finally {
+    readsClearing = false;
     analyzerLoading = false;
-    setAnalyzerReady(analyzerReady);
+    setAnalyzerReady(false);
   }
 }
 
@@ -1756,21 +1790,11 @@ async function removeSequencingFile(index: number) {
     await loadAnalyzer({ ...config, files: [...selectedFiles] });
     return;
   }
-  clearReadIndexResults();
-  if (analyzerReady) {
-    analyzerLoading = true;
-    setAnalyzerReady(false);
-    try {
-      await window.dstoreqc.stopAnalyzer();
-      setStatus("No reads selected; kernel stopped");
-    } catch (error) {
-      appendLog(errMessage(error));
-      setStatus("Failed to stop kernel", "error");
-    } finally {
-      analyzerLoading = false;
-      setAnalyzerReady(false);
-    }
+  if (analyzerReady && !selectedFiles.length) {
+    await clearSequencingFiles();
+    return;
   }
+  clearReadIndexResults();
   renderInputsBar();
 }
 
@@ -1792,11 +1816,14 @@ async function buildAnalyzer() {
 
 async function startAnalyzer() {
   if (analyzerLoading) return;
+  const generation = readIndexGeneration;
   if (selectedFiles.length === 0) await selectFiles();
+  if (generation !== readIndexGeneration || analyzerLoading) return;
   if (selectedFiles.length === 0) return;
 
   if (elements.bloomInput.checked && !referenceFile) {
     await selectReference();
+    if (generation !== readIndexGeneration || analyzerLoading) return;
     if (!referenceFile) {
       setStatus("Bloom mode needs Encoded sequences", "error");
       appendLog("Bloom mode indexes Encoded sequences from Inputs; select them first.");
@@ -1820,11 +1847,13 @@ async function startAnalyzer() {
 async function loadAnalyzer(config: AnalyzerConfig) {
   analyzerLoading = true;
   clearReadIndexResults();
+  const generation = readIndexGeneration;
   setAnalyzerReady(false);
   setStatus("Counting sequencing k-mer table", "running");
 
   try {
     const ready = (await window.dstoreqc.startAnalyzer(config)) as SummaryResult;
+    if (generation !== readIndexGeneration) return;
     if (ready.files?.length) selectedFiles = ready.files;
     kernelLoaded = { k: ready.k, threads: ready.threads, readLength: ready.readLength, files: selectedFiles.length,
       config: { ...config, k: ready.k, threads: ready.threads, readLength: ready.readLength } };
@@ -1834,13 +1863,16 @@ async function loadAnalyzer(config: AnalyzerConfig) {
     setAnalyzerReady(true);
     setStatus("Kernel running", "running");
   } catch (error) {
+    if (generation !== readIndexGeneration) return;
     const message = error instanceof Error ? error.message : String(error);
     appendLog(message);
     setStatus("Kernel failed to start", "error");
     setAnalyzerReady(false);
   } finally {
-    analyzerLoading = false;
-    setAnalyzerReady(analyzerReady);
+    if (generation === readIndexGeneration) {
+      analyzerLoading = false;
+      setAnalyzerReady(analyzerReady);
+    }
   }
 }
 
@@ -3790,7 +3822,7 @@ window.dstoreqc.onAnalyzerEvent((event) => {
   if (payload.kind === "batchProgress" && batchRunning) {
     ui.batchProgress.textContent = `${formatNumber(payload.done || 0)} / ${formatNumber(payload.total || 0)} done`;
   }
-  if (payload.kind === "exit") {
+  if (payload.kind === "exit" && !readsClearing) {
     setAnalyzerReady(false);
     elements.startButton.disabled = false;
     setStatus(`Kernel exited: ${payload.code ?? ""}`.trim());
@@ -4709,6 +4741,7 @@ elements.readsSelectButton.addEventListener("click", () => {
   if (analyzerReady) void addSequencingFiles();
   else void selectFiles();
 });
+elements.clearReadsButton.addEventListener("click", () => { void clearSequencingFiles(); });
 elements.inputsBar.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   if (target.closest("[data-clear-reference]")) {
