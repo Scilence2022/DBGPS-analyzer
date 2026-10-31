@@ -49,8 +49,8 @@
         <div id="inputsBody" class="inputs-body">
           <div class="input-sources">
             <div class="input-source" data-views="interactive batch links filter report">
-              <span class="input-label">Reference</span>
-              <button id="referenceSelectButton" class="ghost-button input-pick" title="Reference strands: FASTA or Head-Index&#9;DNA table">
+              <span class="input-label">Encoded sequences</span>
+              <button id="referenceSelectButton" class="ghost-button input-pick" title="Expected DNA storage sequences (FASTA or Head-Index&#9;DNA table)">
                 <i data-lucide="folder-open"></i><span>Select</span>
               </button>
               <div id="referenceFile" class="input-chips"></div>
@@ -114,10 +114,10 @@
             <div class="bloom-config">
               <label class="checkbox-label bloom-toggle">
                 <input id="bloomInput" type="checkbox" />
-                <span>Bloom reference mode</span>
+                <span>Bloom encoded sequence mode</span>
               </label>
               <div id="bloomOptions" class="bloom-options" hidden>
-                <p class="kernel-hint">Indexes only the k-mers of the <strong>Reference</strong> from Inputs.</p>
+                <p class="kernel-hint">Indexes only the k-mers of the <strong>Encoded sequences</strong> from Inputs.</p>
                 <label>
                   <span>Min. bits per key</span>
                   <input id="bloomBitsInput" type="number" min="4" max="64" step="1" value="16" disabled />
@@ -209,7 +209,7 @@
                   <span>Save CSV</span>
                 </button>
                 <p class="batch-hint muted">
-                  Scores every <strong>Reference</strong> strand against the loaded sequencing k-mer table, after trimming the <strong>Primer</strong> regions. Start the kernel in <strong>Interactive</strong> first.
+                  Scores every strand in <strong>Encoded sequences</strong> against the loaded sequencing k-mer table, after trimming the <strong>Primer</strong> regions. Start the kernel in <strong>Interactive</strong> first.
                 </p>
               </div>
             </section>
@@ -221,7 +221,7 @@
                 </div>
                 <div id="batchProgress" class="batch-progress"></div>
               </div>
-              <div id="batchResult" class="result-view empty-state">Choose a Reference in Inputs and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
+              <div id="batchResult" class="result-view empty-state">Choose Encoded sequences in Inputs and run to score every strand's coverage and path completeness against the loaded sequencing data.</div>
               <div id="batchDetail" class="batch-detail"></div>
             </section>
           </div>
@@ -237,7 +237,7 @@
                   <i data-lucide="play"></i>
                   <span>Count cross-links</span>
                 </button>
-                <p class="muted tool-hint">Uses the Reference, k-mer, and Primer from Inputs.</p>
+                <p class="muted tool-hint">Uses Encoded sequences, k-mer, and Primer from Inputs.</p>
               </div>
             </section>
             <section class="result-band">
@@ -247,7 +247,7 @@
                   <h2>Cross-link analysis</h2>
                 </div>
               </div>
-              <div id="linksResult" class="result-view empty-state">Choose a Reference in Inputs and run to count k-mers shared across strands. The Primer trim removes primer regions before counting.</div>
+              <div id="linksResult" class="result-view empty-state">Choose Encoded sequences in Inputs and run to count k-mers shared across strands. The Primer trim removes primer regions before counting.</div>
             </section>
           </div>
 
@@ -266,7 +266,7 @@
                   <i data-lucide="play"></i>
                   <span>Run filter</span>
                 </button>
-                <p class="muted tool-hint">Uses the Reference, k-mer, and Primer from Inputs.</p>
+                <p class="muted tool-hint">Uses Encoded sequences, k-mer, and Primer from Inputs.</p>
               </div>
             </section>
             <section class="result-band">
@@ -280,7 +280,7 @@
                   <span>Save output</span>
                 </button>
               </div>
-              <div id="filterResult" class="result-view empty-state">Choose a Reference in Inputs, then screen out entangled strands. Default emits passed strands as FASTA; toggle "List filtered names" to emit the names of removed strands instead.</div>
+              <div id="filterResult" class="result-view empty-state">Choose Encoded sequences in Inputs, then screen out entangled strands. Default emits passed strands as FASTA; toggle "List filtered names" to emit the names of removed strands instead.</div>
             </section>
           </div>
 
@@ -304,7 +304,7 @@
                   <span>Generate report</span>
                 </button>
               </div>
-              <p id="reportInputsHint" class="muted tool-hint">Uses the Reference, Reads, k-mer, Threads, Read length, and Primer from Inputs.</p>
+              <p id="reportInputsHint" class="muted tool-hint">Uses Encoded sequences, Reads, k-mer, Threads, Read length, and Primer from Inputs.</p>
             </section>
             <section class="result-band">
               <div class="section-title">
@@ -327,7 +327,7 @@
                   </button>
                 </div>
               </div>
-              <div id="reportResult" class="result-view empty-state">Choose a Reference (and optionally Reads) in Inputs, then generate a combined coverage, cross-link, and entanglement report.</div>
+              <div id="reportResult" class="result-view empty-state">Choose Encoded sequences (and optionally Reads) in Inputs, then generate a combined coverage, cross-link, and entanglement report.</div>
             </section>
           </div>
         </section>

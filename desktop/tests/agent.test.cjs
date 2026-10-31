@@ -274,5 +274,5 @@ test("evidence status exposes counts only and drives per-tool availability", () 
 
   const reference = agentToolAvailability({ ...status, indexScope: "reference" }).find((tool) => tool.name === "query_kmer");
   assert.equal(reference.available, false);
-  assert.match(reference.reason, /reference mode/);
+  assert.match(reference.reason, /Bloom encoded sequence mode/);
 });

@@ -771,12 +771,13 @@ function assistantSystemPrompt() {
   return [
     "You are the AI assistant built into DStoreQC, a desktop quality-control toolkit for DNA data storage.",
     "You help researchers interpret De Bruijn graph sequencing diagnostics.",
+    "The UI calls the expected DNA storage sequences Encoded sequences. Use that term in explanations; reference fields in tool data refer to these encoded sequences.",
     "",
     "Metrics you will be asked about:",
     "- Sm (strand recovery rate): fraction of target strands fully covered by reads, at a given coverage-ratio threshold. Higher is better.",
     "- Kd (k-mer dropout rate): fraction of expected k-mers from the targets that are missing in the reads. Lower is better.",
     "- Kn (k-mer noise ratio): ratio of noise k-mers (present in reads, absent from targets) to valid target k-mers. Lower is better.",
-    "- Cross-links / entanglement: reference strands sharing k-mers, which makes them ambiguous to assemble. Both are properties of the designed library, not of the sequencing run.",
+    "- Cross-links / entanglement: encoded sequences sharing k-mers, which makes them ambiguous to assemble. Both are properties of the designed library, not of the sequencing run.",
     "- Coverage and adjacency ratios: per-k-mer depth along a strand, and the ratio between neighbouring k-mers. A sharp adjacency ratio marks a branch point or a coverage cliff.",
     "",
     "Interpret values using the same bands the app's own verdicts use, so your wording never contradicts the verdict list on screen:",
@@ -1477,7 +1478,7 @@ function normalizeToFasta(file: string, primerFront = 0, primerBack = 0): Normal
 
 type LinksRequest = { file: string; k?: number; m?: number; primerLen?: number };
 async function runLinks(req: LinksRequest) {
-  if (!req || !req.file) throw new Error("Select a reference file for cross-link analysis.");
+  if (!req || !req.file) throw new Error("Select an encoded sequence file for cross-link analysis.");
   await ensureBuilt("dstoreqc");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const m = toPositiveInt(req.m, 1, 0, 1 << 20);
@@ -1561,7 +1562,7 @@ function invalidDnaBase(seq: string) {
 }
 
 async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
-  if (!req || !req.strandsFile) throw new Error("Select a reference strand file.");
+  if (!req || !req.strandsFile) throw new Error("Select an encoded sequence file.");
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];
   if (ngsFiles.length === 0) throw new Error("Select at least one NGS reads file.");
   await ensureBuilt("dstoreqc");
@@ -1588,7 +1589,7 @@ async function runAnalyzerBatch(req: AnalyzerBatchRequest) {
 
 async function runInteractiveBatch(req: InteractiveBatchRequest) {
   if (!session) throw new Error("Analyzer is not running.");
-  if (!req || !req.file) throw new Error("Select a reference file for Batch QC.");
+  if (!req || !req.file) throw new Error("Select an encoded sequence file for Batch QC.");
   const currentSession = session;
   const datasetVersion = agentEvidence.getDatasetVersion();
   if (!datasetVersion) throw new Error("Read index is changing or unavailable. Start or finish loading it before Batch QC.");
@@ -1683,7 +1684,7 @@ type ReportRequest = {
   primerLen?: number; linksM?: number; filterM?: number;
 };
 async function runReport(req: ReportRequest) {
-  if (!req || !req.referenceFile) throw new Error("Select a reference strand FASTA file.");
+  if (!req || !req.referenceFile) throw new Error("Select an encoded sequence FASTA file.");
   await ensureBuilt("dstoreqc");
   const k = toPositiveInt(req.k, 31, 1, 31);
   const ngsFiles = Array.isArray(req.ngsFiles) ? req.ngsFiles.filter((f) => typeof f === "string" && f) : [];

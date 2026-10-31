@@ -251,7 +251,7 @@ export function toolResultFacts(name: string, result: unknown): string[] {
       const batch = args(data.batch);
       const total = num(batch.total);
       if (total != null) facts.push(`batch: ${num(batch.complete) ?? 0}/${total} complete`);
-      if (data.indexScope === "reference") facts.push("reference scope");
+      if (data.indexScope === "reference") facts.push("encoded sequence scope");
       break;
     }
     case "get_sequence_profile": {

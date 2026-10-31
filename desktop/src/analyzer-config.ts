@@ -46,7 +46,7 @@ export type NormalizedReference = { path: string; cleanup: () => void };
 export function prepareBloomReference(config: AnalyzerConfig, normalize: (file: string) => NormalizedReference) {
   if (config.bloom !== true) return { args: [] as string[], cleanup: () => {}, referenceFile: undefined };
   if (typeof config.bloomReference !== "string" || !config.bloomReference.trim()) {
-    throw new Error("Select a reference FASTA or tab-delimited file for Bloom reference mode.");
+    throw new Error("Select an encoded sequence FASTA or tab-delimited file for Bloom mode.");
   }
   const bits = config.bloomBits === undefined ? 16 : config.bloomBits;
   if (!Number.isSafeInteger(bits) || bits < 4 || bits > 64) {

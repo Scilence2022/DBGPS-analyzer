@@ -51,7 +51,7 @@ test("Bloom bits accept only integer values within inclusive 4..64 bounds", () =
 
 test("enabled mode rejects a missing reference before normalization", () => {
   for (const bloomReference of [undefined, "", "   ", 16]) {
-    assert.throws(() => prepareBloomReference({ ...config, bloom: true, bloomReference }, noNormalization), /Select a reference/);
+    assert.throws(() => prepareBloomReference({ ...config, bloom: true, bloomReference }, noNormalization), /Select an encoded sequence/);
   }
 });
 
@@ -124,7 +124,7 @@ test("reference graph queries fail before calling the kernel", async () => {
   const store = new AgentEvidenceStore();
   store.activate({ ...config, ...scope });
   const { backend } = store.open({}, { query: async () => { throw new Error("must not query"); } });
-  await assert.rejects(executeAgentTool("query_kmer", { kmer: "AAA", depth: 0 }, backend, signal()), /unavailable in reference mode/);
+  await assert.rejects(executeAgentTool("query_kmer", { kmer: "AAA", depth: 0 }, backend, signal()), /unavailable in Bloom encoded sequence mode/);
 });
 
 test("nonindexed Batch QC records are errors, not zero-coverage or incomplete records", () => {

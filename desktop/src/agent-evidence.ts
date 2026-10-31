@@ -151,7 +151,7 @@ export class AgentEvidenceStore {
       },
       queryKmer: async (kmer, depth, signal) => {
         assertCurrent();
-        if (scope.indexScope === "reference") throw new Error("Graph k-mer queries are unavailable in reference mode; use a cached reference sequence profile.");
+        if (scope.indexScope === "reference") throw new Error("Graph k-mer queries are unavailable in Bloom encoded sequence mode; use a cached encoded sequence profile.");
         const result = await query(`kmer ${kmer} ${depth} ${depth}`, signal);
         if (result.type !== "kmer") throw new Error("Unexpected k-mer response.");
         return { ...result, graphSemantics: "membership-derived overlaps, not read-supported transitions" };
