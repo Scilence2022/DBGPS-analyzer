@@ -8,6 +8,18 @@ import {
   type Suggestion, type ThreadStore, type ToolTarget
 } from "./agent-ui";
 import { cleanIpcError } from "./net-errors";
+import {
+  formatCompactCoverage,
+  formatShare,
+  layoutKmerTree,
+  pathKeys,
+  scaleByCoverage,
+  summarizeTreePath,
+  type PlacedExpander,
+  type PlacedTreeNode,
+  type TreeLayout,
+  type TreeSide
+} from "./kmer-tree-layout";
 import { adjacentFoldChanges, describeFoldEdge, foldAxisCap, formatFold, type FoldEdge } from "./fold-change";
 import { analyzerScope, type AnalyzerConfig, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
@@ -1108,113 +1120,294 @@ function maxTreeCoverage(nodes: KmerTreeNode[] | undefined, current = 0): number
   return nodes.reduce((max, node) => maxTreeCoverage(node.children, Math.max(max, node.coverage)), current);
 }
 
-function circularNodeSize(coverage: number, maxCoverage: number) {
-  if (maxCoverage <= 0) return 30;
-  const scale = Math.max(1, maxCoverage / 3);
-  return Math.round(30 + 38 * (1 - Math.exp(-coverage / scale)));
+const TREE_CHAR_WIDTH = 7.25;
+const TREE_QUERY_HEIGHT = 56;
+const TREE_ANCHOR_GAP = 52;
+const TREE_EXPANDER_SIZE = 26;
+const TREE_LINK_MIN = 1.5;
+const TREE_LINK_MAX = 9;
+const TREE_RULER_HEIGHT = 44;
+
+type TreeView = { data: KmerResult; layout: TreeLayout; pinnedKey: string | null; hoverKey: string | null };
+type TreeAnchor = { key: string; left: number; top: number };
+
+let treeView: TreeView | null = null;
+let treeFitted = false;
+let treeResizeObserver: ResizeObserver | null = null;
+
+function treeStepLabel(side: TreeSide, step: number) {
+  return `${side === "upstream" ? "−" : "+"}${step}`;
 }
 
-function renderTreeNodeCard(
-  node: { kmer: string; coverage: number; base?: string; step?: number },
-  center = false,
-  maxCoverage = node.coverage,
-  anchorDirection: "left" | "right" | null = null
-) {
-  const meta = center ? "Query k-mer" : `Step ${formatNumber(node.step)} · ${escapeHtml(node.base || "")}`;
-  const detail = center
-    ? `Query k-mer: ${node.kmer}\nCoverage: ${formatNumber(node.coverage)}`
-    : `Base: ${node.base || ""}\nStep: ${formatNumber(node.step)}\nk-mer: ${node.kmer}\nCoverage: ${formatNumber(node.coverage)}`;
-  const anchorClass = center && anchorDirection ? ` anchor-${anchorDirection}` : "";
-  if (appSettings.kmerTreeMode === "bases") {
-    const size = center ? 86 : circularNodeSize(node.coverage, maxCoverage);
-    return `
-      <div class="tree-node-card compact ${center ? "center" : ""}${anchorClass} ${coverageClass(node.coverage)}" style="--node-size:${size}px" title="${escapeHtml(detail)}">
-        ${center ? `<code>${escapeHtml(node.kmer)}</code>` : `<strong>${escapeHtml(node.base || "?")}</strong>`}
-        <span>${formatNumber(node.coverage)}</span>
-      </div>
-    `;
-  }
+function treeStepCount(steps: number) {
+  return `${formatNumber(steps)} ${steps === 1 ? "step" : "steps"}`;
+}
 
+function treeBoxStyle(x: number, y: number, width: number, height: number) {
+  return `left:${(x - width / 2).toFixed(1)}px;top:${(y - height / 2).toFixed(1)}px;width:${width}px;height:${height}px`;
+}
+
+function renderTreeKmer(node: PlacedTreeNode) {
+  const kmer = node.kmer;
+  return node.side === "upstream"
+    ? `<b>${escapeHtml(kmer.slice(0, 1))}</b>${escapeHtml(kmer.slice(1))}`
+    : `${escapeHtml(kmer.slice(0, -1))}<b>${escapeHtml(kmer.slice(-1))}</b>`;
+}
+
+function renderTreeNode(node: PlacedTreeNode) {
+  const cards = appSettings.kmerTreeMode === "cards";
+  const label = `Step ${treeStepLabel(node.side, node.step)}, base ${node.base}, coverage ${formatNumber(node.coverage)}`;
+  const content = cards
+    ? `
+      <span class="tree-node-meta"><span>${treeStepLabel(node.side, node.step)} · ${escapeHtml(node.base)}</span><strong>${formatCompactCoverage(node.coverage)}</strong></span>
+      <code>${renderTreeKmer(node)}</code>
+    `
+    : `<strong>${escapeHtml(node.base || "?")}</strong><span>${formatCompactCoverage(node.coverage)}</span>`;
   return `
-    <div class="tree-node-card ${center ? "center" : ""}${anchorClass} ${coverageClass(node.coverage)}" title="${escapeHtml(detail)}">
-      <span>${meta}</span>
-      <code>${escapeHtml(node.kmer)}</code>
-      <strong class="coverage ${coverageClass(node.coverage)}">${formatNumber(node.coverage)}</strong>
-    </div>
+    <button type="button" class="tree-node ${cards ? "card" : "base"} ${coverageClass(node.coverage)}${node.main ? " main" : ""}" data-tree-key="${escapeHtml(node.key)}" aria-label="${escapeHtml(label)}" style="${treeBoxStyle(node.x, node.y, node.width, node.height)}">
+      ${content}
+    </button>
   `;
 }
 
-function renderTreeExpandButton(direction: "upstream" | "downstream", path: string, kmer: string) {
-  const icon = direction === "upstream" ? "arrow-left" : "arrow-right";
-  const label = direction === "upstream" ? "Search one more upstream step" : "Search one more downstream step";
+function renderTreeExpander(expander: PlacedExpander) {
+  const icon = expander.side === "upstream" ? "arrow-left" : "arrow-right";
+  const label = expander.side === "upstream" ? "Search one more upstream step" : "Search one more downstream step";
   return `
-    <button type="button" class="tree-expand-button ${direction}" data-expand-tree="${direction}" data-tree-path="${escapeHtml(path)}" data-tree-kmer="${escapeHtml(kmer)}" title="${label}" aria-label="${label}">
+    <button type="button" class="tree-expand-button" data-expand-tree="${expander.side}" data-tree-key="${escapeHtml(expander.key)}" data-tree-path="${escapeHtml(expander.path)}" data-tree-kmer="${escapeHtml(expander.kmer)}" title="${label}" aria-label="${label}" style="${treeBoxStyle(expander.x, expander.y, TREE_EXPANDER_SIZE, TREE_EXPANDER_SIZE)}">
       <i data-lucide="${icon}"></i>
     </button>
   `;
 }
 
-function renderTreeNodes(nodes: KmerTreeNode[] | undefined, direction: "upstream" | "downstream", maxCoverage: number, showEmpty = true, pathPrefix = ""): string {
-  if (!nodes || nodes.length === 0) {
-    return showEmpty ? `<div class="tree-empty">No covered branches</div>` : "";
-  }
-
-  return nodes.map((node, index) => {
-    const path = pathPrefix ? `${pathPrefix}.${index}` : String(index);
-    const hasChildren = Boolean(node.children?.length);
-    const children = hasChildren ? renderTreeNodes(node.children, direction, maxCoverage, false, path) : "";
-    const leafAction = !hasChildren && !node.exhausted ? renderTreeExpandButton(direction, path, node.kmer) : "";
-    const card = renderTreeNodeCard(node, false, maxCoverage);
-    return direction === "upstream"
-      ? `
-        <div class="tree-node-row upstream">
-          <div class="tree-children ${hasChildren ? "has-branches" : "terminal-action"}">${hasChildren ? children : leafAction}</div>
-          <span class="tree-edge" aria-hidden="true"></span>
-          ${card}
-        </div>
-      `
-      : `
-        <div class="tree-node-row downstream">
-          ${card}
-          <span class="tree-edge" aria-hidden="true"></span>
-          <div class="tree-children ${hasChildren ? "has-branches" : "terminal-action"}">${hasChildren ? children : leafAction}</div>
-        </div>
-      `;
-  }).join("");
+function renderTreeLink(node: PlacedTreeNode, maxCoverage: number) {
+  const midX = ((node.fromX + node.toX) / 2).toFixed(1);
+  const width = scaleByCoverage(node.coverage, maxCoverage, TREE_LINK_MIN, TREE_LINK_MAX).toFixed(1);
+  const tone = node.main ? "main" : coverageClass(node.coverage);
+  return `<path class="tree-link ${tone}" data-tree-key="${escapeHtml(node.key)}" stroke-width="${width}" d="M${node.fromX.toFixed(1)} ${node.fromY.toFixed(1)} C${midX} ${node.fromY.toFixed(1)} ${midX} ${node.toY.toFixed(1)} ${node.toX.toFixed(1)} ${node.toY.toFixed(1)}"></path>`;
 }
 
-function renderKmerTree(data: KmerResult) {
-  const maxCoverage = Math.max(data.coverage, data.leftCoverage ?? 0, data.rightCoverage ?? 0, maxTreeCoverage(data.upstreamTree), maxTreeCoverage(data.downstreamTree));
-  const leftAnchor = data.leftAnchor || data.query;
-  const rightAnchor = data.rightAnchor || data.query;
-  const splitAnchors = data.truncated && leftAnchor !== rightAnchor;
-  const center = splitAnchors
-    ? `
-      <div class="tree-anchor-pair">
-        ${renderTreeNodeCard({ kmer: leftAnchor, coverage: data.leftCoverage ?? data.coverage }, true, maxCoverage, "left")}
-        <span class="anchor-gap">...</span>
-        ${renderTreeNodeCard({ kmer: rightAnchor, coverage: data.rightCoverage ?? data.coverage }, true, maxCoverage, "right")}
-      </div>
-    `
-    : renderTreeNodeCard({ kmer: leftAnchor, coverage: data.coverage }, true, maxCoverage);
+function renderTreeShare(node: PlacedTreeNode, maxCoverage: number) {
+  if (node.share === null) return "";
+  const outward = node.side === "downstream" ? -1 : 1;
+  const x = node.toX + outward * 5;
+  const y = node.toY - scaleByCoverage(node.coverage, maxCoverage, TREE_LINK_MIN, TREE_LINK_MAX) / 2 - 4;
+  return `<text class="tree-share" data-tree-key="${escapeHtml(node.key)}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${outward < 0 ? "end" : "start"}">${formatShare(node.share)}</text>`;
+}
+
+// A dead end: the kernel found nothing beyond this node when asked for one more step.
+function renderTreeDeadEnd(node: PlacedTreeNode) {
+  if (!node.exhausted) return "";
+  const direction = node.side === "downstream" ? 1 : -1;
+  const startX = node.x + (direction * node.width) / 2;
+  const endX = startX + direction * 11;
+  return `<path class="tree-dead-end" data-tree-key="${escapeHtml(node.key)}" d="M${startX.toFixed(1)} ${node.y.toFixed(1)} H${endX.toFixed(1)} M${endX.toFixed(1)} ${(node.y - 7).toFixed(1)} V${(node.y + 7).toFixed(1)}"></path>`;
+}
+
+function renderTreeStub(expander: PlacedExpander) {
+  const direction = expander.side === "downstream" ? 1 : -1;
+  const endX = expander.x - (direction * TREE_EXPANDER_SIZE) / 2;
+  return `<path class="tree-stub" data-tree-key="${escapeHtml(expander.key)}" d="M${expander.fromX.toFixed(1)} ${expander.y.toFixed(1)} H${endX.toFixed(1)}"></path>`;
+}
+
+function renderTreeQuery(kmer: string, coverage: number, x: number, y: number, width: number) {
   return `
-    <div class="kmer-tree-panel ${appSettings.kmerTreeMode === "bases" ? "compact-mode" : "card-mode"}">
-      <div class="tree-side upstream">
-        <div class="tree-side-title">Upstream · ${formatNumber(data.upstreamDepth ?? 1)} steps</div>
-        ${renderTreeNodes(data.upstreamTree, "upstream", maxCoverage)}
-      </div>
-      <div class="tree-center">
-        ${center}
-      </div>
-      <div class="tree-side downstream">
-        <div class="tree-side-title">Downstream · ${formatNumber(data.downstreamDepth ?? 1)} steps</div>
-        ${renderTreeNodes(data.downstreamTree, "downstream", maxCoverage)}
-      </div>
+    <div class="tree-query ${coverageClass(coverage)}" style="${treeBoxStyle(x, y, width, TREE_QUERY_HEIGHT)}">
+      <code>${escapeHtml(kmer)}</code>
+      <span>${formatNumber(coverage)}</span>
     </div>
   `;
 }
 
-function renderKmerResult(data: KmerResult) {
+function abbreviateSequence(sequence: string) {
+  return sequence.length > 28 ? `${sequence.slice(0, 12)}…${sequence.slice(-12)}` : sequence;
+}
+
+function renderTreeReadout() {
+  if (!treeView) return "";
+  const { data, layout, pinnedKey, hoverKey } = treeView;
+  const key = hoverKey ?? pinnedKey;
+  const path = summarizeTreePath(layout, data.query, key);
+  const end = path.end;
+  const heading = !key ? "Main path" : key === pinnedKey ? "Pinned path" : "Branch path";
+  const facts = end
+    ? [
+        `Step ${treeStepLabel(end.side, end.step)}`,
+        `Coverage ${formatNumber(end.coverage)}`,
+        ...(end.share === null ? [] : [`${formatShare(end.share)} of fork`]),
+        ...(path.minCoverage === null ? [] : [`Weakest step ${formatNumber(path.minCoverage)}`])
+      ]
+    : path.minCoverage === null
+      ? ["No branches to follow from this k-mer"]
+      : [
+          `${treeStepCount(path.upstreamSteps)} upstream, ${treeStepCount(path.downstreamSteps)} downstream`,
+          `Weakest step ${formatNumber(path.minCoverage)}`,
+          `${formatNumber(path.forks)} ${path.forks === 1 ? "fork" : "forks"} along the way`
+        ];
+  return `
+    <div class="tree-readout-main">
+      <span class="tree-readout-label">${heading}</span>
+      <code class="tree-readout-sequence" title="${escapeHtml(path.sequence)}"><b>${escapeHtml(path.prefix)}</b>${escapeHtml(abbreviateSequence(path.query))}<b>${escapeHtml(path.suffix)}</b></code>
+      <button type="button" class="tree-readout-button" data-tree-copy>Copy</button>
+      ${end ? `<button type="button" class="tree-readout-button" data-tree-requery="${escapeHtml(end.kmer)}">Query this k-mer</button>` : ""}
+    </div>
+    <div class="tree-readout-facts">
+      ${facts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}
+      ${end ? `<code>${escapeHtml(end.kmer)}</code>` : ""}
+    </div>
+  `;
+}
+
+function renderKmerTree(data: KmerResult) {
+  const cards = appSettings.kmerTreeMode === "cards";
+  const maxCoverage = Math.max(data.coverage, data.leftCoverage ?? 0, data.rightCoverage ?? 0, maxTreeCoverage(data.upstreamTree), maxTreeCoverage(data.downstreamTree));
+  const leftAnchor = data.leftAnchor || data.query;
+  const rightAnchor = data.rightAnchor || data.query;
+  const splitAnchors = data.truncated && leftAnchor !== rightAnchor;
+  const queryWidth = Math.round(leftAnchor.length * TREE_CHAR_WIDTH) + 44;
+  const cardWidth = Math.max(150, Math.round(leftAnchor.length * TREE_CHAR_WIDTH) + 28);
+  const centerWidth = splitAnchors ? queryWidth * 2 + TREE_ANCHOR_GAP : queryWidth;
+  const layout = layoutKmerTree(data.upstreamTree, data.downstreamTree, {
+    center: { width: centerWidth, height: TREE_QUERY_HEIGHT },
+    nodeBox: (node) => {
+      if (cards) return { width: cardWidth, height: 54 };
+      const size = Math.round(scaleByCoverage(node.coverage, maxCoverage, 34, 62));
+      return { width: size, height: size };
+    },
+    columnGap: cards ? 48 : 40,
+    rowGap: cards ? 14 : 10,
+    expanderSize: TREE_EXPANDER_SIZE,
+    emptyWidth: 130,
+    padding: 18
+  });
+  treeView = { data, layout, pinnedKey: treeView?.data === data ? treeView.pinnedKey : null, hoverKey: null };
+
+  const center = splitAnchors
+    ? `
+      ${renderTreeQuery(leftAnchor, data.leftCoverage ?? data.coverage, layout.centerX - (queryWidth + TREE_ANCHOR_GAP) / 2, layout.centerY, queryWidth)}
+      <span class="anchor-gap" title="${formatNumber(data.queryLength ?? data.query.length)} bases in the input sequence" style="${treeBoxStyle(layout.centerX, layout.centerY, TREE_ANCHOR_GAP, 20)}">…</span>
+      ${renderTreeQuery(rightAnchor, data.rightCoverage ?? data.coverage, layout.centerX + (queryWidth + TREE_ANCHOR_GAP) / 2, layout.centerY, queryWidth)}
+    `
+    : renderTreeQuery(leftAnchor, data.coverage, layout.centerX, layout.centerY, queryWidth);
+  const guides = layout.columns.map((column) => `<line class="tree-guide" x1="${column.x.toFixed(1)}" y1="0" x2="${column.x.toFixed(1)}" y2="${layout.height}"></line>`).join("");
+  const ticks = layout.columns
+    .map((column) => `<span class="tree-tick" style="left:${column.x.toFixed(1)}px">${treeStepLabel(column.side, column.step)}</span>`)
+    .join("");
+  const notes = layout.empty
+    .map((note) => {
+      const depth = note.side === "upstream" ? data.upstreamDepth : data.downstreamDepth;
+      return `<div class="tree-empty" style="${treeBoxStyle(note.x, note.y, 130, 18)}">${depth === 0 ? "Not searched" : "No covered branches"}</div>`;
+    })
+    .join("");
+  const centerLeft = layout.centerX - centerWidth / 2;
+  const centerRight = layout.width - layout.centerX - centerWidth / 2;
+  return `
+    <div class="kmer-tree-panel ${cards ? "card-mode" : "compact-mode"}">
+      <div class="tree-toolbar">
+        <div class="tree-legend">
+          <span><span class="tree-legend-line main"></span>Main path</span>
+          <span><span class="tree-legend-line"></span>Branch</span>
+          <span><span class="tree-legend-line low"></span>Low coverage (&lt;3)</span>
+          <span class="tree-legend-note">Line width and node size scale with coverage</span>
+        </div>
+        <button type="button" class="tree-fit-button" data-tree-fit aria-pressed="${treeFitted}">
+          <i data-lucide="${treeFitted ? "minimize" : "maximize"}"></i>${treeFitted ? "Actual size" : "Fit graph"}
+        </button>
+      </div>
+      <div class="tree-scroll">
+        <div class="tree-canvas" style="width:${layout.width}px">
+          <div class="tree-ruler" style="height:${TREE_RULER_HEIGHT}px">
+            <span class="tree-side-title upstream" style="right:${(layout.width - centerLeft).toFixed(1)}px">Upstream · ${treeStepCount(data.upstreamDepth ?? 1)}</span>
+            <span class="tree-side-title downstream" style="left:${(layout.width - centerRight).toFixed(1)}px">Downstream · ${treeStepCount(data.downstreamDepth ?? 1)}</span>
+            ${ticks}
+            <span class="tree-tick query" style="left:${layout.centerX.toFixed(1)}px">Query</span>
+          </div>
+          <div class="tree-stage" style="height:${layout.height}px">
+            <svg class="tree-links" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" aria-hidden="true">
+              ${guides}
+              ${layout.nodes.map((node) => renderTreeLink(node, maxCoverage)).join("")}
+              ${layout.expanders.map(renderTreeStub).join("")}
+              ${layout.nodes.map(renderTreeDeadEnd).join("")}
+              ${layout.nodes.map((node) => renderTreeShare(node, maxCoverage)).join("")}
+            </svg>
+            ${center}
+            ${notes}
+            ${layout.nodes.map(renderTreeNode).join("")}
+            ${layout.expanders.map(renderTreeExpander).join("")}
+          </div>
+        </div>
+      </div>
+      <div class="tree-readout" aria-live="polite"></div>
+    </div>
+  `;
+}
+
+function refreshTreeFocus() {
+  const panel = elements.resultView.querySelector<HTMLElement>(".kmer-tree-panel");
+  if (!panel || !treeView) return;
+  const key = treeView.hoverKey ?? treeView.pinnedKey;
+  panel.classList.toggle("has-focus", Boolean(key));
+  panel.querySelectorAll(".on-path").forEach((element) => element.classList.remove("on-path"));
+  panel.querySelectorAll(".pinned").forEach((element) => element.classList.remove("pinned"));
+  for (const pathKey of key ? pathKeys(key) : []) {
+    panel.querySelectorAll(`[data-tree-key="${pathKey}"]`).forEach((element) => element.classList.add("on-path"));
+  }
+  if (treeView.pinnedKey) panel.querySelector(`.tree-node[data-tree-key="${treeView.pinnedKey}"]`)?.classList.add("pinned");
+  panel.querySelector<HTMLElement>(".tree-readout")!.innerHTML = renderTreeReadout();
+}
+
+function setTreeHover(key: string | null) {
+  if (!treeView || treeView.hoverKey === key) return;
+  treeView.hoverKey = key;
+  refreshTreeFocus();
+}
+
+function setTreePin(key: string | null) {
+  if (!treeView) return;
+  treeView.pinnedKey = key;
+  refreshTreeFocus();
+}
+
+function applyTreeFit() {
+  const scroll = elements.resultView.querySelector<HTMLElement>(".tree-scroll");
+  const canvas = scroll?.querySelector<HTMLElement>(".tree-canvas");
+  if (!scroll || !canvas || !treeView) return 1;
+  canvas.style.zoom = "";
+  if (!treeFitted) return 1;
+  if (!treeResizeObserver) {
+    treeResizeObserver = new ResizeObserver(() => {
+      if (treeFitted) applyTreeFit();
+    });
+    treeResizeObserver.observe(elements.resultView);
+  }
+  const maxHeight = parseFloat(getComputedStyle(scroll).maxHeight);
+  const scale = Math.min(1, scroll.clientWidth / canvas.offsetWidth, maxHeight / canvas.offsetHeight);
+  canvas.style.zoom = String(scale);
+  return scale;
+}
+
+function treeAnchor(key: string): TreeAnchor | null {
+  const rect = elements.resultView.querySelector(`.tree-node[data-tree-key="${key}"]`)?.getBoundingClientRect();
+  return rect ? { key, left: rect.left, top: rect.top } : null;
+}
+
+// Opens centered on the query; after an expansion, holds the expanded node still so
+// the graph growing around it does not throw away the reader's place.
+function syncTreeViewport(anchor: TreeAnchor | null = null) {
+  const scroll = elements.resultView.querySelector<HTMLElement>(".tree-scroll");
+  if (!scroll || !treeView || scroll.clientWidth === 0) return;
+  const scale = applyTreeFit();
+  const moved = anchor ? treeAnchor(anchor.key) : null;
+  if (anchor && moved) {
+    scroll.scrollLeft += moved.left - anchor.left;
+    scroll.scrollTop += moved.top - anchor.top;
+    return;
+  }
+  scroll.scrollLeft = treeView.layout.centerX * scale - scroll.clientWidth / 2;
+  scroll.scrollTop = (TREE_RULER_HEIGHT + treeView.layout.centerY) * scale - scroll.clientHeight / 2;
+}
+
+function renderKmerResult(data: KmerResult, anchor: TreeAnchor | null = null) {
   const leftAnchor = data.leftAnchor || data.query;
   const rightAnchor = data.rightAnchor || data.query;
   const splitAnchors = data.truncated && leftAnchor !== rightAnchor;
@@ -1260,6 +1453,8 @@ function renderKmerResult(data: KmerResult) {
       ${renderNeighborTable("Downstream k-mers", data.downstream)}
     </div>
   `;
+  refreshTreeFocus();
+  syncTreeViewport(anchor);
 }
 
 function findTreeNode(nodes: KmerTreeNode[] | undefined, path: string) {
@@ -1293,6 +1488,7 @@ async function expandTreeNode(button: HTMLButtonElement) {
   const node = findTreeNode(direction === "upstream" ? latestResult.upstreamTree : latestResult.downstreamTree, path);
   if (!node) return;
 
+  const anchor = treeAnchor(`${direction}:${path}`);
   button.disabled = true;
   button.classList.add("loading");
   setStatus("Expanding graph", "running");
@@ -1310,7 +1506,7 @@ async function expandTreeNode(button: HTMLButtonElement) {
     } else {
       latestResult.downstreamDepth = Math.max(latestResult.downstreamDepth ?? 0, node.step + 1);
     }
-    renderKmerResult(latestResult);
+    renderKmerResult(latestResult, anchor);
     renderIcons();
     setStatus("Kernel running", "running");
   } catch (error) {
@@ -3453,12 +3649,49 @@ elements.startButton.addEventListener("click", startAnalyzer);
 elements.stopButton.addEventListener("click", stopAnalyzer);
 elements.queryButton.addEventListener("click", runQuery);
 elements.diagnosticsSettingsButton.addEventListener("click", () => openSettings("diagnostics"));
+function handleTreeClick(target: HTMLElement) {
+  if (!target.closest(".kmer-tree-panel") || !treeView) return false;
+  const fitButton = target.closest("[data-tree-fit]");
+  const copyButton = target.closest<HTMLButtonElement>("[data-tree-copy]");
+  const requeryButton = target.closest<HTMLButtonElement>("[data-tree-requery]");
+  const node = target.closest<HTMLElement>(".tree-node");
+  if (fitButton) {
+    treeFitted = !treeFitted;
+    rerenderLatestResult();
+  } else if (copyButton) {
+    const { data, layout, hoverKey, pinnedKey } = treeView;
+    void navigator.clipboard.writeText(summarizeTreePath(layout, data.query, hoverKey ?? pinnedKey).sequence).then(() => {
+      copyButton.textContent = "Copied";
+      window.setTimeout(() => { copyButton.textContent = "Copy"; }, 1200);
+    });
+  } else if (requeryButton) {
+    openInInteractive(requeryButton.dataset.treeRequery || "");
+  } else if (node) {
+    const key = node.dataset.treeKey || null;
+    setTreePin(key === treeView.pinnedKey ? null : key);
+  } else if (target.closest(".tree-scroll")) {
+    setTreePin(null);
+  }
+  return true;
+}
+
+elements.resultView.addEventListener("mouseover", (event) => {
+  setTreeHover((event.target as Element).closest<HTMLElement | SVGElement>(".tree-node, .tree-link, .tree-expand-button")?.dataset.treeKey ?? null);
+});
+elements.resultView.addEventListener("mouseleave", () => setTreeHover(null));
+elements.resultView.addEventListener("focusin", (event) => {
+  const key = (event.target as HTMLElement).closest<HTMLElement>(".tree-node")?.dataset.treeKey;
+  if (key) setTreeHover(key);
+});
+elements.resultView.addEventListener("focusout", () => setTreeHover(null));
 elements.resultView.addEventListener("click", (event) => {
   const expandButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-expand-tree]");
   if (expandButton) {
     expandTreeNode(expandButton);
     return;
   }
+
+  if (handleTreeClick(event.target as HTMLElement)) return;
 
   const seriesButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-sequence-series]");
   const series = seriesButton?.dataset.sequenceSeries;
