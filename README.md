@@ -240,7 +240,7 @@ records separately from passed and entangled records.
 
 #### Input formats
 
-The Reference picker in the desktop app accepts two formats and auto-detects which one a file uses:
+The Encoded sequences picker selects the expected DNA storage sequences. It accepts two formats and auto-detects which one a file uses:
 
 1. **FASTA** (`>name` headers followed by sequence lines), optionally gzip-compressed.
 2. **Tab-delimited** index tables — one record per line as `Head-Index<TAB>DNA`, with an optional header row (e.g. `Head-Index   DNA`) that is skipped automatically:
@@ -259,7 +259,7 @@ The **Inputs** bar above the views is shared by every tab, so each file and para
 
 | Input | Used by |
 |:---|:---|
-| **Reference** (FASTA or tab-delimited) | Batch QC, Cross-links, Seq-Filter, Report, and Bloom reference mode |
+| **Encoded sequences** (FASTA or tab-delimited) | Batch QC, Cross-links, Seq-Filter, Report, and Bloom encoded sequence mode |
 | **Reads** (FASTA/FASTQ, optionally gzip) | The Interactive kernel and the Report (optional there). While the kernel runs, the same control adds files to the loaded index. |
 | **k-mer, Threads, Read length** | The Interactive kernel and the Report (k-mer also Cross-links and Seq-Filter) |
 | **Primer trim** (front / back) | Batch QC, Cross-links, Seq-Filter, Report |

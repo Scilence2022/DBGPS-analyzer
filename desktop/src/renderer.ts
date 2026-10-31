@@ -988,7 +988,7 @@ function renderInputsBar() {
   elements.primerBackInput.disabled = false;
 
   const parts = [
-    referenceFile ? compactPath(referenceFile) : "no reference",
+    referenceFile ? compactPath(referenceFile) : "no encoded sequences",
     selectedFiles.length ? `${formatNumber(selectedFiles.length)} read file${selectedFiles.length === 1 ? "" : "s"}` : "no reads",
     `k ${appSettings.k}`,
     `primer ${front === back ? front : `${front}/${back}`}`
@@ -1060,11 +1060,11 @@ function symmetricPrimerOrError(target: HTMLElement, tool: string): number | nul
 function renderSummary(data: SummaryResult) {
   loadedScope = analyzerScope(data);
   const reference = data.indexScope === "reference";
-  elements.distinctKmersLabel.textContent = reference ? "Observed reference k-mers" : "Distinct k-mers";
-  elements.totalCoverageLabel.textContent = reference ? "Reference coverage" : "Total coverage";
+  elements.distinctKmersLabel.textContent = reference ? "Observed encoded sequence k-mers" : "Distinct k-mers";
+  elements.totalCoverageLabel.textContent = reference ? "Encoded sequence coverage" : "Total coverage";
   elements.summaryScope.hidden = !reference;
   elements.summaryScope.textContent = reference
-    ? `Reference scope: ${data.referenceFile || referenceFile}; ${formatNumber(data.targetKmers)} target keys; minimum ${formatNumber(data.bloom?.bitsPerKey)} bits/key. Global noise (Kn), off-target coverage and graph queries: unavailable.`
+    ? `Encoded sequence scope: ${data.referenceFile || referenceFile}; ${formatNumber(data.targetKmers)} target keys; minimum ${formatNumber(data.bloom?.bitsPerKey)} bits/key. Global noise (Kn), off-target coverage and graph queries: unavailable.`
     : "";
   elements.distinctKmers.textContent = formatNumber(data.distinctKmers);
   elements.totalCoverage.textContent = formatNumber(data.totalKmerCoverage);
@@ -1609,7 +1609,7 @@ function renderSequenceTable(data: SequenceResult) {
 
 function sequenceResultHtml(data: SequenceResult) {
   return `
-    ${data.indexScope === "reference" ? `<p class="index-scope">Reference scope: ${escapeHtml(data.referenceFile)}. Only full-reference keys are indexed; global noise (Kn) and off-target coverage are unavailable.</p>` : ""}
+    ${data.indexScope === "reference" ? `<p class="index-scope">Encoded sequence scope: ${escapeHtml(data.referenceFile)}. Only keys from the full encoded sequences are indexed; global noise (Kn) and off-target coverage are unavailable.</p>` : ""}
     <div class="result-grid">
       <div class="metric ${data.complete ? "metric-ok" : "metric-alert"}">
         <span>Path</span>
@@ -1798,8 +1798,8 @@ async function startAnalyzer() {
   if (elements.bloomInput.checked && !referenceFile) {
     await selectReference();
     if (!referenceFile) {
-      setStatus("Bloom reference mode needs a Reference", "error");
-      appendLog("Bloom reference mode indexes the Reference from Inputs; select one first.");
+      setStatus("Bloom mode needs Encoded sequences", "error");
+      appendLog("Bloom mode indexes Encoded sequences from Inputs; select them first.");
       return;
     }
   }
@@ -1869,7 +1869,7 @@ function updateQueryModeControls() {
   if (reference) queryMode = "sequence";
   document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => {
     button.disabled = reference && button.dataset.mode !== "sequence";
-    button.title = button.disabled ? "Unavailable in reference mode" : "";
+    button.title = button.disabled ? "Unavailable in Bloom encoded sequence mode" : "";
     button.classList.toggle("active", button.dataset.mode === queryMode);
     button.setAttribute("aria-selected", String(button.dataset.mode === queryMode));
   });
@@ -2712,13 +2712,13 @@ function renderReadiness() {
   let text = "No index loaded";
   if (status?.datasetVersion) {
     level = status.batch ? "ready" : "partial";
-    text = `${status.indexScope === "reference" ? "Ref · " : ""}k=${status.k}`;
+    text = `${status.indexScope === "reference" ? "Encoded · " : ""}k=${status.k}`;
     if (status.batch) text += ` · ${formatNumber(status.batch.total)} strands`;
   }
   elements.agentReadinessDot.className = `readiness-dot ${level}`;
   elements.agentReadinessText.textContent = text;
   elements.capabilitiesButton.title = status?.datasetVersion
-    ? `${status.indexScope === "reference" ? "Reference-scoped" : "Read"} index loaded (k=${status.k})${status.batch ? `, Batch QC cached (${formatNumber(status.batch.total)} strands)` : ", no Batch QC cache"}. Click for agent tools.`
+    ? `${status.indexScope === "reference" ? "Encoded sequence" : "Read"} index loaded (k=${status.k})${status.batch ? `, Batch QC cached (${formatNumber(status.batch.total)} strands)` : ", no Batch QC cache"}. Click for agent tools.`
     : "No read index loaded. Click for agent tools.";
   const limits = agentLimits();
   elements.agentLimitsText.textContent = `≤ ${limits.toolCalls} tool calls · ≤ ${limits.modelTurns} model turns · ${Math.round(limits.deadlineMs / 1000)} s`;
@@ -4086,12 +4086,12 @@ function reportVerdicts(report: ReportResult): Verdict[] {
   const total = report.totalStrands - report.skipped;
   const entFrac = total ? report.entangled / total : 0;
   if (report.skipped > 0) {
-    verdicts.push({ level: "warn", text: `${formatNumber(report.skipped)} reference strands were too short after primer trimming and were skipped for entanglement analysis.` });
+    verdicts.push({ level: "warn", text: `${formatNumber(report.skipped)} encoded sequences were too short after primer trimming and were skipped for entanglement analysis.` });
   }
   if (total === 0) {
-    verdicts.push({ level: "warn", text: "No reference strands could be scored for entanglement at these k and primer settings." });
+    verdicts.push({ level: "warn", text: "No encoded sequences could be scored for entanglement at these k and primer settings." });
   } else if (report.entangled === 0) {
-    verdicts.push({ level: "ok", text: `No entangled strands among ${formatNumber(total)} references at k=${report.k}.` });
+    verdicts.push({ level: "ok", text: `No entangled strands among ${formatNumber(total)} encoded sequences at k=${report.k}.` });
   } else {
     verdicts.push({
       level: entFrac > 0.1 ? "bad" : "warn",
@@ -4101,7 +4101,7 @@ function reportVerdicts(report: ReportResult): Verdict[] {
   if (report.crossLinks != null) {
     verdicts.push({
       level: report.crossLinks === 0 ? "ok" : "warn",
-      text: `${formatNumber(report.crossLinks)} cross-links between reference strands at k=${report.k}.`
+      text: `${formatNumber(report.crossLinks)} cross-links between encoded sequences at k=${report.k}.`
     });
   }
   const h = report.analyzer?.headline;
@@ -4116,7 +4116,7 @@ function reportVerdicts(report: ReportResult): Verdict[] {
         text: `k-mer dropout Kd = ${fmtPct(h.kd)}.`
       });
     } else {
-      verdicts.push({ level: "warn", text: "Dropout Kd is unavailable because no reference k-mers could be scored." });
+      verdicts.push({ level: "warn", text: "Dropout Kd is unavailable because no encoded sequence k-mers could be scored." });
     }
     if (Number.isFinite(h.kn)) {
       verdicts.push({
@@ -4165,7 +4165,7 @@ function renderReport(report: ReportResult) {
         <p class="muted">${escapeHtml(new Date(report.generatedAt).toLocaleString())} · k=${formatNumber(report.k)} · ${escapeHtml(compactPath(report.referenceFile))}</p>
       </div>
       <div class="report-metrics">
-        <div class="metric-card"><span>Reference strands</span><strong>${formatNumber(report.totalStrands)}</strong></div>
+        <div class="metric-card"><span>Encoded sequences</span><strong>${formatNumber(report.totalStrands)}</strong></div>
         <div class="metric-card"><span>Entangled</span><strong>${formatNumber(report.entangled)}</strong></div>
         <div class="metric-card"><span>Cross-links</span><strong>${report.crossLinks == null ? "-" : formatNumber(report.crossLinks)}</strong></div>
         ${h ? `<div class="metric-card"><span>Recovery Sm</span><strong>${fmtPct(h.sm)}</strong></div>
@@ -4186,7 +4186,7 @@ function renderReport(report: ReportResult) {
       </div>
       <div class="report-section">
         <h4>Cross-links (m=${formatNumber(report.linksM)})</h4>
-        <p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} cross-link contributions across reference strands.</p>
+        <p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} cross-link contributions across encoded sequences.</p>
       </div>
       <div class="report-section narrative">
         <h4>AI interpretation</h4>
@@ -4215,7 +4215,7 @@ async function interpretReport() {
     const instruction =
       "You are given a DStoreQC DNA data-storage diagnostics report (JSON) combining strand recovery (Sm), " +
       "k-mer dropout (Kd), k-mer noise (Kn), cross-link counts, and entanglement filtering across a set of " +
-      "reference strands. State measured facts with their denominators and tool scopes. Distinguish possible " +
+      "encoded sequences. State measured facts with their denominators and tool scopes. Distinguish possible " +
       "explanations from established causes, acknowledge missing evidence, and propose discriminating manual checks. " +
       "Do not equate pooled k-mer support with decoding, distinct-key noise with a base-error rate, or sharing with physical chimeras.";
     const result = await window.dstoreqc.aiChat({
@@ -4247,11 +4247,11 @@ function buildReportMarkdown(report: ReportResult, narrative: string) {
   const lines: string[] = [];
   lines.push("# DStoreQC Diagnostics Report", "");
   lines.push(`- Generated: ${report.generatedAt}`);
-  lines.push(`- Reference: ${report.referenceFile}`);
+  lines.push(`- Encoded sequences: ${report.referenceFile}`);
   lines.push(`- NGS reads: ${report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)"}`);
   lines.push(`- k-mer: ${report.k} · primer length: ${report.primerLen}`, "");
   lines.push("## Summary", "", "| Metric | Value |", "| --- | --- |");
-  lines.push(`| Reference strands | ${report.totalStrands} |`);
+  lines.push(`| Encoded sequences | ${report.totalStrands} |`);
   lines.push(`| Entangled strands | ${report.entangled} |`);
   lines.push(`| Passed strands | ${report.passed} |`);
   lines.push(`| Skipped strands | ${report.skipped} |`);
@@ -4289,7 +4289,7 @@ function buildReportHtml(report: ReportResult, narrative: string) {
     ? `<table><thead><tr>${["Ratio", "Cov", "Total", "Paths", "Noise", "Exist", "Lost", "Sm", "Kd", "Kn"].map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>${report.analyzer.rows.map((r) => `<tr>${[r.ratio.toFixed(2), r.coverage, r.total, r.paths, r.noise, r.exist, r.lost, fmtFloat(r.sm), fmtFloat(r.kd), Number.isFinite(r.kn) ? fmtFloat(r.kn) : "nan"].map((c) => `<td>${escapeHtml(String(c))}</td>`).join("")}</tr>`).join("")}</tbody></table>`
     : `<p class="muted">No NGS reads provided; Sm/Kd/Kn not computed.</p>`;
   const summaryRows = [
-    ["Reference strands", formatNumber(report.totalStrands)],
+    ["Encoded sequences", formatNumber(report.totalStrands)],
     ["Entangled strands", formatNumber(report.entangled)],
     ["Passed strands", formatNumber(report.passed)],
     ["Skipped strands", formatNumber(report.skipped)],
@@ -4304,11 +4304,11 @@ function buildReportHtml(report: ReportResult, narrative: string) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>DStoreQC Diagnostics Report</title><style>${css}</style></head><body>` +
     `<h1>DStoreQC Diagnostics Report</h1>` +
     `<p class="muted">Generated ${escapeHtml(new Date(report.generatedAt).toLocaleString())} · k=${escapeHtml(String(report.k))} · primer ${escapeHtml(String(report.primerLen))}</p>` +
-    `<p class="muted">Reference: ${escapeHtml(report.referenceFile)}<br/>NGS reads: ${escapeHtml(report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)")}</p>` +
+    `<p class="muted">Encoded sequences: ${escapeHtml(report.referenceFile)}<br/>NGS reads: ${escapeHtml(report.ngsFiles.length ? report.ngsFiles.join(", ") : "(none)")}</p>` +
     `<h2>Summary</h2><table>${summaryRows}</table>` +
     `<h2>Verdicts</h2><ul>${verdicts}</ul>` +
     `<h2>Coverage metrics</h2>${analyzerTable}` +
-    `<h2>Cross-links (m=${escapeHtml(String(report.linksM))})</h2><p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} cross-link contributions across reference strands.</p>` +
+    `<h2>Cross-links (m=${escapeHtml(String(report.linksM))})</h2><p>${report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)} cross-link contributions across encoded sequences.</p>` +
     entangledHtml +
     narrativeHtml +
     `<h2>Commands</h2><pre>${escapeHtml([...new Set([report.linksCommand, report.filterCommand, report.analyzer?.command].filter(Boolean))].join("\n"))}</pre>` +
@@ -4388,12 +4388,12 @@ function renderBatchTable() {
       <div class="metric-card"><span>Skipped</span><strong>${formatNumber(skipped)}</strong></div>
       <div class="metric-card"><span>Errors</span><strong>${formatNumber(errors)}</strong></div>
     </div>` + (latestBatch?.indexScope === "reference"
-      ? `<p class="index-scope">Reference scope: ${escapeHtml(latestBatch.referenceFile)}. Out-of-reference keys are errors, not dropout; global noise (Kn) and off-target coverage are unavailable.</p>`
+      ? `<p class="index-scope">Encoded sequence scope: ${escapeHtml(latestBatch.referenceFile)}. Keys outside the encoded sequences are errors, not dropout; global noise (Kn) and off-target coverage are unavailable.</p>`
       : "");
 
   if (batchRows.length === 0) {
     ui.batchResult.classList.remove("empty-state");
-    ui.batchResult.innerHTML = summary + `<p class="muted">No records parsed from the reference file.</p>`;
+    ui.batchResult.innerHTML = summary + `<p class="muted">No records parsed from the encoded sequence file.</p>`;
     return;
   }
 
@@ -4565,7 +4565,7 @@ async function runBatchAnalysis() {
     renderBatchTable();
     renderIcons();
     ui.batchProgress.textContent = `${formatNumber(batchRows.length)} / ${formatNumber(batchRows.length)} done`;
-    appendLog(`Batch QC analyzed ${batchRows.length} reference strands from ${compactPath(batchFileUsed)}.`);
+    appendLog(`Batch QC analyzed ${batchRows.length} encoded sequences from ${compactPath(batchFileUsed)}.`);
     runSignatures.batch = signature;
     updateStaleNotes();
   } catch (error) {
