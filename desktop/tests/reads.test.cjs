@@ -81,6 +81,43 @@ test("running reads have remove buttons; deletion recounts only the remaining fi
   assert.equal(run("analyzerReady"), true);
 });
 
+test("Batch QC is the default and can start the shared kernel and analyze without changing tabs", async () => {
+  const { api, get, run } = await app();
+  assert.equal(run("currentViewName()"), "batch");
+  assert.equal(get("kernelControls").hidden, false);
+  await run("clearSequencingFiles()");
+  assert.equal(get("batchRunButton").disabled, true);
+  run('referenceFile = "encoded.fa";');
+  api.selectFiles = async () => ["new.fastq"];
+  let resolve;
+  api.startAnalyzer = (config) => new Promise((done) => { resolve = () => done({ ...config,
+    type: "ready", distinctKmers: 10, totalKmerCoverage: 20 }); });
+  const starting = get("startButton").listeners.click();
+  await new Promise(setImmediate);
+  assert.equal(get("batchRunButton").disabled, true);
+  assert.equal(get("startButton").disabled, true);
+  resolve();
+  await starting;
+  assert.equal(get("batchRunButton").disabled, false);
+  let batchRequest;
+  api.runInteractiveBatch = async (request) => {
+    batchRequest = request;
+    return { file: request.file, total: 0, ok: 0, skipped: 0, errors: 0, rows: [] };
+  };
+  await get("batchRunButton").listeners.click();
+  assert.equal(batchRequest.file, "encoded.fa");
+  assert.equal(run("currentViewName()"), "batch");
+  assert.equal(get("totalCoverage").textContent, "20");
+  run('setView("interactive")');
+  assert.equal(get("kernelControls").hidden, false);
+  assert.equal(run("analyzerReady"), true);
+  run('setView("links")');
+  assert.equal(get("kernelControls").hidden, true);
+  run('setView("batch")');
+  await run("stopAnalyzer()");
+  assert.equal(get("batchRunButton").disabled, true);
+});
+
 test("removing the last read stops the kernel and clears counts and cached results", async () => {
   const { calls, get, run } = await app();
   await run("removeSequencingFile(0)");
