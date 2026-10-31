@@ -577,7 +577,8 @@ class AnalyzerSession {
         reference.cleanup();
         this.ready = false;
         clearTimeout(timeout);
-        sendWindow("analyzer:event", { kind: "exit", code });
+        // A recount may already have replaced this process with a new session.
+        if (session === this) sendWindow("analyzer:event", { kind: "exit", code });
         if (!settled) {
           settled = true;
           reject(new Error(`Analyzer exited with code ${code}`));
