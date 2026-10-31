@@ -32,6 +32,7 @@ export type AgentProviderRequest = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   tools: AgentToolDefinition[];
   previous: AgentProviderTurn[];
+  disableThinking?: boolean;
   signal: AbortSignal;
 };
 

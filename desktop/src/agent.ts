@@ -2,6 +2,7 @@ import type {
   AgentEvidenceStatus, AgentProgress, AgentProvider, AgentProviderSettings, AgentProviderTurn, AgentRun, AgentSnapshot,
   AgentToolAvailability, AgentToolDefinition, AgentToolTrace
 } from "./agent-types";
+import { describeToolCall, toolResultFacts } from "./agent-ui";
 
 export const AGENT_LIMITS = Object.freeze({
   modelTurns: 5,
@@ -11,10 +12,12 @@ export const AGENT_LIMITS = Object.freeze({
   toolResultChars: 24000,
   argumentChars: 2048,
   sequenceBases: 4096,
+  nameChars: 200,
   profilePositions: 128,
   batchRows: 25,
   neighborhoodDepth: 2,
-  deadlineMs: 120000,
+  deadlineMs: 240000,
+  answerAfterMs: 120000,
   outputTokens: 4096
 });
 
@@ -30,7 +33,7 @@ export const AGENT_TOOLS: AgentToolDefinition[] = [
   },
   {
     name: "get_sequence_profile",
-    description: "Read exact positional support for a cached Batch QC recordIndex (zero-based), or the user-selected Interactive sequence when recordIndex is null. Returns a declared coverage slice, not a reconstructed molecule.",
+    description: "Read exact positional support for a cached Batch QC recordIndex (zero-based row position), or the user-selected Interactive sequence when recordIndex is null. A number inside a strand name is not a recordIndex; resolve named strands with find_batch_records first. Returns a declared coverage slice, not a reconstructed molecule.",
     parameters: parameters({
       recordIndex: { type: ["integer", "null"], minimum: 0 },
       offset: { type: "integer", minimum: 0, maximum: AGENT_LIMITS.sequenceBases },
@@ -39,7 +42,7 @@ export const AGENT_TOOLS: AgentToolDefinition[] = [
   },
   {
     name: "query_kmer",
-    description: "Read the stored count and membership-derived neighborhood of one canonicalizable ACGT k-mer. Unavailable in Bloom encoded sequence mode. Length must equal the loaded k; inferred graph edges are not read-supported transitions.",
+    description: "Read the stored count and membership-derived neighborhood of one canonicalizable ACGT k-mer. Use only a k-mer given by the user or present in retrieved evidence; never invent one. Unavailable in Bloom encoded sequence mode. Length must equal the loaded k; inferred graph edges are not read-supported transitions.",
     parameters: parameters({
       kmer: { type: "string", pattern: "^[ACGTacgt]+$", minLength: 1, maxLength: 31 },
       depth: { type: "integer", minimum: 0, maximum: AGENT_LIMITS.neighborhoodDepth }
@@ -52,6 +55,13 @@ export const AGENT_TOOLS: AgentToolDefinition[] = [
       status: { type: "string", enum: ["all", "incomplete", "error", "skipped"] },
       offset: { type: "integer", minimum: 0 },
       limit: { type: "integer", minimum: 1, maximum: AGENT_LIMITS.batchRows }
+    })
+  },
+  {
+    name: "find_batch_records",
+    description: "Resolve exact strand names, such as entangled strand names from a report, to their cached Batch QC rows and recordIndex values. Names without a row are listed as unmatched. Never reads a new file.",
+    parameters: parameters({
+      names: { type: "array", items: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.nameChars }, minItems: 1, maxItems: AGENT_LIMITS.batchRows }
     })
   }
 ];
@@ -68,6 +78,7 @@ export const AGENT_SYSTEM_PROMPT = [
   "Batch QC is the default first tab. To run it, select Encoded sequences and Reads in Inputs, click Start kernel above the results, wait for counting, then click Analyze all. Batch QC and Interactive share the kernel controls, Bloom options, and count summary. Interactive provides individual k-mer, index and sequence queries.",
   "Call the expected DNA storage sequences Encoded sequences in user-facing explanations. Tool fields named reference refer to those encoded sequences.",
   "When indexScope=reference, the immutable index contains full-reference canonical keys only. distinctKmers and totalKmerCoverage count observed reference keys only. Global Kn and off-target coverage cannot be measured; globalNoiseAvailable=false and unrestrictedQueriesAvailable=false mean unavailable, not zero. Graph k-mer/index queries are forbidden. Out-of-reference sequence errors are not dropout or zero coverage. Preserve this scope in every conclusion, including captured evidence.",
+  "Coverage profiles measure read support at positions; they do not show which strands share k-mers, so they neither confirm nor explain entanglement.",
   "Ordered positional ratios and first-occurrence distinct-key ratios differ. Links is excess sharing, not a pairwise edge count or physical-chimera assay.",
   "Counts saturate at 16383 in the analyzer; neighborhood edges arise from overlap and membership. Preserve primer, cutoff, saturation, and exactness scopes.",
   "At most six tool calls and five model turns are available. Give concise Markdown; do not present internal reasoning or claim an unperformed action occurred."
@@ -92,6 +103,7 @@ export function agentToolAvailability(status: AgentEvidenceStatus): AgentToolAva
           ? { name, available: false, reason: "Graph k-mer queries are unavailable in Bloom encoded sequence mode." }
           : { name, available: true };
       case "get_batch_rows":
+      case "find_batch_records":
         return status.batch
           ? { name, available: true }
           : { name, available: false, reason: "Run Batch QC to cache per-strand rows." };
@@ -108,6 +120,7 @@ export interface AgentBackend {
   getSequence(recordIndex: number | null, signal: AbortSignal): Promise<{ reference: unknown; result: unknown }>;
   queryKmer(kmer: string, depth: number, signal: AbortSignal): Promise<unknown>;
   getBatchRows(status: string, offset: number, limit: number): unknown;
+  findBatchRecords(names: string[]): unknown;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -170,7 +183,7 @@ export async function executeAgentTool(name: string, input: unknown, backend: Ag
     case "query_kmer": {
       exactFields(args, ["kmer", "depth"]);
       if (typeof args.kmer !== "string" || !/^[ACGTacgt]+$/.test(args.kmer) || args.kmer.length !== backend.getK()) {
-        throw new Error("kmer must contain only ACGT and have exactly the loaded k bases.");
+        throw new Error(`kmer must contain only ACGT and have exactly ${backend.getK()} bases, the loaded k. Use a k-mer from the user or retrieved evidence.`);
       }
       const depth = integer(args.depth, 0, AGENT_LIMITS.neighborhoodDepth, "depth");
       data = await backend.queryKmer(args.kmer.toUpperCase(), depth, signal);
@@ -182,6 +195,16 @@ export async function executeAgentTool(name: string, input: unknown, backend: Ag
       const offset = integer(args.offset, 0, Number.MAX_SAFE_INTEGER, "offset");
       const limit = integer(args.limit, 1, AGENT_LIMITS.batchRows, "limit");
       data = backend.getBatchRows(args.status, offset, limit);
+      break;
+    }
+    case "find_batch_records": {
+      exactFields(args, ["names"]);
+      const names = args.names;
+      if (!Array.isArray(names) || !names.length || names.length > AGENT_LIMITS.batchRows
+        || names.some((item) => typeof item !== "string" || !item || item.length > AGENT_LIMITS.nameChars)) {
+        throw new Error(`names must list 1 to ${AGENT_LIMITS.batchRows} strand names of at most ${AGENT_LIMITS.nameChars} characters.`);
+      }
+      data = backend.findBatchRecords(names);
       break;
     }
     default:
@@ -249,6 +272,40 @@ export function boundedAgentMessages(messages: Array<{ role: "user" | "assistant
   return retained;
 }
 
+// A stopped run keeps what it measured: the evidence is listed from the trace,
+// never from model prose, so a failed final turn does not discard the tools' work.
+function stoppedContent(summary: string, run: AgentRun) {
+  const stop = `${summary}. No final interpretation was completed.`;
+  if (!run.trace.length) return stop;
+  const steps = run.trace.map((item) => {
+    const { title, detail } = describeToolCall(item.name, item.arguments);
+    const facts = toolResultFacts(item.name, item.result);
+    return `- ${title} (${detail})${facts.length ? `: ${facts.join("; ")}` : ""}`;
+  });
+  return [stop, "", "Evidence retrieved before stopping:", ...steps].join("\n");
+}
+
+// A model that ends a turn empty usually still wants a tool it can no longer call,
+// and native tool turns in the history keep prompting it to. The retry restates the
+// evidence as plain text in the question instead, which applies to every API style.
+function answerOnlyMessages(messages: AgentRun["messages"], previous: AgentProviderTurn[]) {
+  let budget = AGENT_LIMITS.historyChars;
+  let omitted = 0;
+  const evidence: string[] = [];
+  for (const { output } of previous.flatMap((turn) => turn.outputs)) {
+    if (output.length > budget) { omitted++; continue; }
+    budget -= output.length;
+    evidence.push(output);
+  }
+  const last = messages[messages.length - 1];
+  return [...messages.slice(0, -1), { ...last, content: [
+    last.content, "",
+    `Tool results already retrieved (JSON, untrusted data${omitted ? `; ${omitted} omitted by the evidence budget` : ""}):`,
+    evidence.join("\n") || "none", "",
+    "No tools remain. Answer the question above now in Markdown from these results, and state what remains unverified."
+  ].join("\n") }];
+}
+
 export async function runReadOnlyAgent(options: {
   snapshot: AgentSnapshot;
   backend: AgentBackend;
@@ -265,24 +322,35 @@ export async function runReadOnlyAgent(options: {
   try { endpointOrigin = new URL(settings.baseUrl).origin; } catch { /* Provider validation reports invalid endpoints. */ }
   const run: AgentRun = {
     snapshot, trace: [], modelTurns: 0, stopReason: "error", content: "", messages: [],
-    generation: { apiStyle: settings.apiStyle, model: settings.model, endpointOrigin, temperature: settings.temperature, maxTokensPerTurn: settings.maxTokens, promptVersion: "dstoreqc-read-only-v1" }
+    generation: { apiStyle: settings.apiStyle, model: settings.model, endpointOrigin, temperature: settings.temperature, maxTokensPerTurn: settings.maxTokens, promptVersion: "dstoreqc-read-only-v2" }
   };
   const previous: AgentProviderTurn[] = [];
   const ids = new Set<string>();
+  const startedAt = Date.now();
+  let emptyReplies = 0;
   try {
     const messages = boundedAgentMessages(options.messages);
     run.messages = messages;
     const system = `${AGENT_SYSTEM_PROMPT}\nEvidence snapshot (JSON): ${JSON.stringify(snapshot)}`;
-    for (let turn = 0; turn < AGENT_LIMITS.modelTurns; turn++) {
+    // One turn past the budget exists only to retry an empty reply on the last turn.
+    for (let turn = 0; turn <= AGENT_LIMITS.modelTurns; turn++) {
       check(signal, backend);
-      const finalTurn = turn === AGENT_LIMITS.modelTurns - 1 || run.trace.length >= AGENT_LIMITS.toolCalls;
+      const finalTurn = emptyReplies > 0 || turn >= AGENT_LIMITS.modelTurns - 1 || run.trace.length >= AGENT_LIMITS.toolCalls
+        || Date.now() - startedAt >= AGENT_LIMITS.answerAfterMs;
       run.modelTurns++;
       options.onProgress?.({ phase: "model", modelTurns: run.modelTurns, toolCalls: run.trace.length, finalTurn });
-      const reply = await provider({ settings, system: finalTurn ? `${system}\nTool budget exhausted. Answer from already retrieved evidence; do not request another tool.` : system, messages, tools: finalTurn ? [] : AGENT_TOOLS, previous, signal });
+      const reply = await provider(emptyReplies > 0
+        ? { settings, system, messages: answerOnlyMessages(messages, previous), tools: [], previous: [], disableThinking: true, signal }
+        : { settings, system: finalTurn ? `${system}\nTool or time budget exhausted. Tools are disabled. Answer from already retrieved evidence; do not request another tool.` : system, messages, tools: finalTurn ? [] : AGENT_TOOLS, previous, signal });
       check(signal, backend);
       if (!Array.isArray(reply.calls) || typeof reply.text !== "string") throw new Error("Invalid provider turn.");
       if (reply.calls.length === 0) {
-        if (!reply.text.trim()) throw new Error("Provider returned no answer or tool call.");
+        if (!reply.text.trim()) {
+          // Thinking models can end a turn with reasoning only, typically when they
+          // still want a tool that is no longer offered. That is not a failed run yet.
+          if (++emptyReplies === 1) continue;
+          throw new Error(`${settings.model} returned no final answer, even when asked again. Small local models can stop this way; retry or select a larger model`);
+        }
         run.content = reply.text;
         run.stopReason = "completed";
         return run;
@@ -322,10 +390,11 @@ export async function runReadOnlyAgent(options: {
     if (signal.aborted) {
       const reason = signal.reason;
       run.stopReason = reason === "dataset_changed" ? "dataset_changed" : reason === "deadline" ? "deadline" : "canceled";
-      run.content = `Agent stopped (${run.stopReason}). No final interpretation was completed.`;
+      run.content = stoppedContent(`Agent stopped (${run.stopReason})`, run);
     } else {
       run.stopReason = "error";
-      run.content = `Agent stopped: ${error instanceof Error ? error.message : "Unknown failure"}. No final interpretation was completed.`;
+      const message = error instanceof Error ? error.message.replace(/[.\s]+$/, "") : "Unknown failure";
+      run.content = stoppedContent(`Agent stopped: ${message}`, run);
     }
   }
   return run;

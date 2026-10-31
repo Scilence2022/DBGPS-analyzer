@@ -157,7 +157,6 @@ function geminiContinuation(value: unknown, round: number): AgentProviderReply {
 function reply(text: string, calls: AgentToolCall[], continuation: unknown): AgentProviderReply {
   string(text, MAX_TEXT_UNITS, "provider text");
   serialize(continuation, MAX_REQUEST_UNITS, "provider reply");
-  if (!text.trim() && !calls.length) throw new Error("Provider returned no text or tool calls.");
   return { text, calls, continuation };
 }
 
@@ -213,7 +212,7 @@ function isReasoningModel(model: string): boolean {
 }
 
 function buildRequest(request: AgentProviderRequest): { url: string; headers: Record<string, string>; body: JsonObject; ids: Set<string> } {
-  const { settings, system, messages, tools, previous } = request;
+  const { settings, system, messages, tools, previous, disableThinking } = request;
   string(system, MAX_REQUEST_UNITS, "system text");
   for (const message of messages) {
     if (message.role !== "user" && message.role !== "assistant") throw new Error("Malformed request message role.");
@@ -273,7 +272,11 @@ function buildRequest(request: AgentProviderRequest): { url: string; headers: Re
         for (const call of native.calls) chat.push({ role: "tool", tool_call_id: call.id, content: outputs.get(call.id) });
       }
       Object.assign(body, { messages: chat, max_tokens: settings.maxTokens, tools: tools.map((tool) => ({ type: "function", function: tool })), tool_choice: tools.length ? "auto" : "none" });
-      if (!isReasoningModel(settings.model)) body.temperature = settings.temperature;
+      if (!isReasoningModel(settings.model)) {
+        body.temperature = settings.temperature;
+        // Local thinking models can spend the whole token budget reasoning about an answer-only turn.
+        if (disableThinking) body.reasoning_effort = "none";
+      }
       break;
     }
     case "anthropic-messages": {

@@ -119,6 +119,7 @@ export class AgentEvidenceStore {
       if (!result || typeof result !== "object" || (result as { type?: string }).type === "error") throw new Error("Analyzer query failed; no measurement adopted.");
       return result as Record<string, unknown>;
     };
+    const rowView = (row: EvidenceRow) => ({ ...row, name: row.name.slice(0, 200), message: row.message?.slice(0, 200), profileCached: Boolean(batch?.sequences.has(row.index)) });
     const backend: AgentBackend = {
       assertCurrent,
       getK: () => dataset?.k || 0,
@@ -164,7 +165,21 @@ export class AgentEvidenceStore {
           ...scope,
           batchVersion: batch.id, k: dataset?.k, primerFront: batch.primerFront, primerBack: batch.primerBack,
           aggregates: batch.aggregates, selection: { status, order: "processing order", offset, limit, matchedTotal: matching.length, truncated: offset > 0 || offset + limit < matching.length },
-          rows: matching.slice(offset, offset + limit).map((row) => ({ ...row, name: row.name.slice(0, 200), message: row.message?.slice(0, 200), profileCached: batch.sequences.has(row.index) }))
+          rows: matching.slice(offset, offset + limit).map(rowView)
+        };
+      },
+      findBatchRecords: (names) => {
+        assertCurrent();
+        if (!batch) throw new Error("No completed Batch QC snapshot is available in the bounded cache.");
+        const wanted = new Set(names);
+        const rows = batch.rows.filter((row) => wanted.has(row.name));
+        const found = new Set(rows.map((row) => row.name));
+        return {
+          ...scope,
+          batchVersion: batch.id, k: dataset?.k, primerFront: batch.primerFront, primerBack: batch.primerBack,
+          selection: { requested: wanted.size, matchedRows: rows.length, truncated: rows.length > AGENT_LIMITS.batchRows },
+          rows: rows.slice(0, AGENT_LIMITS.batchRows).map(rowView),
+          unmatched: [...wanted].filter((name) => !found.has(name))
         };
       }
     };
