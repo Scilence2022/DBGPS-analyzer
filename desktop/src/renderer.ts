@@ -9,7 +9,7 @@ import {
 } from "./agent-ui";
 import { cleanIpcError } from "./net-errors";
 import { adjacentFoldChanges, describeFoldEdge, foldAxisCap, formatFold, type FoldEdge } from "./fold-change";
-import { analyzerScope, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
+import { analyzerScope, type AnalyzerConfig, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
 
 declare global {
   interface Window {
@@ -445,9 +445,10 @@ let selectedFiles: string[] = [];
 let referenceFile = "";
 // What the running (or last-started) kernel was actually loaded with, so the bar
 // can say when the shared k / threads / read length no longer match it.
-let kernelLoaded: { k: number; threads: number; readLength: number; files: number } | null = null;
+let kernelLoaded: { k: number; threads: number; readLength: number; files: number; config: AnalyzerConfig } | null = null;
 let analyzerReady = false;
 let analyzerLoading = false;
+let readIndexGeneration = 0;
 let loadedScope: AnalyzerScope = {};
 let queryMode: "kmer" | "index" | "sequence" = "kmer";
 let latestResult: AnalyzerResult | null = null;
@@ -949,9 +950,9 @@ function syncParamInputs() {
   elements.primerBackInput.value = String(appSettings.primerBack);
 }
 
-function fileChip(file: string, removeAttr: string, index: number | null) {
+function fileChip(file: string, removeAttr: string, index: number | null, disabled = false) {
   const remove = removeAttr
-    ? `<button type="button" class="chip-remove" ${removeAttr}${index == null ? "" : `="${index}"`} title="Remove" aria-label="Remove ${escapeHtml(compactPath(file))}"><i data-lucide="x"></i></button>`
+    ? `<button type="button" class="chip-remove" ${removeAttr}${index == null ? "" : `="${index}"`} ${disabled ? "disabled" : ""} title="${removeAttr === "data-remove-read" ? "Remove read file and recount remaining reads" : "Remove"}" aria-label="Remove ${escapeHtml(compactPath(file))}"><i data-lucide="x"></i></button>`
     : "";
   return `<span class="input-chip" title="${escapeHtml(file)}"><span class="chip-name">${escapeHtml(compactPath(file))}</span>${remove}</span>`;
 }
@@ -966,13 +967,12 @@ function kernelMismatch() {
 }
 
 function renderInputsBar() {
-  const editableReads = !analyzerReady && !analyzerLoading;
   elements.referenceFile.innerHTML = referenceFile
     ? fileChip(referenceFile, "data-clear-reference", null)
     : '<span class="input-empty">Not selected</span>';
   elements.referenceSelectButton.querySelector("span")!.textContent = referenceFile ? "Change" : "Select";
   elements.readsFiles.innerHTML = selectedFiles.length
-    ? selectedFiles.map((file, i) => fileChip(file, editableReads ? "data-remove-read" : "", i)).join("")
+    ? selectedFiles.map((file, i) => fileChip(file, "data-remove-read", i, analyzerLoading)).join("")
     : '<span class="input-empty">Not selected</span>';
   elements.readsSelectButton.querySelector("span")!.textContent = analyzerReady ? "Add" : selectedFiles.length ? "Change" : "Select";
   elements.readsSelectButton.title = analyzerReady
@@ -1656,9 +1656,10 @@ function renderResult(result: AnalyzerResult) {
 function setAnalyzerReady(ready: boolean) {
   analyzerReady = ready;
   if (!ready) kernelLoaded = null;
-  elements.queryButton.disabled = !ready;
-  elements.stopButton.disabled = !ready;
-  elements.startButton.disabled = ready;
+  elements.queryButton.disabled = !ready || analyzerLoading;
+  elements.stopButton.disabled = !ready || analyzerLoading;
+  elements.startButton.disabled = ready || analyzerLoading;
+  ui.batchRunButton.disabled = analyzerLoading;
   updateBloomControls();
   updateQueryModeControls();
   renderInputsBar();
@@ -1677,21 +1678,24 @@ function updateBloomControls() {
 async function selectFiles() {
   if (analyzerReady || analyzerLoading) return;
   const files = await window.dstoreqc.selectFiles();
+  if (analyzerReady || analyzerLoading) return;
   if (files.length) selectedFiles = files;
   renderInputsBar();
 }
 
 async function addSequencingFiles() {
-  if (!analyzerReady) return;
+  if (!analyzerReady || analyzerLoading) return;
   const files = await window.dstoreqc.selectFiles();
+  if (!analyzerReady || analyzerLoading) return;
   const newFiles = files.filter((file) => !selectedFiles.includes(file));
   if (newFiles.length === 0) {
     if (files.length > 0) appendLog("No new sequencing files selected.");
     return;
   }
 
-  elements.readsSelectButton.disabled = true;
-  elements.queryButton.disabled = true;
+  analyzerLoading = true;
+  clearReadIndexResults();
+  setAnalyzerReady(true);
   setStatus(`Counting ${formatNumber(newFiles.length)} additional NGS file${newFiles.length === 1 ? "" : "s"}`, "running");
 
   try {
@@ -1707,10 +1711,67 @@ async function addSequencingFiles() {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(message);
     setStatus("Failed to add sequencing files", "error");
+    setAnalyzerReady(false);
   } finally {
-    elements.queryButton.disabled = !analyzerReady;
-    renderInputsBar();
+    analyzerLoading = false;
+    setAnalyzerReady(analyzerReady);
   }
+}
+
+// Counts, queries and Batch QC profiles all belong to one exact read index.
+function clearReadIndexResults() {
+  readIndexGeneration++;
+  latestResult = null;
+  loadedScope = {};
+  for (const metric of [elements.distinctKmers, elements.totalCoverage, elements.summaryK, elements.summaryFiles]) metric.textContent = "-";
+  elements.summaryScope.hidden = true;
+  elements.resultView.className = "result-view empty-state";
+  elements.resultView.textContent = "Reads changed. Query results have been cleared.";
+  latestBatch = null;
+  batchRows = [];
+  batchRunning = false;
+  batchDetailIndex = null;
+  batchHighlightIndex = null;
+  batchPage = 0;
+  delete runSignatures.batch;
+  ui.batchResult.className = "result-view empty-state";
+  ui.batchResult.textContent = "Reads changed. Run Batch QC again after counting finishes.";
+  ui.batchDetail.innerHTML = "";
+  ui.batchProgress.textContent = "";
+  ui.batchSaveButton.disabled = true;
+  document.getElementById("view-batch")?.classList.remove("detail-open");
+  if (pinnedContext?.label === "Interactive result" || pinnedContext?.label === "Batch QC") pinnedContext = null;
+  agentStatus = null;
+  renderReadiness();
+  updateChatContextChip();
+}
+
+async function removeSequencingFile(index: number) {
+  if (analyzerLoading || !Number.isInteger(index) || index < 0 || index >= selectedFiles.length) return;
+  const removed = selectedFiles[index];
+  const config = analyzerReady ? kernelLoaded?.config : null;
+  selectedFiles = selectedFiles.filter((_, i) => i !== index);
+  appendLog(`Removed ${compactPath(removed)} from Reads.`);
+  if (config && selectedFiles.length) {
+    await loadAnalyzer({ ...config, files: [...selectedFiles] });
+    return;
+  }
+  clearReadIndexResults();
+  if (analyzerReady) {
+    analyzerLoading = true;
+    setAnalyzerReady(false);
+    try {
+      await window.dstoreqc.stopAnalyzer();
+      setStatus("No reads selected; kernel stopped");
+    } catch (error) {
+      appendLog(errMessage(error));
+      setStatus("Failed to stop kernel", "error");
+    } finally {
+      analyzerLoading = false;
+      setAnalyzerReady(false);
+    }
+  }
+  renderInputsBar();
 }
 
 async function buildAnalyzer() {
@@ -1743,27 +1804,30 @@ async function startAnalyzer() {
     }
   }
 
-  setAnalyzerReady(false);
-  setStatus("Loading sequencing k-mer table", "running");
-  elements.startButton.disabled = true;
+  await loadAnalyzer({
+    files: [...selectedFiles],
+    k: appSettings.k,
+    threads: appSettings.threads,
+    readLength: appSettings.readLength,
+    ...(elements.bloomInput.checked ? {
+      bloom: true,
+      bloomReference: referenceFile,
+      bloomBits: Number(elements.bloomBitsInput.value)
+    } : {})
+  });
+}
+
+async function loadAnalyzer(config: AnalyzerConfig) {
   analyzerLoading = true;
-  updateBloomControls();
-  renderInputsBar();
+  clearReadIndexResults();
+  setAnalyzerReady(false);
+  setStatus("Counting sequencing k-mer table", "running");
 
   try {
-    const ready = (await window.dstoreqc.startAnalyzer({
-      files: selectedFiles,
-      k: appSettings.k,
-      threads: appSettings.threads,
-      readLength: appSettings.readLength,
-      ...(elements.bloomInput.checked ? {
-        bloom: true,
-        bloomReference: referenceFile,
-        bloomBits: Number(elements.bloomBitsInput.value)
-      } : {})
-    })) as SummaryResult;
+    const ready = (await window.dstoreqc.startAnalyzer(config)) as SummaryResult;
     if (ready.files?.length) selectedFiles = ready.files;
-    kernelLoaded = { k: ready.k, threads: ready.threads, readLength: ready.readLength, files: selectedFiles.length };
+    kernelLoaded = { k: ready.k, threads: ready.threads, readLength: ready.readLength, files: selectedFiles.length,
+      config: { ...config, k: ready.k, threads: ready.threads, readLength: ready.readLength } };
     renderSummary(ready);
     latestResult = ready;
     updateChatContextChip();
@@ -1774,11 +1838,9 @@ async function startAnalyzer() {
     appendLog(message);
     setStatus("Kernel failed to start", "error");
     setAnalyzerReady(false);
-    elements.startButton.disabled = false;
   } finally {
     analyzerLoading = false;
-    updateBloomControls();
-    renderInputsBar();
+    setAnalyzerReady(analyzerReady);
   }
 }
 
@@ -1835,20 +1897,24 @@ function buildQueryCommand() {
 }
 
 async function runQuery() {
+  if (!analyzerReady || analyzerLoading) return;
+  const generation = readIndexGeneration;
   const command = buildQueryCommand();
   if (!command) return;
   elements.queryButton.disabled = true;
   setStatus("Querying", "running");
   try {
     const result = (await window.dstoreqc.queryAnalyzer(command)) as AnalyzerResult;
+    if (generation !== readIndexGeneration) return;
     renderResult(result);
     setStatus("Kernel running", "running");
   } catch (error) {
+    if (generation !== readIndexGeneration) return;
     const message = error instanceof Error ? error.message : String(error);
     renderResult({ type: "error", message });
     setStatus("Query failed", "error");
   } finally {
-    elements.queryButton.disabled = !analyzerReady;
+    elements.queryButton.disabled = !analyzerReady || analyzerLoading;
   }
 }
 
@@ -4386,6 +4452,8 @@ function collapseBatchDetail() {
 }
 
 async function showBatchDetail(index: number) {
+  if (!analyzerReady || analyzerLoading) return;
+  const generation = readIndexGeneration;
   const row = batchRows.find((r) => r.index === index);
   if (!row || row.status !== "ok" || !row.summary) {
     collapseBatchDetail();
@@ -4405,14 +4473,16 @@ async function showBatchDetail(index: number) {
         primerFront: batchPrimerFrontUsed,
         primerBack: batchPrimerBackUsed
       });
+      if (generation !== readIndexGeneration) return;
       const result = (await window.dstoreqc.queryAnalyzer(`sequence ${record.seq}`)) as AnalyzerResult;
-      if (batchDetailIndex !== index) return;
+      if (generation !== readIndexGeneration || batchDetailIndex !== index) return;
       if (result.type !== "sequence") {
         ui.batchDetail.innerHTML = `<div class="error-card">${escapeHtml(result.type === "error" ? result.message : `unexpected ${result.type} response`)}</div>`;
         return;
       }
       row.detail = result;
     } catch (error) {
+      if (generation !== readIndexGeneration) return;
       if (batchDetailIndex === index) ui.batchDetail.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
       return;
     }
@@ -4431,7 +4501,7 @@ function toggleBatchDetail(index: number) {
 }
 
 async function runBatchAnalysis() {
-  if (batchRunning) return;
+  if (batchRunning || analyzerLoading) return;
   if (!referenceFile) {
     await selectReference();
     if (!referenceFile) return;
@@ -4447,6 +4517,7 @@ async function runBatchAnalysis() {
   batchPrimerBackUsed = back;
   batchFileUsed = referenceFile;
   const signature = inputSignature("batch");
+  const generation = readIndexGeneration;
 
   batchRunning = true;
   batchRows = [];
@@ -4467,6 +4538,7 @@ async function runBatchAnalysis() {
       primerFront: front,
       primerBack: back
     });
+    if (generation !== readIndexGeneration) return;
     latestBatch = result;
     updateChatContextChip();
     batchRows = (result.rows || []).map((row) => {
@@ -4497,11 +4569,14 @@ async function runBatchAnalysis() {
     runSignatures.batch = signature;
     updateStaleNotes();
   } catch (error) {
+    if (generation !== readIndexGeneration) return;
     ui.batchResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
     ui.batchProgress.textContent = "failed";
   } finally {
-    batchRunning = false;
-    ui.batchRunButton.disabled = false;
+    if (generation === readIndexGeneration) {
+      batchRunning = false;
+      ui.batchRunButton.disabled = false;
+    }
   }
 }
 
@@ -4642,10 +4717,7 @@ elements.inputsBar.addEventListener("click", (event) => {
     return;
   }
   const remove = target.closest<HTMLElement>("[data-remove-read]");
-  if (remove?.dataset.removeRead != null && !analyzerReady && !analyzerLoading) {
-    selectedFiles = selectedFiles.filter((_, i) => i !== Number(remove.dataset.removeRead));
-    renderInputsBar();
-  }
+  if (remove?.dataset.removeRead != null) void removeSequencingFile(Number(remove.dataset.removeRead));
 });
 elements.inputsToggle.addEventListener("click", () => {
   appSettings.inputsCollapsed = !appSettings.inputsCollapsed;
