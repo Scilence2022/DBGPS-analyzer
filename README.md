@@ -370,6 +370,8 @@ The panel defaults to ordinary streaming text chat. **Agent** mode opts each req
 | `query_kmer` | Count and membership-derived neighborhood of one k-mer matching the loaded k |
 | `get_batch_rows` | Paginated complete-library or anomaly/status selections from the completed main-process batch cache |
 | `find_batch_records` | Exact strand names, such as entangled strands from a report, resolved to their rows in the completed main-process batch cache |
+| `get_decodability` | The Decoder readiness result: decodable strands, failure counts by reason, ratio hotspots, and paginated per-strand rows selected by failure |
+| `evaluate_decoder_settings` | Predicted decodable strands for up to 12 decoder settings on the loaded index, without decoding |
 
 The main process validates exact argument fields, integer ranges, DNA strings, and dataset/batch versions before execution and after asynchronous work. The model cannot supply paths, shell commands, new read files, trimming parameters, or exports. Loading, recounting, filtering, changing parameters, and saving files remain user-operated controls, not approval-gated model tools.
 
