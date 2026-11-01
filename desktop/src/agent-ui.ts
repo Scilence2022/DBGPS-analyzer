@@ -229,6 +229,7 @@ export function describeToolCall(name: string, input: unknown): { title: string;
     case "find_batch_records":
       return { ...label, detail: plural(Array.isArray(a.names) ? a.names.length : 0, "name") };
     case "get_decodability": {
+      if (typeof a.name === "string") return { ...label, detail: `strand ${a.name.length > 40 ? `${a.name.slice(0, 39)}…` : a.name}` };
       const offset = int(a.offset) ?? 0;
       const limit = int(a.limit) ?? 0;
       return { ...label, detail: `${typeof a.failure === "string" ? a.failure : "all"} · rows ${offset + 1}–${offset + limit}` };
@@ -308,8 +309,15 @@ export function toolResultFacts(name: string, result: unknown): string[] {
       const yields = configs.map((c) => num(c.decodable)).filter((v): v is number => v != null);
       if (total != null && yields.length === 1) facts.push(`${yields[0].toLocaleString("en-US")} of ${total.toLocaleString("en-US")} decodable`);
       if (total != null && yields.length > 1) facts.push(`best ${Math.max(...yields).toLocaleString("en-US")} of ${total.toLocaleString("en-US")} across ${yields.length} settings`);
-      const matched = num(args(data.selection).matchedTotal);
+      const selection = args(data.selection);
+      const matched = num(selection.matchedTotal);
       if (matched != null) facts.push(`${plural(matched, "matching strand")}`);
+      if (typeof selection.name === "string" && Array.isArray(data.rows)) {
+        for (const row of data.rows.slice(0, 3).map(args)) {
+          const position = num(row.position);
+          facts.push(position != null && position >= 0 ? `${row.failure} at k-mer ${position}` : String(row.failure));
+        }
+      }
       break;
     }
   }

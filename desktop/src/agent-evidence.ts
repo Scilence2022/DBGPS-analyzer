@@ -167,6 +167,20 @@ export class AgentEvidenceStore {
       return result as Record<string, unknown>;
     };
     const rowView = (row: EvidenceRow) => ({ ...row, name: row.name.slice(0, 200), message: row.message?.slice(0, 200), profileCached: Boolean(batch?.sequences.has(row.index)) });
+    const cachedDecoder = () => {
+      assertCurrent();
+      if (!decodability) throw new Error("No decoder readiness result is available. Run Predict decoding in Batch QC first.");
+      return decodability;
+    };
+    const decoderView = (result: DecodabilityResult, selection: Record<string, unknown>, selected: DecodabilityRow[]) => {
+      const { rows, ...summary } = result;
+      return {
+        ...summary, ...scope,
+        positionConvention: "failure positions are zero-based k-mer indices on the full strand, including the primer",
+        selection,
+        rows: selected.map((row) => ({ ...row, name: row.name.slice(0, 200) }))
+      };
+    };
     const backend: AgentBackend = {
       assertCurrent,
       getK: () => dataset?.k || 0,
@@ -230,23 +244,24 @@ export class AgentEvidenceStore {
         };
       },
       getDecodability: (failure, offset, limit) => {
-        assertCurrent();
-        if (!decodability) throw new Error("No decoder readiness result is available. Run Predict decoding in Batch QC first.");
-        const { rows, ...summary } = decodability.result;
+        const { result } = cachedDecoder();
         const wanted = new Set(failure === "not_decodable" ? [] : [failure]);
-        const matching = rows.filter((row) => failure === "not_decodable" ? row.failure !== "ok" : failure === "all" || wanted.has(row.failure));
+        const matching = result.rows.filter((row) => failure === "not_decodable" ? row.failure !== "ok" : failure === "all" || wanted.has(row.failure));
+        return decoderView(result,
+          { failure, order: "file order", offset, limit, matchedTotal: matching.length, truncated: offset > 0 || offset + limit < matching.length },
+          matching.slice(offset, offset + limit));
+      },
+      findDecodability: (name) => {
+        const { result } = cachedDecoder();
+        const matching = result.rows.filter((row) => row.name === name);
         return {
-          ...summary, ...scope,
-          positionConvention: "failure positions are zero-based k-mer indices on the full strand, including the primer",
-          selection: { failure, order: "file order", offset, limit, matchedTotal: matching.length, truncated: offset > 0 || offset + limit < matching.length },
-          rows: matching.slice(offset, offset + limit).map((row) => ({ ...row, name: row.name.slice(0, 200) }))
+          ...decoderView(result, { name, matchedTotal: matching.length, truncated: matching.length > AGENT_LIMITS.batchRows }, matching.slice(0, AGENT_LIMITS.batchRows)),
+          unmatched: matching.length ? [] : [name]
         };
       },
       evaluateDecoderSettings: async (settings, signal) => {
-        assertCurrent();
-        if (!decodability) throw new Error("No decoder readiness result is available. Run Predict decoding in Batch QC first.");
-        const { primerFront, indexLength, pathLength } = decodability.result;
-        const command = decodabilityCommand({ primerFront, indexLength, pathLength }, settings, decodability.file);
+        const { result: { primerFront, indexLength, pathLength }, file } = cachedDecoder();
+        const command = decodabilityCommand({ primerFront, indexLength, pathLength }, settings, file);
         const result = adoptDecodability(await query(command, signal, DECODABILITY_TIMEOUT_MS));
         return {
           ...scope,

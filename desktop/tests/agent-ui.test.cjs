@@ -65,6 +65,18 @@ test("strand-name lookups are described and link to the rows they resolved", () 
   assert.deepEqual(ui.toolTargets({ name: "find_batch_records", arguments: {}, result }), [{ kind: "batch-record", index: 41 }]);
 });
 
+test("decoder lookups name the strand and report its verdict", () => {
+  assert.equal(ui.describeToolCall("get_decodability", { name: "seq_7", failure: "all", offset: 0, limit: 1 }).detail, "strand seq_7");
+  assert.equal(ui.describeToolCall("get_decodability", { name: "x".repeat(60) }).detail, `strand ${"x".repeat(39)}…`);
+  assert.equal(ui.describeToolCall("get_decodability", { name: null, failure: "ok", offset: 0, limit: 5 }).detail, "ok · rows 1–5");
+  const lookup = (rows, name = "seq_7") => ({ ok: true, data: { total: 10, configs: [{ decodable: 8 }], selection: { name, matchedTotal: rows.length }, rows } });
+  assert.deepEqual(ui.toolResultFacts("get_decodability", lookup([{ name: "seq_7", failure: "ratio_rise", position: 50 }])), ["8 of 10 decodable", "1 matching strand", "ratio_rise at k-mer 50"]);
+  assert.deepEqual(ui.toolResultFacts("get_decodability", lookup([{ name: "seq_7", failure: "ok", position: -1 }])), ["8 of 10 decodable", "1 matching strand", "ok"]);
+  assert.deepEqual(ui.toolResultFacts("get_decodability", lookup([])), ["8 of 10 decodable", "0 matching strands"]);
+  const paged = { ok: true, data: { total: 10, configs: [{ decodable: 8 }], selection: { failure: "all", matchedTotal: 10 }, rows: [{ name: "a", failure: "ok", position: -1 }] } };
+  assert.deepEqual(ui.toolResultFacts("get_decodability", paged), ["8 of 10 decodable", "10 matching strands"]);
+});
+
 test("compact trace keeps durations and facts, never payloads", () => {
   const [entry] = ui.compactTrace([{ callId: "c", name: "query_kmer", arguments: { kmer: "AAA", depth: 0 }, snapshotId: "s", status: "ok", startedAt: "2026-10-16T00:00:00.000Z", finishedAt: "2026-10-16T00:00:01.250Z", result: { ok: true, data: { coverage: 9, inDegree: 1, outDegree: 2, secret: "x" } } }]);
   assert.deepEqual(entry, { callId: "c", name: "query_kmer", arguments: { kmer: "AAA", depth: 0 }, status: "ok", durationMs: 1250, facts: ["coverage 9", "in 1 · out 2"] });
