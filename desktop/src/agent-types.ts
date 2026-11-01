@@ -87,6 +87,7 @@ export type AgentEvidenceStatus = {
     total: number; complete: number; incomplete: number; skipped: number; errors: number;
     cachedProfiles: number; primerFront: number; primerBack: number;
   } | null;
+  decodability: { total: number; decodable: number } | null;
   selectedSequence: boolean;
 };
 

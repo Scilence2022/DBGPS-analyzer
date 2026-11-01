@@ -32,14 +32,54 @@ type Batch = {
 
 export type EvidenceKernel = { query(command: string, timeoutMs?: number, signal?: AbortSignal): Promise<unknown> };
 
+export type DecoderLayout = { primerFront: number; indexLength: number; pathLength: number };
+export type DecoderSetting = { cutoff: number; ratio: number; waive: number[]; extraStep: boolean };
+export type DecodabilityConfig = DecoderSetting & { decodable: number; failures: Record<string, number> };
+export type DecodabilityHotspot = { kmer: number; count: number; fraction: number };
+export type DecodabilityRow = { name: string; failure: string; position: number };
+export type DecodabilityResult = DecoderLayout & {
+  type: "decodability";
+  k: number;
+  seedKmer: number;
+  pathKmers: number;
+  total: number;
+  configs: DecodabilityConfig[];
+  ratioFailures: number;
+  ratioHotspots: DecodabilityHotspot[];
+  rows: DecodabilityRow[];
+};
+type CachedDecodability = { result: DecodabilityResult; file: string };
+
+const DECODABILITY_TIMEOUT_MS = 600000;
+
+function settingSpec(setting: DecoderSetting) {
+  const waive = setting.waive.length ? setting.waive.join("+") : "-";
+  return `${setting.cutoff}:${setting.ratio}:${waive}:${setting.extraStep ? "extra" : "noextra"}`;
+}
+
+// The kernel takes the reference as the rest of the line, so a path may hold spaces.
+export function decodabilityCommand(layout: DecoderLayout, settings: DecoderSetting[], file: string) {
+  return `decodability ${layout.primerFront} ${layout.indexLength} ${layout.pathLength} ${settings.map(settingSpec).join(",")} ${file}`;
+}
+
+export function adoptDecodability(payload: unknown): DecodabilityResult {
+  const result = payload as DecodabilityResult | null;
+  if (!result || result.type !== "decodability" || !Array.isArray(result.configs) || !Array.isArray(result.rows)) {
+    throw new Error("Analyzer did not return a decodability result.");
+  }
+  return result;
+}
+
 export class AgentEvidenceStore {
   private dataset: Dataset | null = null;
   private batch: Batch | null = null;
+  private decodability: CachedDecodability | null = null;
   private activeSequence: string | null = null;
 
   invalidate() {
     this.dataset = null;
     this.batch = null;
+    this.decodability = null;
     this.activeSequence = null;
   }
 
@@ -60,11 +100,17 @@ export class AgentEvidenceStore {
       k: this.dataset?.k ?? null,
       indexScope: this.dataset?.indexScope === "reference" ? "reference" : null,
       batch: batch ? { ...batch.aggregates, cachedProfiles: batch.sequences.size, primerFront: batch.primerFront, primerBack: batch.primerBack } : null,
+      decodability: this.decodability ? { total: this.decodability.result.total, decodable: this.decodability.result.configs[0]?.decodable ?? 0 } : null,
       selectedSequence: Boolean(this.activeSequence)
     };
   }
 
   clearBatch() { this.batch = null; }
+
+  cacheDecodability(datasetVersion: string, result: DecodabilityResult, file: string) {
+    if (!this.dataset || this.dataset.id !== datasetVersion) throw new Error("Dataset changed during the decodability query; result not cached.");
+    this.decodability = { result, file };
+  }
 
   selectSequence(sequence: string) {
     this.activeSequence = /^[ACGT]+$/.test(sequence) && sequence.length <= AGENT_LIMITS.sequenceBases ? sequence : null;
@@ -95,6 +141,7 @@ export class AgentEvidenceStore {
   open(context: unknown, kernel: EvidenceKernel | null): { snapshot: AgentSnapshot; backend: AgentBackend } {
     const dataset = this.dataset;
     const batch = this.batch;
+    const decodability = this.decodability;
     const sequence = this.activeSequence;
     const scope = dataset ? analyzerScope(dataset) : {};
     const input = context && typeof context === "object" ? context as Record<string, unknown> : {};
@@ -107,13 +154,13 @@ export class AgentEvidenceStore {
       createdAt: new Date().toISOString(), context: compactAgentContext(accepted)
     };
     const assertCurrent = () => {
-      if (this.dataset?.id !== dataset?.id || this.batch?.id !== batch?.id) throw new Error("Evidence snapshot is stale; ask again against the current dataset.");
+      if (this.dataset?.id !== dataset?.id || this.batch?.id !== batch?.id || this.decodability !== decodability) throw new Error("Evidence snapshot is stale; ask again against the current dataset.");
     };
-    const query = async (command: string, signal: AbortSignal) => {
+    const query = async (command: string, signal: AbortSignal, timeoutMs = 60000) => {
       signal.throwIfAborted();
       assertCurrent();
       if (!dataset || !kernel) throw new Error("No loaded read index is available. Start it manually before requesting analyzer tools.");
-      const result = await kernel.query(command, 60000, signal);
+      const result = await kernel.query(command, timeoutMs, signal);
       signal.throwIfAborted();
       assertCurrent();
       if (!result || typeof result !== "object" || (result as { type?: string }).type === "error") throw new Error("Analyzer query failed; no measurement adopted.");
@@ -180,6 +227,32 @@ export class AgentEvidenceStore {
           selection: { requested: wanted.size, matchedRows: rows.length, truncated: rows.length > AGENT_LIMITS.batchRows },
           rows: rows.slice(0, AGENT_LIMITS.batchRows).map(rowView),
           unmatched: [...wanted].filter((name) => !found.has(name))
+        };
+      },
+      getDecodability: (failure, offset, limit) => {
+        assertCurrent();
+        if (!decodability) throw new Error("No decoder readiness result is available. Run Predict decoding in Batch QC first.");
+        const { rows, ...summary } = decodability.result;
+        const wanted = new Set(failure === "not_decodable" ? [] : [failure]);
+        const matching = rows.filter((row) => failure === "not_decodable" ? row.failure !== "ok" : failure === "all" || wanted.has(row.failure));
+        return {
+          ...summary, ...scope,
+          positionConvention: "failure positions are zero-based k-mer indices on the full strand, including the primer",
+          selection: { failure, order: "file order", offset, limit, matchedTotal: matching.length, truncated: offset > 0 || offset + limit < matching.length },
+          rows: matching.slice(offset, offset + limit).map((row) => ({ ...row, name: row.name.slice(0, 200) }))
+        };
+      },
+      evaluateDecoderSettings: async (settings, signal) => {
+        assertCurrent();
+        if (!decodability) throw new Error("No decoder readiness result is available. Run Predict decoding in Batch QC first.");
+        const { primerFront, indexLength, pathLength } = decodability.result;
+        const command = decodabilityCommand({ primerFront, indexLength, pathLength }, settings, decodability.file);
+        const result = adoptDecodability(await query(command, signal, DECODABILITY_TIMEOUT_MS));
+        return {
+          ...scope,
+          total: result.total, seedKmer: result.seedKmer, pathKmers: result.pathKmers,
+          configs: result.configs, hotspotsOfFirstSetting: result.ratioHotspots, ratioFailuresOfFirstSetting: result.ratioFailures,
+          limits: "An upper bound once the decoder's path budget is exhausted at wide ratios. Relaxing the cutoff also admits rare CRC collisions, which are not modelled."
         };
       }
     };

@@ -80,6 +80,17 @@ type AnalyzerBatchResult = {
   k: number; rows: SmKdKnRow[];
 };
 type InteractiveBatchRequest = { file: string; primerFront?: number; primerBack?: number };
+type DecodabilityRequest = {
+  file: string; primerFront: number; indexLength: number; pathLength: number;
+  cutoff: number; ratio: number; waive: number[]; extraStep: boolean;
+};
+type DecodabilityResult = {
+  type: "decodability"; datasetVersion: string; file: string; k: number; primerFront: number; indexLength: number; pathLength: number;
+  seedKmer: number; pathKmers: number; total: number; ratioFailures: number;
+  configs: Array<{ cutoff: number; ratio: number; waive: number[]; extraStep: boolean; decodable: number; failures: Record<string, number> }>;
+  ratioHotspots: Array<{ kmer: number; count: number; fraction: number }>;
+  rows: Array<{ name: string; failure: string; position: number }>;
+};
 type BatchSequenceRequest = { file: string; index: number; primerFront?: number; primerBack?: number };
 type InteractiveBatchRow = {
   index: number;
@@ -162,6 +173,8 @@ const api = {
     ipcRenderer.invoke("analyzer:runBatch", request) as Promise<AnalyzerBatchResult>,
   runInteractiveBatch: (request: InteractiveBatchRequest) =>
     ipcRenderer.invoke("analyzer:runInteractiveBatch", request) as Promise<InteractiveBatchResult>,
+  runDecodability: (request: DecodabilityRequest) =>
+    ipcRenderer.invoke("analyzer:decodability", request) as Promise<DecodabilityResult>,
   runReport: (request: ReportRequest) => ipcRenderer.invoke("report:run", request) as Promise<ReportResult>,
   saveFile: (request: { defaultName: string; content: string }) =>
     ipcRenderer.invoke("file:save", request) as Promise<{ saved: boolean; path?: string }>,
