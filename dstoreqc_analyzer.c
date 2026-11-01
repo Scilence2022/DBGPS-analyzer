@@ -20,6 +20,7 @@ KSEQ_INIT(gzFile, gzread)
 
 #define DSTOREQC_KC_BITS 14
 #include "dstoreqc_core.h" // shared k-mer / hash-table core
+#include "dstoreqc_decodability.h" // decoder acceptance rule over path coverage
 #include "vendor/bfc/bbf.h"
 
 #define Max_Path_Num 10000
@@ -1123,6 +1124,8 @@ static void emit_help_json(const reference_index_t *reference)
     fprintf(stdout, ",");
     json_string(stdout, "batch <primerFront> <primerBack> <reference.fasta>");
     fprintf(stdout, ",");
+    json_string(stdout, "decodability <primerFront> <indexLength> <pathLength> <config[,config...]> <reference.fasta>");
+    fprintf(stdout, ",");
     json_string(stdout, "exit");
     fprintf(stdout, "]");
     emit_reference_metadata(stdout, reference);
@@ -1676,6 +1679,313 @@ static int cmp_strand_rc(const void *a, const void *b)
     return (ra < rb) ? -1 : (ra > rb) ? 1 : 0;
 }
 
+/* Designed-path coverage of every strand, held in memory so any number of decoder
+ * configurations can be evaluated without touching the k-mer table again. */
+typedef struct {
+    int n, capacity, k, path_kmers, seed_kmer, needed_length;
+    uint64_t mask;
+    kc_c4x_t *h;
+    char **names, **seqs;
+    dq_failure_t *status;   /* DQ_OK, DQ_TOO_SHORT or DQ_INVALID_BASE */
+    int *coverage;          /* n * path_kmers */
+    int *successors;        /* n * 4 */
+} dq_table_t;
+
+typedef struct {
+    dq_config_t config;
+    long long decodable;
+    long long failures[DQ_FAILURE_KINDS];
+} dq_result_t;
+
+static void dq_load_strand(void *data, long i, int tid)
+{
+    dq_table_t *t = (dq_table_t *)data;
+    (void)tid;
+    if (t->status[i] != DQ_OK) return;
+    const char *seq = t->seqs[i] + t->seed_kmer;
+    int *cov = t->coverage + i * t->path_kmers;
+    int *next = t->successors + i * 4;
+    uint64_t forward = 0;
+    for (int j = 0; j < t->k; ++j)
+        forward = (forward << 2 | seq_nt4_table[(uint8_t)seq[j]]) & t->mask;
+    cov[0] = kmer_cov(min_hash_key(forward, (unsigned char)t->k), t->mask, t->h);
+    for (int j = 1; j < t->path_kmers; ++j) {
+        forward = (forward << 2 | seq_nt4_table[(uint8_t)seq[t->k + j - 1]]) & t->mask;
+        cov[j] = kmer_cov(min_hash_key(forward, (unsigned char)t->k), t->mask, t->h);
+    }
+    for (int b = 0; b < 4; ++b) {
+        uint64_t successor = (forward << 2 | (uint64_t)b) & t->mask;
+        next[b] = kmer_cov(min_hash_key(successor, (unsigned char)t->k), t->mask, t->h);
+    }
+}
+
+static void dq_table_free(dq_table_t *t)
+{
+    for (int i = 0; i < t->n; ++i) {
+        free(t->names[i]);
+        free(t->seqs[i]);
+    }
+    free(t->names);
+    free(t->seqs);
+    free(t->status);
+    free(t->coverage);
+    free(t->successors);
+    memset(t, 0, sizeof(*t));
+}
+
+/* Returns 0, or -1 when the reference cannot be opened. */
+static int dq_table_load(dq_table_t *t, kc_c4x_t *h, int k, const char *file,
+                         int primer_front, int index_len, int path_len, int n_thread)
+{
+    memset(t, 0, sizeof(*t));
+    gzFile fp = gzopen(file, "r");
+    if (fp == 0) return -1;
+    kseq_t *ks = kseq_init(fp);
+    t->k = k;
+    t->h = h;
+    t->mask = (1ULL << k * 2) - 1;
+    t->path_kmers = path_len + 1;
+    t->seed_kmer = primer_front + index_len - k;
+    t->needed_length = primer_front + index_len + path_len;
+    while (kseq_read(ks) >= 0) {
+        if (t->n == t->capacity) {
+            t->capacity = t->capacity ? t->capacity * 2 : 1024;
+            REALLOC(t->names, t->capacity);
+            REALLOC(t->seqs, t->capacity);
+            REALLOC(t->status, t->capacity);
+        }
+        int n = t->n++;
+        char generated[32];
+        snprintf(generated, sizeof(generated), "seq%d", n + 1);
+        t->names[n] = strdup(ks->name.l > 0 ? ks->name.s : generated);
+        t->seqs[n] = strdup(ks->seq.s);
+        t->status[n] = DQ_OK;
+        if ((int)ks->seq.l < t->needed_length) {
+            t->status[n] = DQ_TOO_SHORT;
+            continue;
+        }
+        for (int j = t->seed_kmer; j < t->needed_length; ++j)
+            if (seq_nt4_table[(uint8_t)ks->seq.s[j]] >= 4) {
+                t->status[n] = DQ_INVALID_BASE;
+                break;
+            }
+    }
+    kseq_destroy(ks);
+    gzclose(fp);
+    if (t->n > 0) {
+        MALLOC(t->coverage, (size_t)t->n * t->path_kmers);
+        MALLOC(t->successors, (size_t)t->n * 4);
+        kt_for(n_thread, dq_load_strand, t, t->n);
+    }
+    return 0;
+}
+
+static dq_verdict_t dq_table_verdict(const dq_table_t *t, int i, const dq_config_t *config)
+{
+    if (t->status[i] != DQ_OK) {
+        dq_verdict_t verdict = {t->status[i], -1};
+        return verdict;
+    }
+    return dq_evaluate(t->coverage + (size_t)i * t->path_kmers, t->path_kmers, t->seed_kmer,
+                       t->successors + (size_t)i * 4, config);
+}
+
+static void dq_tally(const dq_table_t *t, dq_result_t *result)
+{
+    for (int i = 0; i < t->n; ++i) {
+        dq_failure_t kind = dq_table_verdict(t, i, &result->config).kind;
+        ++result->failures[kind];
+        if (kind == DQ_OK) ++result->decodable;
+    }
+}
+
+/* Spec: cutoff:ratio[:kmer+kmer|-[:extra|noextra]]. Returns 0, or -1 with err set. */
+static int dq_parse_config(const char *spec, dq_config_t *config, const dq_config_t *defaults,
+                           char *err, size_t err_size)
+{
+    char *end;
+    *config = *defaults;
+    errno = 0;
+    long cutoff = strtol(spec, &end, 10);
+    if (errno || end == spec || *end != ':' || cutoff < 0 || cutoff >= KC_MAX) {
+        snprintf(err, err_size, "invalid decoder config '%s': expected cutoff:ratio", spec);
+        return -1;
+    }
+    config->cutoff = (int)cutoff;
+    const char *p = end + 1;
+    double ratio = strtod(p, &end);
+    if (end == p || !(ratio >= 1.0) || (*end && *end != ':')) {
+        snprintf(err, err_size, "invalid decoder config '%s': ratio must be at least 1", spec);
+        return -1;
+    }
+    config->ratio = ratio;
+    p = end;
+    if (*p == ':') {
+        ++p;
+        config->n_waive = 0;
+        if (*p == '-') ++p;
+        else if (*p != ':' && *p != '\0') for (;;) {
+            long kmer = strtol(p, &end, 10);
+            if (end == p || kmer < 0 || config->n_waive == DQ_MAX_WAIVE) {
+                snprintf(err, err_size, "invalid waived k-mers in decoder config '%s'", spec);
+                return -1;
+            }
+            config->waive[config->n_waive++] = (int)kmer;
+            p = end;
+            if (*p != '+') break;
+            ++p;
+        }
+    }
+    if (*p == ':') {
+        ++p;
+        if (strcmp(p, "extra") == 0) config->extra_step = 1;
+        else if (strcmp(p, "noextra") == 0) config->extra_step = 0;
+        else {
+            snprintf(err, err_size, "decoder config '%s' must end in extra or noextra", spec);
+            return -1;
+        }
+    } else if (*p) {
+        snprintf(err, err_size, "invalid decoder config '%s'", spec);
+        return -1;
+    }
+    return 0;
+}
+
+static int dq_check_layout(int k, int primer_front, int index_len, int path_len, char *err, size_t err_size)
+{
+    if (primer_front < 0 || index_len < 0 || path_len < 1 ||
+        primer_front > INT_MAX / 4 || index_len > INT_MAX / 4 || path_len > INT_MAX / 4) {
+        snprintf(err, err_size, "primer, index and path lengths are out of range");
+        return -1;
+    }
+    if (primer_front + index_len < k) {
+        snprintf(err, err_size, "primer + index length (%d) must be at least k (%d) to place the seed k-mer",
+                 primer_front + index_len, k);
+        return -1;
+    }
+    return 0;
+}
+
+static void dq_write_json(FILE *fp, const dq_table_t *t, const dq_result_t *results, int n_results,
+                          const char *file, int primer_front, int index_len, int path_len, int rows)
+{
+    fprintf(fp, "{\"type\":\"decodability\",\"file\":");
+    json_string(fp, file);
+    fprintf(fp, ",\"k\":%d,\"primerFront\":%d,\"indexLength\":%d,\"pathLength\":%d,\"seedKmer\":%d,\"pathKmers\":%d,\"total\":%d,\"configs\":[",
+            t->k, primer_front, index_len, path_len, t->seed_kmer, t->path_kmers, t->n);
+    for (int c = 0; c < n_results; ++c) {
+        const dq_result_t *r = &results[c];
+        if (c) fputc(',', fp);
+        fprintf(fp, "{\"cutoff\":%d,\"ratio\":%g,\"extraStep\":%s,\"waive\":[", r->config.cutoff, r->config.ratio,
+                r->config.extra_step ? "true" : "false");
+        for (int w = 0; w < r->config.n_waive; ++w) fprintf(fp, "%s%d", w ? "," : "", r->config.waive[w]);
+        fprintf(fp, "],\"decodable\":%lld,\"failures\":{", r->decodable);
+        for (int kind = 1; kind < DQ_FAILURE_KINDS; ++kind)
+            fprintf(fp, "%s\"%s\":%lld", kind > 1 ? "," : "", dq_failure_names[kind], r->failures[kind]);
+        fprintf(fp, "}}");
+    }
+    fprintf(fp, "]");
+
+    /* Where the primary configuration's ratio test fails first. A position holding
+     * a large share of these is a coverage step, not noise. */
+    long long ratio_failures = 0;
+    long long *at;
+    int width = t->seed_kmer + t->path_kmers + 1;
+    CALLOC(at, width);
+    for (int i = 0; n_results > 0 && i < t->n; ++i) {
+        dq_verdict_t v = dq_table_verdict(t, i, &results[0].config);
+        if ((v.kind == DQ_RATIO_DROP || v.kind == DQ_RATIO_RISE) && v.position >= 0 && v.position < width) {
+            ++at[v.position];
+            ++ratio_failures;
+        }
+    }
+    fprintf(fp, ",\"ratioFailures\":%lld,\"ratioHotspots\":[", ratio_failures);
+    int first_hotspot = 1;
+    for (int pos = 0; pos < width; ++pos) {
+        if (ratio_failures == 0 || at[pos] * 10 < ratio_failures) continue;
+        fprintf(fp, "%s{\"kmer\":%d,\"count\":%lld,\"fraction\":%.4f}", first_hotspot ? "" : ",", pos, at[pos],
+                (double)at[pos] / ratio_failures);
+        first_hotspot = 0;
+    }
+    fprintf(fp, "]");
+    free(at);
+
+    if (rows && n_results > 0) {
+        fprintf(fp, ",\"rows\":[");
+        for (int i = 0; i < t->n; ++i) {
+            dq_verdict_t v = dq_table_verdict(t, i, &results[0].config);
+            if (i) fputc(',', fp);
+            fprintf(fp, "{\"name\":");
+            json_string(fp, t->names[i]);
+            fprintf(fp, ",\"failure\":\"%s\",\"position\":%d}", dq_failure_names[v.kind], v.position);
+        }
+        fprintf(fp, "]");
+    }
+}
+
+/* Kernel form: decodability <front> <index> <path> <cfg[,cfg...]> <reference>. Each
+ * config may be cutoff:ratio[:waive[:extra|noextra]]; the first one fills rows. */
+static void emit_decodability_query_json(kc_c4x_t *h, int k, int n_thread, char *arg, const reference_index_t *reference)
+{
+    int primer_front = 0, index_len = 0, path_len = 0;
+    char err[256];
+    char *cursor = arg;
+    if (!parse_unbounded_nonnegative_int_token(&cursor, 0, &primer_front) ||
+        !parse_unbounded_nonnegative_int_token(&cursor, 0, &index_len) ||
+        !parse_unbounded_nonnegative_int_token(&cursor, 0, &path_len)) {
+        emit_error_json("decodability needs <primerFront> <indexLength> <pathLength> <configs> <reference>");
+        return;
+    }
+    cursor = trim_left(cursor);
+    char *configs = cursor;
+    while (*cursor && !isspace((unsigned char)*cursor)) ++cursor;
+    if (*cursor == '\0') {
+        emit_error_json("decodability needs <primerFront> <indexLength> <pathLength> <configs> <reference>");
+        return;
+    }
+    *cursor++ = '\0';
+    char *file = trim_left(cursor);
+    trim_right(file);
+    if (dq_check_layout(k, primer_front, index_len, path_len, err, sizeof(err)) != 0) {
+        emit_error_json(err);
+        return;
+    }
+
+    int n_results = 1;
+    for (const char *p = configs; *p; ++p) n_results += *p == ',';
+    dq_result_t *results;
+    CALLOC(results, n_results);
+    dq_config_t defaults = {1, 2.55, 1, 0, {0}};
+    int parsed = 0;
+    for (char *spec = strtok(configs, ","); spec; spec = strtok(NULL, ",")) {
+        if (dq_parse_config(spec, &results[parsed].config, &defaults, err, sizeof(err)) != 0) {
+            emit_error_json(err);
+            free(results);
+            return;
+        }
+        if (reference && results[parsed].config.extra_step) {
+            emit_error_json("the extra walk step needs off-path coverage, which a Bloom reference index does not hold; use noextra");
+            free(results);
+            return;
+        }
+        ++parsed;
+    }
+
+    dq_table_t table;
+    if (dq_table_load(&table, h, k, file, primer_front, index_len, path_len, n_thread) != 0) {
+        emit_error_json("could not open decodability reference file");
+        free(results);
+        return;
+    }
+    for (int c = 0; c < parsed; ++c) dq_tally(&table, &results[c]);
+    dq_write_json(stdout, &table, results, parsed, file, primer_front, index_len, path_len, 1);
+    emit_reference_metadata(stdout, reference);
+    fprintf(stdout, "}\n");
+    fflush(stdout);
+    dq_table_free(&table);
+    free(results);
+}
+
 static int run_interactive_kernel(int argc, char *argv[], int first_file, int k, int p, int block_size, int n_thread, int read_len,
                                   kc_c4x_t *h, const reference_index_t *reference)
 {
@@ -1834,6 +2144,8 @@ static int run_interactive_kernel(int argc, char *argv[], int first_file, int k,
                 trim_right(file_arg);
                 emit_batch_query_json(h, k, file_arg, primer_front, primer_back, reference);
             }
+        } else if (command_equals(cmd, "decodability")) {
+            emit_decodability_query_json(h, k, n_thread, arg, reference);
         } else if (command_equals(cmd, "sequenceSummary") || command_equals(cmd, "seqSummary") || command_equals(cmd, "summarySequence")) {
             seq = normalize_dna_arg(arg, &seq_len, err, sizeof(err));
             if (seq == 0) {
@@ -2289,6 +2601,216 @@ int dstoreqc_analyze_command(int argc, char *argv[])
 int dstoreqc_kernel_command(int argc, char *argv[])
 {
     return analyzer_command(argc, argv, 1);
+}
+
+static void dq_usage(FILE *out)
+{
+    fprintf(out, "Usage: dstoreqc decodability [options] <reference.fa> <reads.fa/fq[.gz]> ...\n");
+    fprintf(out, "Predict, from k-mer coverage alone, which strands a DBGPS-style decoder returns.\n");
+    fprintf(out, "Options:\n");
+    fprintf(out, "  -h, --help            show this help\n");
+    fprintf(out, "  -k INT                k-mer size [31]\n");
+    fprintf(out, "  -t INT                number of threads [3]\n");
+    fprintf(out, "  -L INT                maximal read length for k-mer counting [200]\n");
+    fprintf(out, "  -c INT                decoder coverage cutoff [1]\n");
+    fprintf(out, "  -r FLOAT              decoder adjacent coverage ratio [2.55]\n");
+    fprintf(out, "  --primer INT          5' primer length [18]\n");
+    fprintf(out, "  --index-length INT    index length [16]\n");
+    fprintf(out, "  --path-length INT     payload + CRC length walked after the index [148]\n");
+    fprintf(out, "  --waive-kmers LIST    comma-separated strand k-mer indices entered without the ratio test\n");
+    fprintf(out, "  --no-extra-step       model a walk that stops at the path end\n");
+    fprintf(out, "  --config SPEC         add a configuration, cutoff:ratio[:kmer+kmer|-[:extra|noextra]];\n");
+    fprintf(out, "                        repeatable, and replaces -c/-r as the primary when given\n");
+    fprintf(out, "  --per-strand FILE     write one row per strand, with a column per configuration\n");
+    fprintf(out, "  --json                write JSON instead of a table\n\n");
+}
+
+static int dq_parse_option_int(const char *text, const char *name, int *value)
+{
+    char *end;
+    errno = 0;
+    long parsed = strtol(text, &end, 10);
+    if (errno || end == text || *end || parsed < 0 || parsed > INT_MAX) {
+        fprintf(stderr, "Error: %s must be a non-negative integer\n", name);
+        return -1;
+    }
+    *value = (int)parsed;
+    return 0;
+}
+
+static int dq_write_per_strand(const char *path, const dq_table_t *t, const dq_result_t *results, int n_results)
+{
+    FILE *fp = fopen(path, "w");
+    if (fp == NULL) {
+        fprintf(stderr, "Error: could not open %s for writing\n", path);
+        return -1;
+    }
+    fprintf(fp, "strand\tfailure\tposition");
+    for (int c = 0; c < n_results; ++c) fprintf(fp, "\tconfig%d_decodable", c);
+    fputc('\n', fp);
+    for (int i = 0; i < t->n; ++i) {
+        dq_verdict_t v = dq_table_verdict(t, i, &results[0].config);
+        fprintf(fp, "%s\t%s\t%d", t->names[i], dq_failure_names[v.kind], v.position);
+        for (int c = 0; c < n_results; ++c)
+            fprintf(fp, "\t%d", dq_table_verdict(t, i, &results[c].config).kind == DQ_OK);
+        fputc('\n', fp);
+    }
+    fclose(fp);
+    return 0;
+}
+
+int dstoreqc_decodability_command(int argc, char *argv[])
+{
+    enum { OPT_PRIMER = 310, OPT_INDEX, OPT_PATH, OPT_WAIVE, OPT_NO_EXTRA, OPT_CONFIG, OPT_PER_STRAND, OPT_JSON };
+    static const ko_longopt_t long_options[] = {
+        {"help", 0, 'h'},
+        {"primer", 1, OPT_PRIMER}, {"index-length", 1, OPT_INDEX}, {"path-length", 1, OPT_PATH},
+        {"waive-kmers", 1, OPT_WAIVE}, {"no-extra-step", 0, OPT_NO_EXTRA},
+        {"config", 1, OPT_CONFIG}, {"per-strand", 1, OPT_PER_STRAND}, {"json", 0, OPT_JSON},
+        {0, 0, 0}
+    };
+    int c, k = 31, n_thread = 3, read_len = 200, help = 0, json = 0;
+    int primer_front = 18, index_len = 16, path_len = 148;
+    const char *per_strand = NULL;
+    dq_config_t primary = {1, 2.55, 1, 0, {0}};
+    char err[256];
+    enum { MAX_CONFIGS = 512 };
+    const char **specs;
+    int n_specs = 0;
+    MALLOC(specs, MAX_CONFIGS);
+
+    ketopt_t o = KETOPT_INIT;
+    while ((c = ketopt(&o, argc, argv, 1, "hk:t:L:c:r:", long_options)) >= 0) {
+        int failed = 0;
+        if (c == '?' || c == ':') {
+            fprintf(stderr, "Error: unknown option or missing option argument\n");
+            failed = 1;
+        } else if (c == 'h') help = 1;
+        else if (c == 'k') failed = dq_parse_option_int(o.arg, "-k", &k);
+        else if (c == 't') failed = dq_parse_option_int(o.arg, "-t", &n_thread);
+        else if (c == 'L') failed = dq_parse_option_int(o.arg, "-L", &read_len);
+        else if (c == 'c') failed = dq_parse_option_int(o.arg, "-c", &primary.cutoff);
+        else if (c == 'r') {
+            char *end;
+            primary.ratio = strtod(o.arg, &end);
+            if (end == o.arg || *end || !(primary.ratio >= 1.0)) {
+                fprintf(stderr, "Error: -r must be at least 1\n");
+                failed = 1;
+            }
+        }
+        else if (c == OPT_PRIMER) failed = dq_parse_option_int(o.arg, "--primer", &primer_front);
+        else if (c == OPT_INDEX) failed = dq_parse_option_int(o.arg, "--index-length", &index_len);
+        else if (c == OPT_PATH) failed = dq_parse_option_int(o.arg, "--path-length", &path_len);
+        else if (c == OPT_NO_EXTRA) primary.extra_step = 0;
+        else if (c == OPT_JSON) json = 1;
+        else if (c == OPT_PER_STRAND) per_strand = o.arg;
+        else if (c == OPT_CONFIG) {
+            if (n_specs == MAX_CONFIGS) {
+                fprintf(stderr, "Error: at most %d --config options\n", MAX_CONFIGS);
+                failed = 1;
+            } else specs[n_specs++] = o.arg;
+        } else if (c == OPT_WAIVE) {
+            const char *p = o.arg;
+            primary.n_waive = 0;
+            for (;;) {
+                char *end;
+                long kmer = strtol(p, &end, 10);
+                if (end == p || kmer < 0 || primary.n_waive == DQ_MAX_WAIVE) {
+                    fprintf(stderr, "Error: --waive-kmers takes up to %d comma-separated k-mer indices\n", DQ_MAX_WAIVE);
+                    failed = 1;
+                    break;
+                }
+                primary.waive[primary.n_waive++] = (int)kmer;
+                if (*end != ',') {
+                    failed = *end != '\0';
+                    if (failed) fprintf(stderr, "Error: --waive-kmers takes comma-separated k-mer indices\n");
+                    break;
+                }
+                p = end + 1;
+            }
+        }
+        if (failed) {
+            free(specs);
+            return 1;
+        }
+    }
+    if (help || argc - o.ind < 2) {
+        dq_usage(help ? stdout : stderr);
+        free(specs);
+        return help ? 0 : 1;
+    }
+    if (k < 1 || k > 31 || n_thread < 1 || primary.cutoff >= KC_MAX ||
+        dq_check_layout(k, primer_front, index_len, path_len, err, sizeof(err)) != 0) {
+        fprintf(stderr, "Error: %s\n", k < 1 || k > 31 ? "-k must be between 1 and 31"
+                : n_thread < 1 ? "-t must be at least 1"
+                : primary.cutoff >= KC_MAX ? "-c is beyond the saturating count" : err);
+        free(specs);
+        return 1;
+    }
+
+    int n_results = n_specs ? n_specs : 1;
+    dq_result_t *results;
+    CALLOC(results, n_results);
+    results[0].config = primary;
+    for (int s = 0; s < n_specs; ++s)
+        if (dq_parse_config(specs[s], &results[s].config, &primary, err, sizeof(err)) != 0) {
+            fprintf(stderr, "Error: %s\n", err);
+            free(results);
+            free(specs);
+            return 1;
+        }
+    free(specs);
+
+    const char *reference_file = argv[o.ind];
+    kc_c4x_t *h = NULL;
+    for (int file = o.ind + 1; file < argc; ++file) {
+        fprintf(stderr, "Counting NGS file %d ......\n", file - o.ind);
+        kc_c4x_t *next = count_file_into(argv[file], h, k, KC_BITS, 10000000, n_thread, read_len, NULL);
+        if (next == NULL) {
+            fprintf(stderr, "Error: could not open NGS file %s\n", argv[file]);
+            c4x_destroy(h);
+            free(results);
+            return 1;
+        }
+        h = next;
+    }
+
+    dq_table_t table;
+    if (dq_table_load(&table, h, k, reference_file, primer_front, index_len, path_len, n_thread) != 0) {
+        fprintf(stderr, "Error: could not open strand file %s\n", reference_file);
+        c4x_destroy(h);
+        free(results);
+        return 1;
+    }
+    int status = 0;
+    if (table.n == 0) {
+        fprintf(stderr, "Error: strand file %s contained no sequences\n", reference_file);
+        status = 1;
+    } else {
+        for (int r = 0; r < n_results; ++r) dq_tally(&table, &results[r]);
+        if (per_strand && dq_write_per_strand(per_strand, &table, results, n_results) != 0) status = 1;
+    }
+    if (status == 0 && json) {
+        dq_write_json(stdout, &table, results, n_results, reference_file, primer_front, index_len, path_len, 0);
+        fprintf(stdout, "}\n");
+    } else if (status == 0) {
+        printf("Cutoff\tRatio\tWaived\tExtraStep\tTotal\tDecodable\tFraction");
+        for (int kind = 1; kind < DQ_FAILURE_KINDS; ++kind) printf("\t%s", dq_failure_names[kind]);
+        putchar('\n');
+        for (int r = 0; r < n_results; ++r) {
+            const dq_result_t *result = &results[r];
+            printf("%d\t%g\t", result->config.cutoff, result->config.ratio);
+            for (int w = 0; w < result->config.n_waive; ++w) printf("%s%d", w ? "," : "", result->config.waive[w]);
+            printf("%s\t%s\t%d\t%lld\t%f", result->config.n_waive ? "" : "-", result->config.extra_step ? "yes" : "no",
+                   table.n, result->decodable, (double)result->decodable / table.n);
+            for (int kind = 1; kind < DQ_FAILURE_KINDS; ++kind) printf("\t%lld", result->failures[kind]);
+            putchar('\n');
+        }
+    }
+    dq_table_free(&table);
+    c4x_destroy(h);
+    free(results);
+    return status;
 }
 
 int dstoreqc_analyze_reference(const dstoreqc_analysis_options_t *input, FILE *out)

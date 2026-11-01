@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 int dstoreqc_analyze_command(int argc, char *argv[]);
+int dstoreqc_decodability_command(int argc, char *argv[]);
 int dstoreqc_kernel_command(int argc, char *argv[]);
 int dstoreqc_links_command(int argc, char *argv[]);
 int dstoreqc_filter_command(int argc, char *argv[]);

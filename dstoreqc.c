@@ -9,6 +9,7 @@ static const struct {
     const char *description;
 } commands[] = {
     {"analyze", dstoreqc_analyze_command, "compute Sm/Kn/Kd from reference strands and reads"},
+    {"decodability", dstoreqc_decodability_command, "predict which strands a DBGPS-style decoder returns"},
     {"kernel", dstoreqc_kernel_command, "start interactive JSON Lines diagnostics"},
     {"links", dstoreqc_links_command, "count cross-links in a reference library"},
     {"filter", dstoreqc_filter_command, "filter entangled reference strands"},
@@ -19,7 +20,7 @@ static void usage(FILE *out)
 {
     fprintf(out, "Usage: dstoreqc <command> [options] <files>\nCommands:\n");
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i)
-        fprintf(out, "  %-9s %s\n", commands[i].name, commands[i].description);
+        fprintf(out, "  %-12s %s\n", commands[i].name, commands[i].description);
     fprintf(out, "Use dstoreqc <command> --help for command options.\n");
 }
 
