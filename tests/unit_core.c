@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "../dstoreqc_core.h"
+#include "../dstoreqc_decodability.h"
 
 static int failures = 0;
 static int checks = 0;
@@ -234,6 +235,75 @@ static void test_seq_kmers_dedup_equiv(void)
     }
 }
 
+static void test_decodability_admission(void)
+{
+    printf("test_decodability_admission\n");
+    /* Bounds truncate toward zero exactly as the decoder does: 10/2.55 -> 3, 10*2.55 -> 25. */
+    CHECK(dq_admits(10, 3, 1, 2.55, 0), "lower bound is inclusive");
+    CHECK(!dq_admits(10, 2, 1, 2.55, 0), "below the lower bound is refused");
+    CHECK(dq_admits(10, 25, 1, 2.55, 0), "upper bound is inclusive");
+    CHECK(!dq_admits(10, 26, 1, 2.55, 0), "above the upper bound is refused");
+    /* The cutoff overrides a ratio bound that would admit lower coverage. */
+    CHECK(!dq_admits(2, 1, 1, 2.55, 0), "coverage at the cutoff is refused");
+    CHECK(dq_admits(2, 2, 1, 2.55, 0), "coverage above the cutoff is admitted");
+    CHECK(dq_admits(1, 1, 0, 2.55, 0), "cutoff zero admits a single observation");
+    /* The upper bound saturates with the count. */
+    CHECK(dq_admits(KC_MAX, KC_MAX, 1, 2.55, 0), "saturated coverage stays admissible");
+    /* Waiving keeps the cutoff and drops both ratio bounds. */
+    CHECK(dq_admits(100, 2, 1, 2.55, 1), "waived step ignores the lower ratio bound");
+    CHECK(dq_admits(2, 100, 1, 2.55, 1), "waived step ignores the upper ratio bound");
+    CHECK(!dq_admits(100, 1, 1, 2.55, 1), "waived step still applies the cutoff");
+}
+
+static void test_decodability_evaluate(void)
+{
+    printf("test_decodability_evaluate\n");
+    dq_config_t config = {1, 2.55, 1, 0, {0}};
+    int steady[5] = {10, 10, 10, 10, 10};
+    int one_successor[4] = {0, 10, 0, 0};
+    dq_verdict_t v = dq_evaluate(steady, 5, 3, one_successor, &config);
+    CHECK(v.kind == DQ_OK && v.position == -1, "steady path with one successor decodes");
+
+    int seedless[3] = {0, 10, 10};
+    v = dq_evaluate(seedless, 3, 3, one_successor, &config);
+    CHECK(v.kind == DQ_SEED_MISSING && v.position == 3, "unobserved seed");
+
+    int missing[3] = {10, 0, 10};
+    v = dq_evaluate(missing, 3, 3, one_successor, &config);
+    CHECK(v.kind == DQ_MISSING && v.position == 4, "position is the strand k-mer index");
+
+    int low[3] = {2, 1, 1};
+    v = dq_evaluate(low, 3, 0, one_successor, &config);
+    CHECK(v.kind == DQ_BELOW_CUTOFF && v.position == 1, "below cutoff");
+
+    int drop[3] = {100, 100, 20};
+    v = dq_evaluate(drop, 3, 0, one_successor, &config);
+    CHECK(v.kind == DQ_RATIO_DROP && v.position == 2, "ratio drop");
+
+    int rise[3] = {20, 20, 100};
+    v = dq_evaluate(rise, 3, 0, one_successor, &config);
+    CHECK(v.kind == DQ_RATIO_RISE && v.position == 2, "ratio rise");
+
+    /* The extra step reads all four successors. */
+    int no_successor[4] = {0, 0, 0, 0};
+    int two_successors[4] = {10, 10, 0, 0};
+    v = dq_evaluate(steady, 5, 3, no_successor, &config);
+    CHECK(v.kind == DQ_EXTRA_STEP_NONE && v.position == 8, "no admissible extra step");
+    v = dq_evaluate(steady, 5, 3, two_successors, &config);
+    CHECK(v.kind == DQ_EXTRA_STEP_AMBIGUOUS, "two admissible extra steps");
+
+    config.extra_step = 0;
+    CHECK(dq_evaluate(steady, 5, 3, no_successor, &config).kind == DQ_OK, "walk ending at the path end needs no successor");
+    CHECK(dq_evaluate(steady, 5, 3, two_successors, &config).kind == DQ_OK, "duplicate terminal cannot arise without the extra step");
+
+    /* Waiving by strand index: the failing step enters k-mer 2 of a path seeded at 0. */
+    config.n_waive = 1;
+    config.waive[0] = 2;
+    CHECK(dq_evaluate(drop, 3, 0, one_successor, &config).kind == DQ_OK, "waived boundary passes");
+    config.waive[0] = 1;
+    CHECK(dq_evaluate(drop, 3, 0, one_successor, &config).kind == DQ_RATIO_DROP, "waiver applies only to its k-mer");
+}
+
 int main(void)
 {
     test_hash_roundtrip();
@@ -246,6 +316,8 @@ int main(void)
     test_seq_kmers_dedup_equiv();
     test_count_set();
     test_kmer_cov_absent_expanded_bucket();
+    test_decodability_admission();
+    test_decodability_evaluate();
 
     printf("\n");
     if (failures) {

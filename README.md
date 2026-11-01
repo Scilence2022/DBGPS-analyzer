@@ -20,12 +20,13 @@ DStoreQC is a standalone quality-control tool, distinct from the published DBGPS
 
 ## Overview of Tools
 
-This project builds one C executable, **`dstoreqc`**, with `analyze`, `links`,
-`filter`, `kernel`, and `report` subcommands:
+This project builds one C executable, **`dstoreqc`**, with `analyze`,
+`decodability`, `links`, `filter`, `kernel`, and `report` subcommands:
 
 1. **`dstoreqc analyze` / `dstoreqc kernel`** (analysis module: [dstoreqc_analyzer.c](dstoreqc_analyzer.c)): Evaluates sequencing datasets against expected target strands, calculating critical quality metrics such as strand recovery rate ($S_m$), k-mer noise ratio ($K_n$), and k-mer dropout rate ($K_d$).
-2. **`dstoreqc links`** (reference module: [dstoreqc_reference.c](dstoreqc_reference.c)): Detects and counts cross-links between DNA strands to identify repeated patterns and sequence entanglement.
-3. **`dstoreqc filter`** (reference module: [dstoreqc_reference.c](dstoreqc_reference.c)): Screens out and filters entangled or highly cross-linked strands to prepare sequencing data for cleaner assembly.
+2. **`dstoreqc decodability`** (rule: [dstoreqc_decodability.h](dstoreqc_decodability.h)): Predicts which strands a DBGPS-style de Bruijn graph decoder will return, and where each of the others fails, from k-mer coverage alone and for any number of decoder settings at once.
+3. **`dstoreqc links`** (reference module: [dstoreqc_reference.c](dstoreqc_reference.c)): Detects and counts cross-links between DNA strands to identify repeated patterns and sequence entanglement.
+4. **`dstoreqc filter`** (reference module: [dstoreqc_reference.c](dstoreqc_reference.c)): Screens out and filters entangled or highly cross-linked strands to prepare sequencing data for cleaner assembly.
 
 ---
 
@@ -216,8 +217,50 @@ Supported commands:
 | `kmer <ACGT...> [upstreamDepth] [downstreamDepth]` | Query one DNA sequence. If the sequence is exactly k bases, it is used directly. If it is longer than k, the leftmost k-mer anchors upstream analysis and the rightmost k-mer anchors downstream analysis. Returns canonical coverage, one-step neighbors, and optional multi-step covered branch trees. Depth values are clamped to 0-6. |
 | `index <DECIMAL> <baseLength> [upstreamDepth] [downstreamDepth]` | Convert a decimal index to base-4, decode 0/1/2/3 with the default A/C/G/T scheme, left-pad with A bases when the decoded length is shorter than `baseLength`, then run greedy upstream/downstream path search. If the decoded DNA is still shorter than k, covered k-mers matching that prefix are returned as multiple greedy start k-mers up to the start limit. |
 | `sequence <ACGT...>` | Query every ordered k-mer in a DNA strand and return coverage, missing positions, path completeness, and adjacent coverage ratios. |
+| `decodability <primerFront> <indexLength> <pathLength> <config[,config...]> <reference.fasta>` | Evaluate the decodability predicate. See [Decodability](#decodability). |
 | `help` | Return supported commands. |
 | `exit` | Stop the interactive kernel. |
+
+### Decodability
+
+A de Bruijn graph decoder decides everything from k-mer coverage, so whether it
+returns a strand can be computed without running it. `dstoreqc decodability`
+writes the DBGPS acceptance rule as a predicate over the coverage of each strand's
+designed path, which needs the designed sequences and is meant for write-time
+verification, process development and archive audits, not blind retrieval.
+
+Walking from the k-mer that ends at the last index base, a successor of coverage
+`x` after a node of coverage `y` is admitted when
+`max(trunc(y/r), c+1) <= x <= min(trunc(y*r), 16383)`. A strand fails at the first
+refused step, and is reported with the k-mer and the reason:
+
+| Failure | Meaning |
+|:---|:---|
+| `seed_missing`, `missing` | The seed or a designed k-mer was never observed. |
+| `below_cutoff` | A designed k-mer was observed, but not above the cutoff. |
+| `ratio_drop`, `ratio_rise` | Coverage changed by more than the ratio window between adjacent k-mers. |
+| `extra_step_none`, `extra_step_ambiguous` | DBGPS walks one step past the path end. That step found no admissible successor, or found several, which duplicates the candidate so the CRC cannot pick one. |
+| `too_short`, `invalid_base` | The strand cannot hold the walk, or the walk contains a non-ACGT base. |
+
+```bash
+# Default DBGPS settings on 200-nt strands (18-nt primers, 16-nt index, 140-nt payload, 8-nt CRC)
+./dstoreqc decodability -k 31 -t 16 --per-strand strands.tsv reference.fa reads.fq.gz
+
+# Several settings from one count; per-strand output gets one column for each
+./dstoreqc decodability -k 31 -t 16 --config 1:2.55 --config 1:4:50+120:noextra --json reference.fa reads.fq.gz
+```
+
+A configuration is `cutoff:ratio[:kmer+kmer|-[:extra|noextra]]`. Listed k-mers are
+entered without the ratio test, keeping the cutoff; `noextra` models a walk that
+stops at the path end. JSON output adds `ratioHotspots`, the k-mers holding at
+least 10% of the first ratio failures of the first configuration. A hotspot is a
+coverage step, usually a read-length boundary, not noise.
+
+The prediction is exact only while the decoder's search stays within its limits.
+With a wide ratio window it can exhaust its path budget, and the predicate becomes
+an upper bound; a relaxed cutoff also admits rare CRC collisions on noise paths,
+which the predicate does not model. A Bloom reference index holds no off-path
+coverage, so it can only evaluate `noextra` configurations.
 
 ### Electron Desktop App
 

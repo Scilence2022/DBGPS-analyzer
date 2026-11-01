@@ -37,6 +37,7 @@ python3 tests/test_cli.py
 python3 tests/test_bloom.py
 python3 tests/test_unified.py
 python3 tests/test_reports.py
+python3 tests/test_decodability.py
 
 echo
 echo "All tests passed."
