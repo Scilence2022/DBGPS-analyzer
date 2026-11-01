@@ -13,7 +13,9 @@ function backend(overrides = {}) {
     getSummary: async () => ({ distinctKmers: 8 }),
     getSequence: async () => ({ reference: { index: 7 }, result: { type: "sequence", k: 3, observed: 2, missing: 1, coverages: [{ position: 0, coverage: 4 }, { position: 1, coverage: 3 }, { position: 2, coverage: 0 }], ratios: [] } }),
     queryKmer: async (kmer, depth) => ({ type: "kmer", query: kmer, depth }),
-    getBatchRows: () => ({ rows: [] }), findBatchRecords: (names) => ({ rows: [], unmatched: names }), ...overrides
+    getBatchRows: () => ({ rows: [] }), findBatchRecords: (names) => ({ rows: [], unmatched: names }),
+    getDecodability: (failure, offset, limit) => ({ failure, offset, limit }),
+    evaluateDecoderSettings: async (settings) => ({ settings }), ...overrides
   };
 }
 function run(provider, overrides = {}) {
@@ -381,4 +383,58 @@ test("evidence status exposes counts only and drives per-tool availability", () 
   const reference = agentToolAvailability({ ...status, indexScope: "reference" }).find((tool) => tool.name === "query_kmer");
   assert.equal(reference.available, false);
   assert.match(reference.reason, /Bloom encoded sequence mode/);
+});
+
+const signal = new AbortController().signal;
+const setting = { cutoff: 1, ratio: 2.55, waive: [50, 120], extraStep: false };
+
+test("decoder tools are advertised and validate their arguments", async () => {
+  assert.ok(AGENT_TOOLS.some((tool) => tool.name === "get_decodability"));
+  assert.ok(AGENT_TOOLS.some((tool) => tool.name === "evaluate_decoder_settings"));
+  assert.deepEqual(await executeAgentTool("get_decodability", { failure: "ratio_rise", offset: 0, limit: 5 }, backend(), signal), { failure: "ratio_rise", offset: 0, limit: 5 });
+  await assert.rejects(executeAgentTool("get_decodability", { failure: "because", offset: 0, limit: 5 }, backend(), signal), /Unknown decodability/);
+  await assert.rejects(executeAgentTool("get_decodability", { failure: "all", offset: 0, limit: AGENT_LIMITS.batchRows + 1 }, backend(), signal), /limit/);
+  assert.deepEqual(await executeAgentTool("evaluate_decoder_settings", { settings: [setting] }, backend(), signal), { settings: [setting] });
+  for (const bad of [[], [{ ...setting, ratio: 0.5 }], [{ ...setting, cutoff: -1 }], [{ ...setting, waive: "50" }], [{ ...setting, extraStep: "no" }], [{ cutoff: 1, ratio: 2 }],
+    Array(AGENT_LIMITS.decoderSettings + 1).fill(setting)]) {
+    await assert.rejects(executeAgentTool("evaluate_decoder_settings", { settings: bad }, backend(), signal));
+  }
+});
+
+test("decoder tools are unavailable until readiness has been predicted", () => {
+  const status = { datasetVersion: "index-1", k: 31, indexScope: null, batch: null, decodability: null, selectedSequence: false };
+  const availability = (state) => Object.fromEntries(agentToolAvailability(state).map((tool) => [tool.name, tool.available]));
+  assert.equal(availability(status).get_decodability, false);
+  assert.equal(availability({ ...status, decodability: { total: 2, decodable: 1 } }).evaluate_decoder_settings, true);
+});
+
+test("evidence store filters decoder rows and rejects stale results", async () => {
+  const store = new AgentEvidenceStore();
+  const version = store.activate({ k: 31, threads: 1, readLength: 200 });
+  const queries = [];
+  const kernel = { query: async (command) => { queries.push(command); return { ...result, configs: [{ ...setting, decodable: 7, failures: {} }] }; } };
+  const result = { type: "decodability", k: 31, primerFront: 18, indexLength: 16, pathLength: 148, seedKmer: 3, pathKmers: 149, total: 3, ratioFailures: 1, ratioHotspots: [],
+    configs: [{ cutoff: 1, ratio: 2.55, waive: [], extraStep: true, decodable: 1, failures: { ratio_rise: 1, missing: 1 } }],
+    rows: [{ name: "a", failure: "ok", position: -1 }, { name: "b", failure: "ratio_rise", position: 50 }, { name: "c", failure: "missing", position: 9 }] };
+  assert.throws(() => store.cacheDecodability("other", result, "/data/my ref.fa"), /Dataset changed/);
+  assert.equal(store.status().decodability, null);
+  store.cacheDecodability(version, result, "/data/my ref.fa");
+  assert.deepEqual(store.status().decodability, { total: 3, decodable: 1 });
+  const { backend: evidence } = store.open({}, kernel);
+  const failed = evidence.getDecodability("not_decodable", 0, 10);
+  assert.deepEqual(failed.rows.map((row) => row.name), ["b", "c"]);
+  assert.equal(failed.selection.matchedTotal, 2);
+  assert.equal(failed.total, 3);
+  assert.deepEqual(evidence.getDecodability("ratio_rise", 0, 10).rows.map((row) => row.position), [50]);
+  assert.equal(evidence.getDecodability("all", 1, 1).selection.truncated, true);
+  const evaluated = await evidence.evaluateDecoderSettings([setting], signal);
+  assert.equal(queries[0], "decodability 18 16 148 1:2.55:50+120:noextra /data/my ref.fa");
+  assert.equal(evaluated.configs[0].decodable, 7);
+  assert.equal(evaluated.rows, undefined);
+  store.invalidate();
+  assert.throws(() => evidence.getDecodability("all", 0, 1), /stale/);
+});
+
+test("analyzer queue allows the read-only decodability verb", () => {
+  assert.doesNotThrow(() => validateReadOnlyCommand("decodability 18 16 148 1:2.55 /data/ref.fa"));
 });

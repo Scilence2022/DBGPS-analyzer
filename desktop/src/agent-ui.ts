@@ -199,7 +199,9 @@ export const TOOL_LABELS: Record<string, { title: string; icon: string; blurb: s
   get_sequence_profile: { title: "Read coverage profile", icon: "chart-line", blurb: "Positional k-mer support for a cached Batch QC record or the selected Interactive sequence." },
   query_kmer: { title: "Query k-mer neighborhood", icon: "git-fork", blurb: "Count and membership-derived neighbors of one k-mer at the loaded k." },
   get_batch_rows: { title: "Read Batch QC rows", icon: "table-2", blurb: "Paginated per-strand rows from the completed Batch QC cache." },
-  find_batch_records: { title: "Find strands by name", icon: "search", blurb: "Exact strand names resolved to their rows in the completed Batch QC cache." }
+  find_batch_records: { title: "Find strands by name", icon: "search", blurb: "Exact strand names resolved to their rows in the completed Batch QC cache." },
+  get_decodability: { title: "Read decoder readiness", icon: "shield-check", blurb: "Which strands the decoder returns, and where and why the others fail." },
+  evaluate_decoder_settings: { title: "Compare decoder settings", icon: "sliders-horizontal", blurb: "Predicted decodable strands for candidate settings, without decoding." }
 };
 
 export function describeToolCall(name: string, input: unknown): { title: string; detail: string; icon: string } {
@@ -226,6 +228,13 @@ export function describeToolCall(name: string, input: unknown): { title: string;
     }
     case "find_batch_records":
       return { ...label, detail: plural(Array.isArray(a.names) ? a.names.length : 0, "name") };
+    case "get_decodability": {
+      const offset = int(a.offset) ?? 0;
+      const limit = int(a.limit) ?? 0;
+      return { ...label, detail: `${typeof a.failure === "string" ? a.failure : "all"} · rows ${offset + 1}–${offset + limit}` };
+    }
+    case "evaluate_decoder_settings":
+      return { ...label, detail: plural(Array.isArray(a.settings) ? a.settings.length : 0, "setting") };
     default:
       return { ...label, detail: "loaded index" };
   }
@@ -290,6 +299,17 @@ export function toolResultFacts(name: string, result: unknown): string[] {
       const matched = num(args(data.selection).matchedRows);
       if (matched != null) facts.push(`${plural(matched, "matching row")}`);
       if (Array.isArray(data.unmatched) && data.unmatched.length) facts.push(`${data.unmatched.length} unmatched`);
+      break;
+    }
+    case "get_decodability":
+    case "evaluate_decoder_settings": {
+      const total = num(data.total);
+      const configs = Array.isArray(data.configs) ? data.configs.map(args) : [];
+      const yields = configs.map((c) => num(c.decodable)).filter((v): v is number => v != null);
+      if (total != null && yields.length === 1) facts.push(`${yields[0].toLocaleString("en-US")} of ${total.toLocaleString("en-US")} decodable`);
+      if (total != null && yields.length > 1) facts.push(`best ${Math.max(...yields).toLocaleString("en-US")} of ${total.toLocaleString("en-US")} across ${yields.length} settings`);
+      const matched = num(args(data.selection).matchedTotal);
+      if (matched != null) facts.push(`${plural(matched, "matching strand")}`);
       break;
     }
   }

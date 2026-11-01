@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseCombinedReport, parseReferenceResult, filterOutput } from "./reference-results";
 import { AnalyzerQueryQueue, validateReadOnlyCommand } from "./analyzer-queue";
-import { AgentEvidenceStore } from "./agent-evidence";
+import { AgentEvidenceStore, adoptDecodability, decodabilityCommand, type DecoderLayout, type DecoderSetting } from "./agent-evidence";
 import { describeNetworkFailure } from "./net-errors";
 import { AGENT_LIMITS, agentToolAvailability, runReadOnlyAgent } from "./agent";
 import { requestAgentTurn } from "./agent-providers";
@@ -780,18 +780,20 @@ function assistantSystemPrompt() {
     "Metrics you will be asked about:",
     "- Sm (strand recovery rate): fraction of target strands fully covered by reads, at a given coverage-ratio threshold. Higher is better.",
     "- Kd (k-mer dropout rate): fraction of expected k-mers from the targets that are missing in the reads. Lower is better.",
-    "- Kn (k-mer noise ratio): ratio of noise k-mers (present in reads, absent from targets) to valid target k-mers. Lower is better.",
-    "- Cross-links / entanglement: encoded sequences sharing k-mers, which makes them ambiguous to assemble. Both are properties of the designed library, not of the sequencing run.",
+    "- Kn (k-mer noise ratio): ratio of noise k-mers (present in reads, absent from targets) to valid target k-mers. It rises with sequencing depth, because errors keep adding new k-mers while target k-mers saturate, so compare it only between runs of similar depth.",
+    "- Decoder readiness: applies the DBGPS acceptance rule to each strand's designed path, so it predicts which strands the decoder returns, and where and why the others fail, without decoding.",
+    "- Cross-links / entanglement: encoded sequences sharing k-mers, which makes them ambiguous to assemble. Both are properties of the designed library, not of the sequencing run. The cross-link count is a total of shared-key contributions, not a count of sequence pairs.",
+    "- Filter threshold (filter m): the most other strands a k-mer may be shared with for a strand to pass. 0 is the strictest setting, not the absence of a limit.",
     "- Coverage and adjacency ratios: per-k-mer depth along a strand, and the ratio between neighbouring k-mers. A sharp adjacency ratio marks a branch point or a coverage cliff.",
     "",
     "Interpret values using the same bands the app's own verdicts use, so your wording never contradicts the verdict list on screen:",
     "- Sm: >= 0.95 healthy, 0.80-0.95 marginal, < 0.80 poor.",
     "- Kd: <= 0.05 healthy, 0.05-0.20 marginal, > 0.20 poor.",
-    "- Kn: <= 0.5 healthy, 0.5-2.0 marginal, > 2.0 poor.",
+    "- Kn: no fixed band. Never call a run healthy or poor from Kn alone.",
     "- Entangled strands: any is worth flagging; > 10% of the library is serious.",
     "- Cross-links: zero is the healthy case; any non-zero count is worth explaining.",
     "",
-    "Diagnostic reasoning that is usually useful: low Sm with high Kd points at dropout (synthesis or PCR bias, or too little sequencing depth) rather than at noise; high Kn with acceptable Kd points at contamination or chimera formation; entanglement and cross-links explain assembly ambiguity that no amount of extra sequencing depth will fix.",
+    "Diagnostic reasoning that is usually useful: low Sm with high Kd points at dropout (synthesis or PCR bias, or too little sequencing depth) rather than at noise; entanglement and cross-links explain assembly ambiguity that no amount of extra sequencing depth will fix.",
     "",
     "Rules:",
     "- Ground every claim in the Analyzer context block when one is present, and name the specific numbers that support each conclusion.",
@@ -1663,6 +1665,38 @@ async function runInteractiveBatch(req: InteractiveBatchRequest) {
   return { type: "batch", ...currentSession.getScope(), datasetVersion, file: req.file, k, primerFront, primerBack, total: rows.length, ok, skipped, errors, rows };
 }
 
+type DecodabilityRequest = DecoderLayout & DecoderSetting & { file: string };
+
+async function runDecodability(req: DecodabilityRequest) {
+  if (!session) throw new Error("Analyzer is not running.");
+  if (!req || !req.file) throw new Error("Select an encoded sequence file for decoder readiness.");
+  const currentSession = session;
+  const datasetVersion = agentEvidence.getDatasetVersion();
+  if (!datasetVersion) throw new Error("Read index is changing or unavailable. Start or finish loading it first.");
+  const layout: DecoderLayout = {
+    primerFront: toPositiveInt(req.primerFront, 18, 0, 100000),
+    indexLength: toPositiveInt(req.indexLength, 16, 0, 100000),
+    pathLength: toPositiveInt(req.pathLength, 148, 1, 100000)
+  };
+  const ratio = Number(req.ratio);
+  if (!Number.isFinite(ratio) || ratio < 1) throw new Error("Ratio must be at least 1.");
+  const setting: DecoderSetting = {
+    cutoff: toPositiveInt(req.cutoff, 1, 0, 16382), ratio,
+    waive: (Array.isArray(req.waive) ? req.waive : []).slice(0, 16).map((kmer) => toPositiveInt(kmer, 0, 0, 100000)),
+    extraStep: Boolean(req.extraStep)
+  };
+  abortAgentRuns();
+  const payload = await currentSession.query(decodabilityCommand(layout, [setting], req.file), 600000);
+  const stale = session !== currentSession || agentEvidence.getDatasetVersion() !== datasetVersion;
+  if (stale) throw new Error("Dataset changed; stale decoder readiness result discarded.");
+  const message = (payload as { type?: string; message?: string }).type === "error" ? (payload as { message?: string }).message : null;
+  if (message) throw new Error(message);
+  const result = adoptDecodability(payload);
+  abortAgentRuns();
+  agentEvidence.cacheDecodability(datasetVersion, result, req.file);
+  return { ...result, datasetVersion, file: req.file };
+}
+
 async function loadBatchSequence(req: BatchSequenceRequest) {
   if (!req || !req.file) throw new Error("No sequence file provided.");
   const index = toPositiveInt(req.index, 0, 0, Number.MAX_SAFE_INTEGER);
@@ -1888,6 +1922,7 @@ app.whenReady().then(() => {
   ipcMain.handle("filter:run", async (_event, request: FilterRequest) => runFilter(request));
   ipcMain.handle("analyzer:runBatch", async (_event, request: AnalyzerBatchRequest) => runAnalyzerBatch(request));
   ipcMain.handle("analyzer:runInteractiveBatch", async (_event, request: InteractiveBatchRequest) => runInteractiveBatch(request));
+  ipcMain.handle("analyzer:decodability", async (_event, request: DecodabilityRequest) => runDecodability(request));
   ipcMain.handle("sequence:batchRecord", async (_event, request: BatchSequenceRequest) => loadBatchSequence(request));
   ipcMain.handle("report:run", async (_event, request: ReportRequest) => runReport(request));
 

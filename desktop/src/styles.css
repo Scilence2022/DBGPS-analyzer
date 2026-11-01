@@ -3920,6 +3920,12 @@ details > summary {
 .verdict.ok svg { color: var(--green); }
 .verdict.warn svg { color: var(--amber); }
 .verdict.bad svg { color: var(--red); }
+.verdict.info svg { color: var(--muted); }
+
+.decoder-config { display: flex; flex-direction: column; gap: 10px; }
+.decoder-config .batch-hint { margin: 0; }
+.decoder-result { display: flex; flex-direction: column; gap: 10px; }
+.decoder-note { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0; }
 
 .data-table {
   border-collapse: collapse;
@@ -3957,7 +3963,7 @@ details > summary {
 }
 .batch-progress {
   font-size: 12px;
-  color: var(--muted, #667085);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 #view-batch {
@@ -4034,7 +4040,7 @@ details > summary {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--muted, #667085);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 .batch-search {
@@ -4044,7 +4050,7 @@ details > summary {
 }
 .batch-search-label {
   font-size: 12px;
-  color: var(--muted, #667085);
+  color: var(--muted);
   white-space: nowrap;
 }
 .batch-search-input {
@@ -4083,7 +4089,7 @@ details > summary {
 }
 .batch-table tr.skipped,
 .batch-table tr.error {
-  color: var(--muted, #667085);
+  color: var(--muted);
 }
 .batch-note {
   font-style: italic;

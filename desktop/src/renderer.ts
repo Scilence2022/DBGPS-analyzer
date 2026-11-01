@@ -22,6 +22,7 @@ import {
 } from "./kmer-tree-layout";
 import { adjacentFoldChanges, describeFoldEdge, foldAxisCap, formatFold, type FoldEdge } from "./fold-change";
 import { analyzerScope, type AnalyzerConfig, type AnalyzerScope, type AnalyzerSummaryResult } from "./analyzer-config";
+import { failureLabel, failureRows, hotspotKmers, hotspotShare, parseWaivedKmers, shouldOfferWaiver } from "./decoder-readiness";
 
 declare global {
   interface Window {
@@ -1860,6 +1861,7 @@ function setAnalyzerReady(ready: boolean) {
   elements.stopButton.disabled = !ready || analyzerLoading;
   elements.startButton.disabled = ready || analyzerLoading;
   ui.batchRunButton.disabled = !ready || analyzerLoading || batchRunning;
+  ui.decoderRunButton.disabled = !ready || analyzerLoading || decoderRunning;
   updateBloomControls();
   updateQueryModeControls();
   renderInputsBar();
@@ -1959,6 +1961,7 @@ function clearReadIndexResults() {
   elements.resultView.className = "result-view empty-state";
   elements.resultView.textContent = "Reads changed. Query results have been cleared.";
   latestBatch = null;
+  clearDecoderReadiness();
   batchRows = [];
   batchRunning = false;
   batchDetailIndex = null;
@@ -2313,6 +2316,9 @@ function renderMarkdownToHtml(src: string): string {
 let latestLinks: LinksResult | null = null;
 let latestFilter: FilterResult | null = null;
 let latestBatch: InteractiveBatchResult | null = null;
+let latestDecodability: DecodabilityResult | null = null;
+let decoderVerdicts = new Map<string, { failure: string; position: number }>();
+let decoderRunning = false;
 
 function currentViewName(): ViewName {
   return (document.body.dataset.view as ViewName) || "batch";
@@ -2380,6 +2386,12 @@ function compactInteractive(result: AnalyzerResult): unknown {
   return result;
 }
 
+function compactDecodability() {
+  if (!latestDecodability) return null;
+  const { rows: _rows, file, ...summary } = latestDecodability;
+  return { ...summary, file: compactPath(file) };
+}
+
 function compactBatch(batch: InteractiveBatchResult): unknown {
   return {
     ...analyzerScope(batch),
@@ -2435,7 +2447,9 @@ function buildChatContext(): { label: string; data: unknown } | null {
         ? { label: "Seq-Filter", data: { file: compactPath(latestFilter.file), k: latestFilter.k, m: latestFilter.m, primerLen: latestFilter.primerLen, passedCount: latestFilter.passedCount, filteredCount: latestFilter.filteredCount, skippedCount: latestFilter.skippedCount, command: latestFilter.command } }
         : null;
     case "batch":
-      return latestBatch ? { label: "Batch QC", data: compactBatch(latestBatch) } : null;
+      return latestBatch || latestDecodability
+        ? { label: "Batch QC", data: { ...(latestBatch ? compactBatch(latestBatch) as object : {}), decoderReadiness: compactDecodability() } }
+        : null;
     default:
       return null;
   }
@@ -4071,8 +4085,9 @@ type LinksResult = Awaited<ReturnType<DStoreQCApi["runLinks"]>>;
 type FilterResult = Awaited<ReturnType<DStoreQCApi["runFilter"]>>;
 type ReportResult = Awaited<ReturnType<DStoreQCApi["runReport"]>>;
 type InteractiveBatchResult = Awaited<ReturnType<DStoreQCApi["runInteractiveBatch"]>>;
+type DecodabilityResult = Awaited<ReturnType<DStoreQCApi["runDecodability"]>>;
 type SmKdKnRow = NonNullable<ReportResult["analyzer"]>["rows"][number];
-type Verdict = { level: "ok" | "warn" | "bad"; text: string };
+type Verdict = { level: "ok" | "warn" | "bad" | "info"; text: string };
 
 const ui = {
   viewTabs: Array.from(document.querySelectorAll<HTMLButtonElement>(".view-tab")),
@@ -4081,6 +4096,14 @@ const ui = {
   batchProgress: $("batchProgress"),
   batchResult: $("batchResult"),
   batchDetail: $("batchDetail"),
+  decoderRunButton: $("decoderRunButton") as HTMLButtonElement,
+  decoderIndexLength: $("decoderIndexLength") as HTMLInputElement,
+  decoderPathLength: $("decoderPathLength") as HTMLInputElement,
+  decoderCutoff: $("decoderCutoff") as HTMLInputElement,
+  decoderRatio: $("decoderRatio") as HTMLInputElement,
+  decoderWaive: $("decoderWaive") as HTMLInputElement,
+  decoderExtraStep: $("decoderExtraStep") as HTMLInputElement,
+  decoderResult: $("decoderResult"),
   linksM: $("linksM") as HTMLInputElement,
   linksRunButton: $("linksRunButton") as HTMLButtonElement,
   linksResult: $("linksResult"),
@@ -4387,8 +4410,8 @@ function reportVerdicts(report: ReportResult): Verdict[] {
     }
     if (Number.isFinite(h.kn)) {
       verdicts.push({
-        level: h.kn <= 0.5 ? "ok" : h.kn <= 2 ? "warn" : "bad",
-        text: `k-mer noise Kn = ${fmtFloat(h.kn)}.`
+        level: "info",
+        text: `k-mer noise Kn = ${fmtFloat(h.kn)}. It rises with sequencing depth, so compare it only between runs of similar depth.`
       });
     }
   } else {
@@ -4411,7 +4434,7 @@ function smkdknTable(rows: SmKdKnRow[]) {
 }
 
 function verdictIcon(level: Verdict["level"]) {
-  return level === "ok" ? "check-circle" : level === "warn" ? "alert-triangle" : "x-circle";
+  return level === "ok" ? "check-circle" : level === "warn" ? "alert-triangle" : level === "info" ? "info" : "x-circle";
 }
 
 function renderReport(report: ReportResult) {
@@ -4563,7 +4586,7 @@ function buildReportHtml(report: ReportResult, narrative: string) {
     ["Cross-links", report.crossLinks == null ? "n/a" : formatNumber(report.crossLinks)],
     ...(h ? [["Strand recovery Sm", fmtPct(h.sm)], ["k-mer dropout Kd", fmtPct(h.kd)], ["k-mer noise Kn", Number.isFinite(h.kn) ? fmtFloat(h.kn) : "n/a"]] : [])
   ].map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`).join("");
-  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}.narrative .md-h{font-size:15px;margin:14px 0 6px;border:0;padding:0}.narrative code{background:#f4f6f9;padding:1px 5px;border-radius:5px;font-size:12px}.narrative blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid #dde3ea;color:#667085}.md-table-wrap{overflow-x:auto;margin:8px 0}.md-al-right{text-align:right}.md-al-center{text-align:center}.md-al-left{text-align:left}";
+  const css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;color:#1c2530;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #dde3ea;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #dde3ea;padding:5px 8px;text-align:left}th{background:#f4f6f9}ul{padding-left:18px}.v-ok{color:#137a4b}.v-warn{color:#9a6700}.v-bad{color:#b42318}.v-info{color:#475467}.muted{color:#667085}pre{background:#f4f6f9;border:1px solid #dde3ea;border-radius:6px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap}.narrative .md-h{font-size:15px;margin:14px 0 6px;border:0;padding:0}.narrative code{background:#f4f6f9;padding:1px 5px;border-radius:5px;font-size:12px}.narrative blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid #dde3ea;color:#667085}.md-table-wrap{overflow-x:auto;margin:8px 0}.md-al-right{text-align:right}.md-al-center{text-align:center}.md-al-left{text-align:left}";
   const narrativeHtml = narrative ? `<h2>AI interpretation</h2><div class="narrative">${renderMarkdownToHtml(narrative)}</div>` : "";
   const entangledHtml = report.entangledNames.length
     ? `<h2>Entangled strands (${report.entangledNames.length}${report.entangledTruncated ? ", truncated" : ""})</h2><pre>${escapeHtml(report.entangledNames.join("\n"))}</pre>`
@@ -4610,7 +4633,7 @@ function renderBatchRow(row: BatchRow) {
         <td title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</td>
         <td>${formatNumber(row.rawLength)}</td>
         <td>${formatNumber(row.analyzedLength)}</td>
-        <td colspan="5" class="batch-note">${escapeHtml(row.message || row.status)}</td>
+        <td colspan="${decoderVerdicts.size ? 6 : 5}" class="batch-note">${escapeHtml(row.message || row.status)}</td>
         <td><span class="coverage zero">${escapeHtml(row.status)}</span></td>
       </tr>`;
   }
@@ -4622,6 +4645,7 @@ function renderBatchRow(row: BatchRow) {
       <td>${formatNumber(row.analyzedLength)}</td>
       <td>${formatNumber(r.observed)} / ${formatNumber(r.kmerCount)}</td>
       <td><span class="path-pill ${r.complete ? "ok" : "bad"}">${r.complete ? "complete" : "broken"}</span></td>
+      ${decoderCell(row.name)}
       <td><span class="coverage ${coverageClass(r.minCoverage)}">${formatNumber(r.minCoverage)}</span></td>
       <td>${formatNumber(Math.round(r.meanCoverage))}</td>
       <td>${formatNumber(r.maxCoverage)}</td>
@@ -4664,7 +4688,7 @@ function renderBatchTable() {
     return;
   }
 
-  const head = ["#", "Name", "Len", "Used", "Observed", "Path", "Min", "Mean", "Max", "Details"];
+  const head = ["#", "Name", "Len", "Used", "Observed", "Path", ...(decoderVerdicts.size ? ["Decoder"] : []), "Min", "Mean", "Max", "Details"];
   const body = pageRows.map(renderBatchRow).join("");
 
   ui.batchResult.classList.remove("empty-state");
@@ -4850,6 +4874,7 @@ async function runBatchAnalysis() {
 function buildBatchCsv() {
   const header = ["index", "name", "raw_length", "analyzed_length", "status", "observed_kmers", "total_kmers", "path_complete", "min_cov", "mean_cov", "max_cov", "max_adjacent_ratio"];
   const scope = latestBatch?.indexScope === "reference" ? latestBatch : null;
+  if (decoderVerdicts.size) header.push("decoder_failure", "decoder_failure_kmer");
   if (scope) header.push("message", "index_scope", "reference_file", "target_kmers", "global_noise_available", "unrestricted_queries_available", "bloom_backend", "bloom_bytes", "bloom_bits_per_key", "bloom_hashes");
   const lines = [header.join(",")];
   for (const row of batchRows) {
@@ -4863,11 +4888,93 @@ function buildBatchCsv() {
       r ? r.observed : "", r ? r.kmerCount : "", r ? (r.complete ? "yes" : "no") : "",
       r ? r.minCoverage : "", r ? r.meanCoverage : "", r ? r.maxCoverage : "",
       r ? r.maxAdjacentRatio : "",
+      ...(decoderVerdicts.size ? [decoderVerdicts.get(row.name)?.failure ?? "", decoderVerdicts.get(row.name)?.position ?? ""] : []),
       ...(scope ? [row.message, scope.indexScope, scope.referenceFile, scope.targetKmers, false, false,
         scope.bloom?.backend, scope.bloom?.bytes, scope.bloom?.bitsPerKey, scope.bloom?.hashes] : [])
     ].map(cell).join(","));
   }
   return lines.join("\n") + "\n";
+}
+
+function decoderCell(name: string) {
+  if (!decoderVerdicts.size) return "";
+  const verdict = decoderVerdicts.get(name);
+  if (!verdict) return `<td class="muted">n/a</td>`;
+  if (verdict.failure === "ok") return `<td><span class="path-pill ok">decodable</span></td>`;
+  const where = verdict.position >= 0 ? ` at k-mer ${verdict.position}` : "";
+  return `<td title="${escapeHtml(failureLabel(verdict.failure) + where)}"><span class="path-pill bad">${escapeHtml(verdict.failure.replace(/_/g, " "))}</span></td>`;
+}
+
+function clearDecoderReadiness() {
+  latestDecodability = null;
+  decoderVerdicts = new Map();
+  decoderRunning = false;
+  ui.decoderResult.hidden = true;
+  ui.decoderResult.innerHTML = "";
+}
+
+function renderDecoderReadiness(result: DecodabilityResult) {
+  const config = result.configs[0];
+  const lost = result.total - config.decodable;
+  const rows = failureRows(config.failures, result.total);
+  const waive = hotspotKmers(result.ratioHotspots);
+  const hotspot = shouldOfferWaiver(result.ratioHotspots, result.ratioFailures, lost)
+    ? `<p class="decoder-note"><strong>${(hotspotShare(result.ratioHotspots, result.ratioFailures) * 100).toFixed(1)}%</strong> of ${formatNumber(result.ratioFailures)} ratio failures start at k-mer ${waive.join(" and ")}. A concentrated step like this is usually a read-length boundary, not noise.
+        <button type="button" class="secondary-button" data-decoder-waive="${waive.join(", ")}">Waive and predict again</button></p>`
+    : "";
+  const scope = result.k === 31 ? "" : `<p class="decoder-note">The kernel is loaded at k = ${result.k}, so this describes a decoder run at that k. DBGPS uses k = 31 by default.</p>`;
+  ui.decoderResult.innerHTML = `
+    <div class="report-metrics">
+      <div class="metric-card"><span>Predicted decodable</span><strong>${formatNumber(config.decodable)}</strong></div>
+      <div class="metric-card"><span>Fraction</span><strong>${fmtPct(result.total ? config.decodable / result.total : 0)}</strong></div>
+      <div class="metric-card"><span>Lost strands</span><strong>${formatNumber(lost)}</strong></div>
+      <div class="metric-card"><span>Path k-mers</span><strong>${formatNumber(result.pathKmers)}</strong></div>
+    </div>
+    ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Where strands are lost</th><th>Strands</th><th>Share of library</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(row.label)}</td><td>${formatNumber(row.count)}</td><td>${fmtPct(row.share)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${hotspot}${scope}
+    <p class="muted">Exact while the decoder stays inside its path budget. At wide ratios this is an upper bound, and a relaxed cutoff also admits rare CRC collisions that are not modelled.</p>`;
+  ui.decoderResult.hidden = false;
+}
+
+async function runDecoderReadiness() {
+  if (decoderRunning || !analyzerReady || analyzerLoading) return;
+  if (!referenceFile) {
+    await selectReference();
+    if (!referenceFile) return;
+  }
+  const generation = readIndexGeneration;
+  decoderRunning = true;
+  ui.decoderRunButton.disabled = true;
+  ui.decoderResult.hidden = false;
+  ui.decoderResult.innerHTML = `<div class="tool-loading">Evaluating the decoder rule in the C kernel…</div>`;
+  try {
+    const result = await window.dstoreqc.runDecodability({
+      file: referenceFile,
+      primerFront: sharedPrimers().front,
+      indexLength: Number(ui.decoderIndexLength.value),
+      pathLength: Number(ui.decoderPathLength.value),
+      cutoff: Number(ui.decoderCutoff.value),
+      ratio: Number(ui.decoderRatio.value),
+      waive: parseWaivedKmers(ui.decoderWaive.value),
+      extraStep: ui.decoderExtraStep.checked
+    });
+    if (generation !== readIndexGeneration) return;
+    latestDecodability = result;
+    decoderVerdicts = new Map(result.rows.map((row) => [row.name, row]));
+    renderDecoderReadiness(result);
+    renderIcons();
+    if (batchRows.length) renderBatchTable();
+    updateChatContextChip();
+    appendLog(`Decoder readiness: ${result.configs[0].decodable} of ${result.total} strands predicted decodable.`);
+  } catch (error) {
+    if (generation !== readIndexGeneration) return;
+    ui.decoderResult.innerHTML = `<div class="error-card">${escapeHtml(errMessage(error))}</div>`;
+  } finally {
+    if (generation === readIndexGeneration) {
+      decoderRunning = false;
+      ui.decoderRunButton.disabled = !analyzerReady || analyzerLoading;
+    }
+  }
 }
 
 async function saveBatchCsv() {
@@ -4882,6 +4989,14 @@ async function saveBatchCsv() {
 
 ui.viewTabs.forEach((tab) => tab.addEventListener("click", () => setView((tab.dataset.view as ViewName) || "batch")));
 ui.batchRunButton.addEventListener("click", runBatchAnalysis);
+ui.decoderRunButton.addEventListener("click", runDecoderReadiness);
+ui.decoderResult.addEventListener("click", (event) => {
+  const waive = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-decoder-waive]");
+  if (!waive) return;
+  ui.decoderWaive.value = waive.dataset.decoderWaive || "";
+  ui.decoderExtraStep.checked = false;
+  void runDecoderReadiness();
+});
 ui.batchSaveButton.addEventListener("click", saveBatchCsv);
 ui.batchResult.addEventListener("click", (event) => {
   const pageButton = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-batch-page]");

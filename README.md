@@ -268,7 +268,7 @@ The Electron desktop app lives in [`desktop/`](desktop). It is organized into fi
 
 | View | Purpose |
 |:---|:---|
-| **Batch QC** | Default first view: select encoded sequences (FASTA **or** tab-delimited) and automatically score **every** strand against the loaded sequencing k-mer table — one row per strand showing observed/total k-mers, path completeness, and min/mean/max coverage. Front/back primer regions are trimmed first; click any strand to drill into its full coverage profile, and export the whole table as CSV. Start the kernel directly using the shared controls above the scan, then click Analyze all. |
+| **Batch QC** | Default first view: select encoded sequences (FASTA **or** tab-delimited) and automatically score **every** strand against the loaded sequencing k-mer table — one row per strand showing observed/total k-mers, path completeness, and min/mean/max coverage. Front/back primer regions are trimmed first; click any strand to drill into its full coverage profile, and export the whole table as CSV. Start the kernel directly using the shared controls above the scan, then click Analyze all. **Predict decoding** applies the [decoder acceptance rule](#decodability) to every strand, reports where strands are lost, and offers to waive k-mers that concentrate the ratio failures; it also adds a Decoder column to the table and the CSV. |
 | **Interactive** | Share the kernel controls with Batch QC; start/stop the `dstoreqc kernel` JSON-Lines kernel; run k-mer, index, and sequence-path queries; visualize multi-step upstream/downstream De Bruijn graph trees. |
 | **Cross-links** | Run `dstoreqc links` on a reference library and report cross-link contributions from shared k-mers, with k and minimum-shared-strands controls. |
 | **Seq-Filter** | Run `dstoreqc filter --json` to screen entangled strands; choose max cross-links and whether to emit passed FASTA or the names of filtered strands; save the output to a file. |
@@ -370,6 +370,8 @@ The panel defaults to ordinary streaming text chat. **Agent** mode opts each req
 | `query_kmer` | Count and membership-derived neighborhood of one k-mer matching the loaded k |
 | `get_batch_rows` | Paginated complete-library or anomaly/status selections from the completed main-process batch cache |
 | `find_batch_records` | Exact strand names, such as entangled strands from a report, resolved to their rows in the completed main-process batch cache |
+| `get_decodability` | The Decoder readiness result: decodable strands, failure counts by reason, ratio hotspots, and paginated per-strand rows selected by failure |
+| `evaluate_decoder_settings` | Predicted decodable strands for up to 12 decoder settings on the loaded index, without decoding |
 
 The main process validates exact argument fields, integer ranges, DNA strings, and dataset/batch versions before execution and after asynchronous work. The model cannot supply paths, shell commands, new read files, trimming parameters, or exports. Loading, recounting, filtering, changing parameters, and saving files remain user-operated controls, not approval-gated model tools.
 

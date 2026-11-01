@@ -169,6 +169,42 @@
                 </p>
               </div>
             </section>
+            <section class="config-band tool-band decoder-config">
+              <div class="tool-row">
+                <button id="decoderRunButton" class="primary-button" disabled>
+                  <i data-lucide="shield-check"></i>
+                  <span>Predict decoding</span>
+                </button>
+                <label class="inline-field">
+                  <span>Index (nt)</span>
+                  <input id="decoderIndexLength" type="number" min="0" value="16" />
+                </label>
+                <label class="inline-field">
+                  <span>Payload + CRC (nt)</span>
+                  <input id="decoderPathLength" type="number" min="1" value="148" />
+                </label>
+                <label class="inline-field">
+                  <span>Cutoff</span>
+                  <input id="decoderCutoff" type="number" min="0" value="1" />
+                </label>
+                <label class="inline-field">
+                  <span>Ratio</span>
+                  <input id="decoderRatio" type="number" min="1" step="0.05" value="2.55" />
+                </label>
+                <label class="inline-field">
+                  <span>Waive k-mers</span>
+                  <input id="decoderWaive" type="text" placeholder="50, 120" />
+                </label>
+                <label class="checkbox-label">
+                  <input id="decoderExtraStep" type="checkbox" checked />
+                  <span>Extra walk step</span>
+                </label>
+              </div>
+              <p class="batch-hint muted">
+                Applies the DBGPS acceptance rule to each strand's designed path, so it predicts which strands the decoder returns without decoding. The walk starts at the k-mer ending at the last index base, using the front primer from Inputs.
+              </p>
+              <div id="decoderResult" class="decoder-result" hidden></div>
+            </section>
             <section class="result-band">
               <div class="section-title">
                 <div class="section-title-main">

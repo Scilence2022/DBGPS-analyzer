@@ -8,7 +8,7 @@ type Pending = {
 export function validateReadOnlyCommand(command: unknown): asserts command is string {
   if (typeof command !== "string" || /[\r\n\0]/.test(command)) throw new Error("Analyzer query must be a single command line.");
   const verb = command.trim().split(/\s+/)[0];
-  if (!["help", "summary", "kmer", "index", "sequence", "seq", "sequenceSummary", "seqSummary", "summarySequence"].includes(verb)) {
+  if (!["help", "summary", "kmer", "index", "sequence", "seq", "sequenceSummary", "seqSummary", "summarySequence", "decodability"].includes(verb)) {
     throw new Error("Use a dedicated user control to load reads, select references, or stop the analyzer.");
   }
 }
