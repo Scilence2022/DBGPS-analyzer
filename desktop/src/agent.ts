@@ -24,8 +24,8 @@ export const AGENT_LIMITS = Object.freeze({
 
 export const DECODABILITY_FAILURES = ["ok", "seed_missing", "missing", "below_cutoff", "ratio_drop", "ratio_rise", "extra_step_none", "extra_step_ambiguous", "too_short", "invalid_base"];
 
-function parameters(properties: Record<string, unknown>) {
-  return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
+function parameters(properties: Record<string, unknown>, optional: Record<string, unknown> = {}) {
+  return { type: "object", properties: { ...properties, ...optional }, required: Object.keys(properties), additionalProperties: false };
 }
 
 export const AGENT_TOOLS: AgentToolDefinition[] = [
@@ -69,16 +69,18 @@ export const AGENT_TOOLS: AgentToolDefinition[] = [
   },
   {
     name: "get_decodability",
-    description: "Read the Decoder readiness result: how many strands a DBGPS-style decoder returns at the first setting, failure counts by reason, ratio-test hotspots, and per-strand rows selected by failure. Use it to answer why a strand does not decode. Failure positions are k-mer indices on the full strand. Never reads a new file.",
+    description: `Read the Decoder readiness result: how many strands a DBGPS-style decoder returns at the first setting, failure counts by reason, ratio-test hotspots, and per-strand rows. To answer why one strand does not decode, pass its exact name: that returns the strand's failure and position directly, and failure, offset, and limit do not select its row. Without a name, rows are selected by failure and paged: limit is at most ${AGENT_LIMITS.batchRows} rows per call, so raise offset to read further. Failure positions are k-mer indices on the full strand. Never reads a new file.`,
     parameters: parameters({
       failure: { type: "string", enum: ["all", "not_decodable", ...DECODABILITY_FAILURES] },
       offset: { type: "integer", minimum: 0 },
       limit: { type: "integer", minimum: 1, maximum: AGENT_LIMITS.batchRows }
+    }, {
+      name: { type: ["string", "null"], minLength: 1, maxLength: AGENT_LIMITS.nameChars }
     })
   },
   {
     name: "evaluate_decoder_settings",
-    description: "Predict decodable strands for up to 12 decoder settings from the loaded index, without decoding. Each setting has a coverage cutoff, a ratio, k-mers entered without the ratio test, and whether the walk takes the decoder's extra final step. Use it to compare settings; do not estimate yields yourself.",
+    description: "Predict decodable strands for up to 12 decoder settings from the loaded index, without decoding. Each setting has a coverage cutoff, a ratio, k-mers entered without the ratio test, and extraStep, whether the walk takes the decoder's extra final step. Set extraStep to true, the application's default, unless the user asks to turn the extra step off; false changes the yield. Use it to compare settings; do not estimate yields yourself.",
     parameters: parameters({
       settings: {
         type: "array", minItems: 1, maxItems: AGENT_LIMITS.decoderSettings,
@@ -106,7 +108,7 @@ export const AGENT_SYSTEM_PROMPT = [
   "Cite snapshot ID, tool name, record index or slice, and supporting numbers for dataset-specific conclusions. Explicitly distinguish measured facts, hypotheses, omitted evidence, and recommended manual checks.",
   "Path completeness is pooled positional k-mer support, not molecule reconstruction or payload decoding. Sm is accepted reference records / all reference records under the stated standalone criterion.",
   "Kd is lost distinct target keys / all distinct target keys. Kn is distinct off-target keys / supported target keys, not a per-base sequencing error probability. Kn rises with sequencing depth, so a large value alone is not a failure and Kn can only be compared between runs of similar depth.",
-  "Decoder readiness applies the DBGPS acceptance rule to each strand's designed path. A strand is decodable only if every step passes the coverage cutoff and the adjacent ratio test. It predicts decoder output without decoding, and needs the encoded sequences. Report the failure reason and k-mer from get_decodability; do not infer them from Sm, Kd, or a coverage profile.",
+  "Decoder readiness applies the DBGPS acceptance rule to each strand's designed path. A strand is decodable only if every step passes the coverage cutoff and the adjacent ratio test. It predicts decoder output without decoding, and needs the encoded sequences. For a named strand, call get_decodability with its name. Report the failure reason and k-mer from get_decodability; do not infer them from Sm, Kd, or a coverage profile.",
   "A ratio hotspot is a k-mer holding at least 10% of first ratio failures. It marks a coverage step such as a read-length boundary, not noise. evaluate_decoder_settings is the only source of yield numbers for a setting. Its results are upper bounds at wide ratios, and a relaxed cutoff trades fidelity for yield.",
   "The cross-link count is the total of shared-key contributions across encoded sequences, not a count of sequence pairs. The filter threshold is the most other strands a key may be shared with for a strand to pass, so 0 is the strictest setting, not the absence of a limit.",
   "Batch QC is the default first tab. To run it, select Encoded sequences and Reads in Inputs, click Start kernel above the results, wait for counting, then click Analyze all. Batch QC and Interactive share the kernel controls, Bloom options, and count summary. Interactive provides individual k-mer, index and sequence queries.",
@@ -161,6 +163,7 @@ export interface AgentBackend {
   getBatchRows(status: string, offset: number, limit: number): unknown;
   findBatchRecords(names: string[]): unknown;
   getDecodability(failure: string, offset: number, limit: number): unknown;
+  findDecodability(name: string): unknown;
   evaluateDecoderSettings(settings: AgentDecoderSetting[], signal: AbortSignal): Promise<unknown>;
 }
 
@@ -266,11 +269,18 @@ export async function executeAgentTool(name: string, input: unknown, backend: Ag
       break;
     }
     case "get_decodability": {
-      exactFields(args, ["failure", "offset", "limit"]);
-      if (typeof args.failure !== "string" || !["all", "not_decodable", ...DECODABILITY_FAILURES].includes(args.failure)) throw new Error("Unknown decodability failure selection.");
-      const offset = integer(args.offset, 0, Number.MAX_SAFE_INTEGER, "offset");
-      const limit = integer(args.limit, 1, AGENT_LIMITS.batchRows, "limit");
-      data = backend.getDecodability(args.failure, offset, limit);
+      const { name = null, ...page } = args;
+      if (name !== null && (typeof name !== "string" || !name || name.length > AGENT_LIMITS.nameChars)) {
+        throw new Error(`name must be null or a strand name of 1 to ${AGENT_LIMITS.nameChars} characters.`);
+      }
+      // A name selects its own row, so the paging fields may be left out, but any sent are still checked.
+      const fields = ["failure", "offset", "limit"];
+      exactFields(page, name === null ? fields : fields.filter((field) => field in page));
+      const selection = { failure: "all", offset: 0, limit: 1, ...page };
+      if (typeof selection.failure !== "string" || !["all", "not_decodable", ...DECODABILITY_FAILURES].includes(selection.failure)) throw new Error("Unknown decodability failure selection.");
+      const offset = integer(selection.offset, 0, Number.MAX_SAFE_INTEGER, "offset");
+      const limit = integer(selection.limit, 1, AGENT_LIMITS.batchRows, "limit");
+      data = name === null ? backend.getDecodability(selection.failure, offset, limit) : backend.findDecodability(name);
       break;
     }
     case "evaluate_decoder_settings": {

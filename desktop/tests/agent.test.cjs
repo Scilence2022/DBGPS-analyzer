@@ -15,6 +15,7 @@ function backend(overrides = {}) {
     queryKmer: async (kmer, depth) => ({ type: "kmer", query: kmer, depth }),
     getBatchRows: () => ({ rows: [] }), findBatchRecords: (names) => ({ rows: [], unmatched: names }),
     getDecodability: (failure, offset, limit) => ({ failure, offset, limit }),
+    findDecodability: (name) => ({ name }),
     evaluateDecoderSettings: async (settings) => ({ settings }), ...overrides
   };
 }
@@ -70,7 +71,18 @@ for (const [name, args] of [
   ["find_batch_records", { names: "strand" }],
   ["find_batch_records", { names: [""] }],
   ["find_batch_records", { names: Array.from({ length: 26 }, (_, i) => `s${i}`) }],
-  ["find_batch_records", { names: ["x".repeat(201)] }]
+  ["find_batch_records", { names: ["x".repeat(201)] }],
+  ["get_decodability", { name: "" }],
+  ["get_decodability", { name: 42 }],
+  ["get_decodability", { name: ["seq_0"] }],
+  ["get_decodability", { name: "x".repeat(201) }],
+  ["get_decodability", { name: "seq_0", recordIndex: 3 }],
+  ["get_decodability", { name: "seq_0", failure: "because" }],
+  ["get_decodability", { name: "seq_0", offset: -1 }],
+  ["get_decodability", { name: "seq_0", limit: 26 }],
+  ["get_decodability", { name: null, failure: "all", offset: 0 }],
+  ["get_decodability", { failure: "all", offset: 0 }],
+  ["get_decodability", { failure: "all", offset: 0, limit: 26 }]
 ]) test(`runtime rejects ${name} arguments ${JSON.stringify(args)}`, async () => {
   await assert.rejects(executeAgentTool(name, args, backend(), new AbortController().signal));
 });
@@ -401,6 +413,23 @@ test("decoder tools are advertised and validate their arguments", async () => {
   }
 });
 
+test("get_decodability takes a strand name and keeps the paged mode", async () => {
+  const paged = { failure: "ratio_rise", offset: 4, limit: 5 };
+  assert.deepEqual(await executeAgentTool("get_decodability", paged, backend(), signal), paged);
+  assert.deepEqual(await executeAgentTool("get_decodability", { ...paged, name: null }, backend(), signal), paged);
+  assert.deepEqual(await executeAgentTool("get_decodability", { name: "seq_0" }, backend(), signal), { name: "seq_0" });
+  assert.deepEqual(await executeAgentTool("get_decodability", { ...paged, name: "seq_0" }, backend(), signal), { name: "seq_0" });
+  const { parameters } = AGENT_TOOLS.find((tool) => tool.name === "get_decodability");
+  assert.deepEqual(parameters.required, ["failure", "offset", "limit"]);
+  assert.equal(parameters.properties.name.maxLength, AGENT_LIMITS.nameChars);
+});
+
+test("decoder tool descriptions state the page limit and the extra-step default", () => {
+  const description = (name) => AGENT_TOOLS.find((tool) => tool.name === name).description;
+  assert.match(description("get_decodability"), new RegExp(`at most ${AGENT_LIMITS.batchRows} rows per call`));
+  assert.match(description("evaluate_decoder_settings"), /extraStep to true, the application's default/);
+});
+
 test("decoder tools are unavailable until readiness has been predicted", () => {
   const status = { datasetVersion: "index-1", k: 31, indexScope: null, batch: null, decodability: null, selectedSequence: false };
   const availability = (state) => Object.fromEntries(agentToolAvailability(state).map((tool) => [tool.name, tool.available]));
@@ -433,6 +462,35 @@ test("evidence store filters decoder rows and rejects stale results", async () =
   assert.equal(evaluated.rows, undefined);
   store.invalidate();
   assert.throws(() => evidence.getDecodability("all", 0, 1), /stale/);
+});
+
+test("evidence store finds one strand's decoder row by exact name", () => {
+  const store = new AgentEvidenceStore();
+  const version = store.activate({ k: 31, threads: 1, readLength: 200 });
+  const result = { type: "decodability", k: 31, primerFront: 18, indexLength: 16, pathLength: 148, seedKmer: 3, pathKmers: 149, total: 4, ratioFailures: 1, ratioHotspots: [],
+    configs: [{ cutoff: 1, ratio: 2.55, waive: [], extraStep: true, decodable: 1, failures: { ratio_rise: 1, missing: 2 } }],
+    rows: [{ name: "a", failure: "ok", position: -1 }, { name: "b", failure: "ratio_rise", position: 50 }, { name: "dup", failure: "missing", position: 9 }, { name: "dup", failure: "missing", position: 12 }] };
+  const { backend: evidence } = (store.cacheDecodability(version, result, "/data/ref.fa"), store.open({}, null));
+  const found = evidence.findDecodability("b");
+  assert.deepEqual(found.rows, [{ name: "b", failure: "ratio_rise", position: 50 }]);
+  assert.deepEqual(found.selection, { name: "b", matchedTotal: 1, truncated: false });
+  assert.deepEqual(found.unmatched, []);
+  assert.equal(found.total, 4);
+  assert.match(found.positionConvention, /k-mer indices/);
+  assert.deepEqual(evidence.findDecodability("a").rows, [{ name: "a", failure: "ok", position: -1 }]);
+  assert.deepEqual(evidence.findDecodability("dup").rows.map((row) => row.position), [9, 12]);
+  const missing = evidence.findDecodability("B");
+  assert.deepEqual(missing.rows, []);
+  assert.deepEqual(missing.unmatched, ["B"]);
+  assert.equal(missing.selection.matchedTotal, 0);
+  store.invalidate();
+  assert.throws(() => evidence.findDecodability("b"), /stale/);
+});
+
+test("strand lookup needs a readiness result", () => {
+  const store = new AgentEvidenceStore();
+  store.activate({ k: 31, threads: 1, readLength: 200 });
+  assert.throws(() => store.open({}, null).backend.findDecodability("b"), /Run Predict decoding/);
 });
 
 test("analyzer queue allows the read-only decodability verb", () => {
