@@ -84,13 +84,14 @@ class Decodability(unittest.TestCase):
         self.assertEqual(self.failure(self.verdict(strand, [strand] * 5)), ["extra_step_none"])
         self.assertEqual(self.verdict(strand, [strand] * 5, "--no-extra-step")["configs"][0]["decodable"], 1)
 
-    def test_extra_step_with_two_successors_is_ambiguous(self):
+    def test_extra_step_with_two_successors_repeats_one_candidate(self):
         strand = unique_sequence(60, 4)
         last = strand[NEEDED]
         other = next(b for b in "ACGT" if b != last)
         variant = strand[:NEEDED] + other
         report = self.verdict(strand, [strand] * 5 + [variant] * 5)
-        self.assertEqual(self.failure(report), ["extra_step_ambiguous"])
+        self.assertEqual(self.failure(report), [])
+        self.assertEqual(report["configs"][0]["decodable"], 1)
         self.assertEqual(self.verdict(strand, [strand] * 5 + [variant] * 5, "--no-extra-step")["configs"][0]["decodable"], 1)
 
     def test_coverage_step_is_a_hotspot_and_can_be_waived(self):

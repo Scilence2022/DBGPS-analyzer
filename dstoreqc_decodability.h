@@ -6,14 +6,14 @@
  *
  *     max(trunc(y / r), c + 1) <= x <= min(trunc(y * r), KC_MAX)
  *
- * and a strand is emitted when exactly one complete path passes the CRC. Whether
- * the designed path survives that walk is therefore a function of its coverage
- * alone, so it can be evaluated for every strand without any path search.
+ * and a strand is emitted when exactly one distinct candidate passes the CRC.
+ * Whether the designed path survives that walk is therefore a function of its
+ * coverage alone, so it can be evaluated for every strand without any path search.
  *
  * Two walk variants are modelled. With the extra step, as DBGPS2 implements it,
  * the walk takes one more extension than the strand needs: no admissible
- * successor loses the strand, and two make the identical 164-nt candidate appear
- * twice so the CRC cannot pick one. The other variant stops at the path end.
+ * successor loses the strand, while several only repeat the identical candidate,
+ * which DBGPS2 counts once. The other variant stops at the path end.
  * Waived k-mers keep the cutoff but skip the ratio test when entered, for known
  * coverage steps such as read-length boundaries.
  *
@@ -32,7 +32,6 @@ typedef enum {
     DQ_RATIO_DROP,          /* coverage fell by more than the ratio window */
     DQ_RATIO_RISE,          /* coverage rose by more than the ratio window */
     DQ_EXTRA_STEP_NONE,     /* extra step found no admissible successor */
-    DQ_EXTRA_STEP_AMBIGUOUS,/* extra step found several, duplicating the path */
     DQ_TOO_SHORT,           /* strand cannot hold the walk */
     DQ_INVALID_BASE,        /* non-ACGT base inside the walk */
     DQ_FAILURE_KINDS
@@ -40,7 +39,7 @@ typedef enum {
 
 static const char *const dq_failure_names[DQ_FAILURE_KINDS] DSTOREQC_UNUSED = {
     "ok", "seed_missing", "missing", "below_cutoff", "ratio_drop", "ratio_rise",
-    "extra_step_none", "extra_step_ambiguous", "too_short", "invalid_base"
+    "extra_step_none", "too_short", "invalid_base"
 };
 
 typedef struct {
@@ -105,8 +104,8 @@ static inline dq_verdict_t dq_evaluate(const int *cov, int n, int seed_kmer,
         int admitted = 0;
         for (int b = 0; b < 4; ++b)
             admitted += dq_admits(cov[n - 1], successors[b], config->cutoff, config->ratio, 0);
-        if (admitted != 1) {
-            verdict.kind = admitted == 0 ? DQ_EXTRA_STEP_NONE : DQ_EXTRA_STEP_AMBIGUOUS;
+        if (admitted == 0) {
+            verdict.kind = DQ_EXTRA_STEP_NONE;
             verdict.position = seed_kmer + n;
         }
     }
