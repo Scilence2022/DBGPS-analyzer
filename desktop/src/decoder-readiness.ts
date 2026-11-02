@@ -10,7 +10,6 @@ const FAILURE_LABELS: Record<string, string> = {
   ratio_drop: "Coverage fell past the ratio window",
   ratio_rise: "Coverage rose past the ratio window",
   extra_step_none: "Extra step found no successor",
-  extra_step_ambiguous: "Extra step found several successors",
   too_short: "Strand too short for the walk",
   invalid_base: "Non-ACGT base in the walk"
 };

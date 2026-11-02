@@ -22,7 +22,7 @@ export const AGENT_LIMITS = Object.freeze({
   outputTokens: 4096
 });
 
-export const DECODABILITY_FAILURES = ["ok", "seed_missing", "missing", "below_cutoff", "ratio_drop", "ratio_rise", "extra_step_none", "extra_step_ambiguous", "too_short", "invalid_base"];
+export const DECODABILITY_FAILURES = ["ok", "seed_missing", "missing", "below_cutoff", "ratio_drop", "ratio_rise", "extra_step_none", "too_short", "invalid_base"];
 
 function parameters(properties: Record<string, unknown>, optional: Record<string, unknown> = {}) {
   return { type: "object", properties: { ...properties, ...optional }, required: Object.keys(properties), additionalProperties: false };
