@@ -290,11 +290,11 @@ static void test_decodability_evaluate(void)
     v = dq_evaluate(steady, 5, 3, no_successor, &config);
     CHECK(v.kind == DQ_EXTRA_STEP_NONE && v.position == 8, "no admissible extra step");
     v = dq_evaluate(steady, 5, 3, two_successors, &config);
-    CHECK(v.kind == DQ_EXTRA_STEP_AMBIGUOUS, "two admissible extra steps");
+    CHECK(v.kind == DQ_OK && v.position == -1, "two admissible extra steps repeat one candidate");
 
     config.extra_step = 0;
     CHECK(dq_evaluate(steady, 5, 3, no_successor, &config).kind == DQ_OK, "walk ending at the path end needs no successor");
-    CHECK(dq_evaluate(steady, 5, 3, two_successors, &config).kind == DQ_OK, "duplicate terminal cannot arise without the extra step");
+    CHECK(dq_evaluate(steady, 5, 3, two_successors, &config).kind == DQ_OK, "two successors do not matter without the extra step");
 
     /* Waiving by strand index: the failing step enters k-mer 2 of a path seeded at 0. */
     config.n_waive = 1;

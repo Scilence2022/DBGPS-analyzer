@@ -239,7 +239,7 @@ refused step, and is reported with the k-mer and the reason:
 | `seed_missing`, `missing` | The seed or a designed k-mer was never observed. |
 | `below_cutoff` | A designed k-mer was observed, but not above the cutoff. |
 | `ratio_drop`, `ratio_rise` | Coverage changed by more than the ratio window between adjacent k-mers. |
-| `extra_step_none`, `extra_step_ambiguous` | DBGPS walks one step past the path end. That step found no admissible successor, or found several, which duplicates the candidate so the CRC cannot pick one. |
+| `extra_step_none` | DBGPS walks one step past the path end, and that step found no admissible successor. Several admissible successors repeat the identical candidate, which DBGPS2 counts once, so they do not lose the strand. |
 | `too_short`, `invalid_base` | The strand cannot hold the walk, or the walk contains a non-ACGT base. |
 
 ```bash
