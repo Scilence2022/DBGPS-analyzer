@@ -1744,6 +1744,25 @@ td {
   background: color-mix(in srgb, var(--red) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--red) 38%, transparent);
 }
+.verify-badge {
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  cursor: help;
+}
+.verify-badge.ok {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 38%, transparent);
+}
+.verify-badge.warn {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, transparent);
+}
 .stop-badge.dataset_changed {
   color: var(--muted);
   background: color-mix(in srgb, var(--muted) 14%, transparent);

@@ -25,8 +25,11 @@ export type ChatMessageMeta = {
   stopReason?: string;
   snapshotId?: string;
   trace?: CompactTrace[];
+  verification?: VerificationSummary;
   error?: boolean;
 };
+
+export type VerificationSummary = { checked: number; unsupported: number; revised: boolean; untraced?: string[] };
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -99,7 +102,37 @@ function normalizeMeta(raw: unknown): ChatMessageMeta | undefined {
     stopReason: text(meta.stopReason, 40),
     snapshotId: text(meta.snapshotId),
     trace: normalizeTrace(meta.trace),
+    verification: normalizeVerification(meta.verification),
     error: meta.error === true ? true : undefined
+  };
+}
+
+function normalizeVerification(raw: unknown): VerificationSummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const v = raw as Record<string, unknown>;
+  const count = (value: unknown) => (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null);
+  const checked = count(v.checked), unsupported = count(v.unsupported);
+  if (checked == null || unsupported == null || unsupported > checked) return undefined;
+  const untraced = Array.isArray(v.untraced) ? v.untraced.filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => item.slice(0, 40)) : undefined;
+  return { checked, unsupported, revised: v.revised === true, ...(untraced?.length ? { untraced } : {}) };
+}
+
+// The answer's provenance check, compact enough to keep with the thread.
+export function summarizeVerification(verification: { checked: number; unsupported: number; values: Array<{ text: string; status: string }> } | undefined, revised: boolean): VerificationSummary | undefined {
+  if (!verification) return undefined;
+  const untraced = verification.values.filter((item) => item.status === "unsupported").map((item) => item.text).slice(0, 20);
+  return { checked: verification.checked, unsupported: verification.unsupported, revised, ...(untraced.length ? { untraced } : {}) };
+}
+
+export function verificationLabel(summary: VerificationSummary): { text: string; tone: "ok" | "warn"; title: string } {
+  const revised = summary.revised ? " after one revision" : "";
+  if (!summary.checked) return { text: "no values to check", tone: "ok", title: "The answer states no numbers to trace." };
+  if (!summary.unsupported) {
+    return { text: `${plural(summary.checked, "value")} traced`, tone: "ok", title: `Every number in the answer was found in the retrieved evidence, or as a sum, difference or share of it${revised}.` };
+  }
+  return {
+    text: `${summary.unsupported} of ${plural(summary.checked, "value")} not traced`, tone: "warn",
+    title: `Not found in any retrieved evidence${revised}: ${(summary.untraced || []).join(", ")}. Check these before relying on them.`
   };
 }
 
@@ -229,7 +262,9 @@ export function describeToolCall(name: string, input: unknown): { title: string;
     case "find_batch_records":
       return { ...label, detail: plural(Array.isArray(a.names) ? a.names.length : 0, "name") };
     case "get_decodability": {
-      if (typeof a.name === "string") return { ...label, detail: `strand ${a.name.length > 40 ? `${a.name.slice(0, 39)}…` : a.name}` };
+      const names = [...(typeof a.name === "string" ? [a.name] : []), ...(Array.isArray(a.names) ? a.names.filter((n): n is string => typeof n === "string") : [])];
+      if (names.length === 1) return { ...label, detail: `strand ${names[0].length > 40 ? `${names[0].slice(0, 39)}…` : names[0]}` };
+      if (names.length > 1) return { ...label, detail: plural(names.length, "strand") };
       const offset = int(a.offset) ?? 0;
       const limit = int(a.limit) ?? 0;
       return { ...label, detail: `${typeof a.failure === "string" ? a.failure : "all"} · rows ${offset + 1}–${offset + limit}` };
@@ -312,7 +347,7 @@ export function toolResultFacts(name: string, result: unknown): string[] {
       const selection = args(data.selection);
       const matched = num(selection.matchedTotal);
       if (matched != null) facts.push(`${plural(matched, "matching strand")}`);
-      if (typeof selection.name === "string" && Array.isArray(data.rows)) {
+      if ((typeof selection.name === "string" || Array.isArray(selection.names)) && Array.isArray(data.rows)) {
         for (const row of data.rows.slice(0, 3).map(args)) {
           const position = num(row.position);
           facts.push(position != null && position >= 0 ? `${row.failure} at k-mer ${position}` : String(row.failure));

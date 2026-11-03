@@ -57,12 +57,32 @@ export type AgentToolTrace = {
   result?: unknown;
 };
 
+export type AgentVerifiedValue = {
+  text: string;
+  status: "supported" | "derived" | "unsupported";
+  from?: string;
+  context: string;
+};
+
+// Provenance of every number in an answer, checked against the run's own evidence.
+export type AgentVerification = {
+  checked: number;
+  supported: number;
+  derived: number;
+  unsupported: number;
+  values: AgentVerifiedValue[];
+  evidenceValues: number;
+};
+
 export type AgentRun = {
   snapshot: AgentSnapshot;
   trace: AgentToolTrace[];
   modelTurns: number;
   stopReason: "completed" | "canceled" | "deadline" | "dataset_changed" | "budget" | "error";
   content: string;
+  verification?: AgentVerification;
+  // The first answer and its check, kept when unsupported values prompted a revision.
+  draft?: { content: string; verification: AgentVerification };
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   generation: {
     apiStyle: AgentApiStyle;

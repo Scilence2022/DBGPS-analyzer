@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { AGENT_LIMITS, compactAgentContext, type AgentBackend } from "./agent";
 import type { AgentEvidenceStatus, AgentSnapshot } from "./agent-types";
 import { analyzerScope, type AnalyzerScope } from "./analyzer-config";
@@ -51,6 +53,76 @@ export type DecodabilityResult = DecoderLayout & {
 type CachedDecodability = { result: DecodabilityResult; file: string };
 
 const DECODABILITY_TIMEOUT_MS = 600000;
+// k-mers listed on each side of a failing step.
+const WINDOW = 2;
+
+// Full designed sequences of the named strands, read from the reference the
+// predicate used (FASTA or FASTQ, first header word as the name).
+export async function readReferenceSequences(file: string, names: Set<string>, signal: AbortSignal): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  const stream = createReadStream(file, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  let name: string | null = null;
+  let parts: string[] = [];
+  let quality = false;
+  const keep = () => { if (name !== null && names.has(name) && !found.has(name)) found.set(name, parts.join("").toUpperCase()); };
+  try {
+    for await (const line of lines) {
+      signal.throwIfAborted();
+      if (line.startsWith(">") || (line.startsWith("@") && !quality)) {
+        keep();
+        if (found.size === names.size) break;
+        name = line.slice(1).trim().split(/\s+/)[0] || "";
+        parts = [];
+        quality = false;
+      } else if (line.startsWith("+") && name !== null && !quality) {
+        quality = true;
+      } else if (!quality) {
+        parts.push(line.trim());
+      } else {
+        quality = false;
+        keep();
+        name = null;
+      }
+    }
+    keep();
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return found;
+}
+
+const round3 = (value: number) => Math.round(value * 1000) / 1000;
+
+// What the decoder's walk saw on one strand's designed path, from the loaded index.
+export function strandCoverageEvidence(coverage: number[], row: DecodabilityRow, result: DecodabilityResult) {
+  const first = result.seedKmer;
+  const last = Math.min(coverage.length - 1, result.seedKmer + result.pathKmers - 1);
+  const { cutoff, ratio } = result.configs[0] ?? { cutoff: 1, ratio: 2.55 };
+  let min = { kmer: first, coverage: coverage[first] ?? 0 };
+  let step = { kmer: first + 1, ratio: 0 };
+  for (let j = first; j <= last; j++) {
+    if (coverage[j] < min.coverage) min = { kmer: j, coverage: coverage[j] };
+    if (j > first) {
+      const a = coverage[j - 1], b = coverage[j];
+      const r = a > 0 && b > 0 ? Math.max(a / b, b / a) : 0;
+      if (r > step.ratio) step = { kmer: j, ratio: round3(r) };
+    }
+  }
+  const at = row.position >= 0 ? row.position : step.kmer;
+  const window = [];
+  for (let j = Math.max(0, at - WINDOW); j <= Math.min(coverage.length - 1, at + WINDOW); j++) {
+    const previous = j > 0 ? coverage[j - 1] : null;
+    window.push({ kmer: j, coverage: coverage[j], ratioToPrevious: previous ? round3(coverage[j] / previous) : null, onPath: j >= first && j <= last });
+  }
+  return {
+    setting: { cutoff, ratio },
+    path: { firstKmer: first, lastKmer: last, minCoverage: min, largestStep: step },
+    window: { centre: at, reason: row.position >= 0 ? "failing step" : "largest step on the path", kmers: window },
+    atRatioHotspot: row.position >= 0 && result.ratioHotspots.some((spot) => spot.kmer === row.position)
+  };
+}
 
 function settingSpec(setting: DecoderSetting) {
   const waive = setting.waive.length ? setting.waive.join("+") : "-";
@@ -251,22 +323,58 @@ export class AgentEvidenceStore {
           { failure, order: "file order", offset, limit, matchedTotal: matching.length, truncated: offset > 0 || offset + limit < matching.length },
           matching.slice(offset, offset + limit));
       },
-      findDecodability: (name) => {
-        const { result } = cachedDecoder();
-        const matching = result.rows.filter((row) => row.name === name);
+      findDecodability: async (names, signal) => {
+        const { result, file } = cachedDecoder();
+        const wanted = new Set(names);
+        const matching = result.rows.filter((row) => wanted.has(row.name)).slice(0, AGENT_LIMITS.batchRows);
+        const found = new Set(matching.map((row) => row.name));
+        const view = decoderView(result, { names: [...wanted], matchedTotal: matching.length, truncated: matching.length >= AGENT_LIMITS.batchRows }, matching);
+        // Coverage around each failure is extra evidence; without it the verdicts still stand.
+        let coverage: Map<string, number[]> | null = null;
+        let unavailable: string | null = null;
+        if (!dataset || !kernel) unavailable = "no loaded read index";
+        else if (scope.indexScope === "reference") unavailable = "Bloom encoded sequence mode";
+        else if (matching.length) {
+          try {
+            const sequences = await readReferenceSequences(file, found, signal);
+            coverage = new Map();
+            for (const name of found) {
+              const sequence = sequences.get(name);
+              if (!sequence || !/^[ACGT]+$/.test(sequence) || sequence.length > AGENT_LIMITS.sequenceBases) continue;
+              const profile = await query(`sequence ${sequence}`, signal);
+              if (profile.type === "sequence" && Array.isArray(profile.coverages)) coverage.set(name, (profile.coverages as Array<{ coverage: number }>).map((item) => item.coverage));
+            }
+          } catch (error) {
+            signal.throwIfAborted();
+            assertCurrent();
+            unavailable = "the strand coverage could not be read";
+          }
+        }
+        assertCurrent();
         return {
-          ...decoderView(result, { name, matchedTotal: matching.length, truncated: matching.length > AGENT_LIMITS.batchRows }, matching.slice(0, AGENT_LIMITS.batchRows)),
-          unmatched: matching.length ? [] : [name]
+          ...view,
+          rows: view.rows.map((row, i) => {
+            const values = coverage?.get(matching[i].name);
+            return values ? { ...row, evidence: strandCoverageEvidence(values, matching[i], result) } : row;
+          }),
+          coverageEvidence: unavailable ? `unavailable: ${unavailable}` : "coverage of each strand's path k-mers in the loaded index, as the decoder's walk sees it",
+          unmatched: [...wanted].filter((name) => !found.has(name))
         };
       },
       evaluateDecoderSettings: async (settings, signal) => {
         const { result: { primerFront, indexLength, pathLength }, file } = cachedDecoder();
         const command = decodabilityCommand({ primerFront, indexLength, pathLength }, settings, file);
         const result = adoptDecodability(await query(command, signal, DECODABILITY_TIMEOUT_MS));
+        const base = result.configs[0];
         return {
           ...scope,
           total: result.total, seedKmer: result.seedKmer, pathKmers: result.pathKmers,
-          configs: result.configs, hotspotsOfFirstSetting: result.ratioHotspots, ratioFailuresOfFirstSetting: result.ratioFailures,
+          configs: result.configs.map((config) => ({
+            ...config,
+            changeFromFirstSetting: config.decodable - base.decodable,
+            fractionDecodable: round3(config.decodable / Math.max(1, result.total))
+          })),
+          hotspotsOfFirstSetting: result.ratioHotspots, ratioFailuresOfFirstSetting: result.ratioFailures,
           limits: "An upper bound once the decoder's path budget is exhausted at wide ratios. Relaxing the cutoff also admits rare CRC collisions, which are not modelled."
         };
       }
