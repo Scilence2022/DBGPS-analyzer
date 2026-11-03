@@ -3,7 +3,8 @@ import type { DStoreQCApi } from "./preload";
 import type { AgentProgress, AgentRun, AgentStatus, AgentToolTrace } from "./agent-types";
 import {
   agentSuggestions, compactTrace, createThread, deriveThreadTitle, describeToolCall, linkifyDnaCode, matchSlashCommands,
-  normalizeThreadStore, parseSlashCommand, profileSeries, relativeTime, THREAD_LIMITS, TOOL_LABELS, toolResultFacts, toolTargets,
+  normalizeThreadStore, parseSlashCommand, profileSeries, relativeTime, summarizeVerification, THREAD_LIMITS, TOOL_LABELS, toolResultFacts, toolTargets,
+  verificationLabel,
   type ChatMessage, type ChatMessageMeta, type ChatMode, type ChatThread, type CompactTrace, type SlashAction, type SlashCommand,
   type Suggestion, type ThreadStore, type ToolTarget
 } from "./agent-ui";
@@ -2830,6 +2831,14 @@ function attachMessageActions(bubble: HTMLElement, message: ChatMessage, index: 
     badge.textContent = message.meta.stopReason.replaceAll("_", " ");
     meta.appendChild(badge);
   }
+  if (message.role === "assistant" && message.meta?.verification) {
+    const label = verificationLabel(message.meta.verification);
+    const badge = document.createElement("span");
+    badge.className = `verify-badge ${label.tone}`;
+    badge.textContent = label.text;
+    badge.title = label.title;
+    meta.appendChild(badge);
+  }
   row.appendChild(meta);
   bubble.appendChild(row);
   renderIcons();
@@ -3389,7 +3398,7 @@ async function sendMessage(content: string, mode: ChatMode, command?: string) {
       finalizeAssistant(result.content, {
         persist: run.stopReason === "completed",
         error: run.stopReason === "error",
-        meta: { ...base, stopReason: run.stopReason, snapshotId: run.snapshot.id, trace: compactTrace(run.trace) }
+        meta: { ...base, stopReason: run.stopReason, snapshotId: run.snapshot.id, trace: compactTrace(run.trace), verification: summarizeVerification(run.verification, Boolean(run.draft)) }
       });
     } else if (result.canceled) {
       const partial = activeChat?.text ?? "";
